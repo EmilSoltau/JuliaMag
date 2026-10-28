@@ -2,7 +2,7 @@
 
 julia_version = "1.12.7"
 manifest_format = "2.0"
-project_hash = "401c3df20eef29c0f19ebfd2c2d8554c3fb2cd56"
+project_hash = "34ddc09c51e3477b036690c78995caad7b446059"
 
 [[deps.Dates]]
 deps = ["Printf"]
@@ -22,7 +22,7 @@ version = "1.14.4"
     ArrowTypes = "31f734f8-188a-4ce0-8406-c8a06bd891cd"
 
 [[deps.JuliaMagCore]]
-deps = ["JSON3", "Mmap", "StructTypes"]
+deps = ["JSON3", "Mmap", "Parsers", "StructTypes"]
 path = "JuliaMagCore"
 uuid = "133f1fd6-5f53-418f-9a68-c205e5f9c1d6"
 version = "0.1.0"

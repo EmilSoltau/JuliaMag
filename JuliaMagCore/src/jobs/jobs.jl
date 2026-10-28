@@ -136,6 +136,7 @@ function finish_job!(s::Session, job::Job, items::Vector{ProjectItem}, before::S
             end
             filter!(it -> !(it.id in s.busy), old)
         end
+        merge!(job.args, ctx.args)
         try
             foreach(it -> isempty(it.made_by) && (it.made_by = job.id), new)
             swap_items!(p, old, new)

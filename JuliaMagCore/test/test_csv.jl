@@ -207,6 +207,31 @@ end
     end
     @test e isa ToolError && occursin("nope", e.msg)
     @test_throws ToolError save_template(s, "///", layout)
+    # Another name with the same file name is refused; the same name replaces.
+    e2 = try
+        save_template(s, "survey 2024 a", layout); nothing
+    catch err
+        err
+    end
+    @test e2 isa ToolError && occursin("Survey 2024 / A", e2.msg)
+    save_template(s, "Survey 2024 / A", CsvLayout(layout; crs = "EPSG:28355"))
+    @test load_template(s, "Survey 2024 / A").crs == "EPSG:28355"
+    @test_throws ToolError load_template(s, "survey 2024 a")
+    # A template file with a bad layout is refused when it is loaded.
+    t = JuliaMagCore.layout_dict(CsvLayout(layout; x = "NOPE"))
+    JuliaMagCore.write_json_atomic(joinpath(s.project.folder, "templates", "badx.json"),
+                                   Dict("version" => 1, "name" => "badx", "layout" => t))
+    e3 = try
+        load_template(s, "badx"); nothing
+    catch err
+        err
+    end
+    @test e3 isa ToolError && occursin("x column NOPE", e3.msg)
+    # A template from before the decimal field reads as '.'.
+    delete!(t, "decimal"); t["x"] = layout.x
+    JuliaMagCore.write_json_atomic(joinpath(s.project.folder, "templates", "old.json"),
+                                   Dict("version" => 1, "name" => "old", "layout" => t))
+    @test load_template(s, "old").decimal == '.'
     # A broken template file is a plain error too.
     write(joinpath(s.project.folder, "templates", "bad.json"), "{ not json")
     @test_throws ToolError load_template(s, "bad")
@@ -221,11 +246,13 @@ end
     catch e
         e isa ToolError ? e.msg : "not a ToolError: $e"
     end
-    @test occursin("x", bad(CsvLayout(base; x = "NOPE")))
+    @test occursin("x column NOPE", bad(CsvLayout(base; x = "NOPE")))
     @test occursin("line column", bad(CsvLayout(base; line_column = "")))
     @test occursin("delimiter", bad(CsvLayout(base; delimiter = '"')))
     @test occursin("first data row", bad(CsvLayout(base; first_data_row = 1)))
     @test occursin("columns", bad(CsvLayout(base; fixed_widths = [3, 4])))
+    @test occursin("decimal", bad(CsvLayout(base; decimal = ',')))
+    @test occursin("decimal", bad(CsvLayout(base; delimiter = ';', decimal = 'x')))
     @test isempty(s.project.items)
     @test isempty(readdir(joinpath(s.project.folder, "databases")))
     @test_throws ToolError sniff_csv(joinpath(mktempdir(), "missing.csv"))
@@ -242,6 +269,9 @@ end
         j2 = import_file(s, testdata("lines.csv"); mode = "append", target = id, template = "lines")
         wait_job(j2)
         @test status(j2) == JOB_DONE
+        # The job records the layout it used, so a rerun does not depend on the template.
+        @test j2.args["layout"] == layout_json(sniff_csv(testdata("lines.csv")))
+        @test s.history[end].args["layout"] == j2.args["layout"]
         db = database(s.project, id)
         @test [line_name(l.id) for l in db.lines] == ["L1001", "T2001", "L1001.1", "T2001.1"]
         @test undo!(s)
@@ -268,6 +298,9 @@ end
         @test occursin("import_file(s, $(repr(testdata("units.csv"))); layout = ", script_text(s))
         j6 = rerun!(s, j5); wait_job(j6)
         @test status(j6) == JOB_DONE
+        rm(joinpath(s.project.folder, "templates", "lines.json"))
+        j7 = rerun!(s, j2; args = merge(j2.args, Dict("mode" => "new"))); wait_job(j7)
+        @test status(j7) == JOB_DONE
         @test importer_for("a.TSV").id == "import.csv" && importer_for("b.dat").id == "import.csv"
         @test [st.key for st in importer_for("a.csv").settings] == ["mode", "name", "target", "template", "layout", "crs"]
     end
@@ -311,4 +344,77 @@ end
            t = 0.0; for k in 2:n; t += something(JuliaMagCore.field_number(sp, s, k), 0.0); end; t)
     @test f() ≈ 500000.5 + 7000000.25 - 12500 + 4.5
     @test (@allocated f()) == 0
+    # The decimal comma path.
+    cp = JuliaMagCore.FieldSplitter(CsvLayout(; delimiter = ';', decimal = ','), 8)
+    c = "L1001;500000,5;7000000,25;-12,5e3;\"4,5\""
+    g() = (n = JuliaMagCore.split_fields!(cp, c, 1, ncodeunits(c));
+           t = 0.0; for k in 2:n; t += something(JuliaMagCore.field_number(cp, c, k), 0.0); end; t)
+    @test g() ≈ 500000.5 + 7000000.25 - 12500 + 4.5
+    @test (@allocated g()) == 0
+    # With a decimal comma, a point or a second comma is not a number.
+    for bad in ("1.5", "1,5,3", "1,5x", "")
+        t = "A;$bad"
+        JuliaMagCore.split_fields!(cp, t, 1, ncodeunits(t))
+        @test JuliaMagCore.field_number(cp, t, 2) === nothing
+    end
+end
+
+@testset "csv fixed width with leading blanks" begin
+    # Widths 6, 10, 8. The first column starts with blanks; row 3 has an empty first field.
+    cols = [CsvColumn("LINE", :line, String, ""), CsvColumn("X", :data, Float64, ""),
+            CsvColumn("MAG", :data, Float64, "")]
+    layout = CsvLayout(; fixed_widths = [6, 10, 8], columns = cols, line_column = "LINE")
+    @test preview_rows(testdata("fixed_blank.dat"), layout)[1] == ["L10", "500000.0", "50000.1"]
+    s = fresh_session()
+    r = import_csv(s, testdata("fixed_blank.dat"), layout)
+    db = database_of(s, r)
+    @test [line_name(l.id) for l in db.lines] == ["L10", "L20"]
+    @test collect(read_channel(db, LineId(LINE, 10, 0), "X")) == [500000.0, 500010.0, 500020.0]
+    @test collect(read_channel(db, LineId(LINE, 10, 0), "MAG")) == [50000.1, 50000.2, 50000.3]
+    @test collect(read_channel(db, LineId(LINE, 20, 0), "MAG")) == [50000.4]
+    # Only the empty line value of row 3 is a warning.
+    @test [w.file_line for w in r.warnings] == [3]
+    @test occursin("line value", r.warnings[1].message)
+end
+
+@testset "csv decimal comma" begin
+    layout = sniff_csv(testdata("decimal_comma.csv"))
+    @test layout.delimiter == ';' && layout.decimal == ','
+    @test [c.eltype for c in layout.columns] == [Float64, Float64, Float64, String]
+    @test layout.x == "X" && layout.y == "Y"
+    s = fresh_session()
+    r = import_csv(s, testdata("decimal_comma.csv"), layout)
+    db = database_of(s, r)
+    @test isempty(r.warnings) && r.rows == 3
+    L = only(db.lines).id
+    @test collect(read_channel(db, L, "X")) == [500000.5, 500010.5, 500020.5]
+    @test collect(read_channel(db, L, "Y")) == [7000000.25, 7000000.25, 7000000.25]
+    mag = read_channel(db, L, "MAG")
+    @test mag[1:2] == [50000.1, -1500.0] && isnan(mag[3])
+    @test db.pairs[1].x == "X" && db.pairs[1].y == "Y" && channel(db, "X").role == ROLE_X
+    # Only data rows, no heading: the semicolon still wins over the comma.
+    mktempdir() do dir
+        f = joinpath(dir, "d.csv")
+        write(f, "1,5;2,25;3,1\n4,5;5,25;6,1\n")
+        g = sniff_csv(f)
+        @test g.delimiter == ';' && g.decimal == ',' && all(c -> c.eltype === Float64, g.columns)
+        # A file with points keeps '.'.
+        write(f, "A;B\n1.5;2,5\n")
+        @test sniff_csv(f).decimal == '.'
+        # The template and the layout JSON keep the decimal mark.
+        @test JuliaMagCore.layout_from_json(layout_json(layout), "x").decimal == ','
+    end
+end
+
+@testset "csv text after a closing quote" begin
+    mktempdir() do dir
+        f = joinpath(dir, "q.csv")
+        write(f, "A,B\n1,\"x\"\n2,\"y\"z\n3,\"w\" \n")
+        s = fresh_session()
+        r = import_csv(s, f, sniff_csv(f))
+        db = database_of(s, r)
+        @test read_channel(db, db.lines[1].id, "B") == ["x", "y", "w"]
+        @test [w.file_line for w in r.warnings] == [3]
+        @test occursin("closing quote", r.warnings[1].message) && occursin("column B", r.warnings[1].message)
+    end
 end

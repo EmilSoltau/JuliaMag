@@ -5,6 +5,7 @@ version = "0.1.0"
 [deps]
 JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
 Mmap = "a63ad114-7e13-5084-954f-fe012c677804"
+Parsers = "69de0a69-1ddd-5017-9359-2bf0b02dc9f0"
 StructTypes = "856f2bd8-1eba-4b0a-8007-ebc267875bd4"
 
 [compat]
@@ -12,6 +13,7 @@ Aqua = "0.8"
 JET = "0.13"
 JSON3 = "1"
 Mmap = "1"
+Parsers = "2"
 StructTypes = "1"
 Test = "1"
 julia = "1.12"

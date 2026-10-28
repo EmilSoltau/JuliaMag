@@ -48,9 +48,11 @@ struct JobContext
     undos::Vector{NTuple{3,Function}}
     "Ids of existing items that the noted steps change."
     touched::Vector{String}
+    "Args to add to the job's record, from `note_job_args!`."
+    args::Dict{String,Any}
 end
 
-JobContext() = JobContext(String[], String[], NTuple{3,Function}[], String[])
+JobContext() = JobContext(String[], String[], NTuple{3,Function}[], String[], Dict{String,Any}())
 
 const JOB_CONTEXT_KEY = :juliamag_job_context
 
@@ -82,6 +84,20 @@ If the job fails, the item is taken out and its files are deleted.
 function note_job_item!(id::AbstractString)
     c = job_context()
     c === nothing || push!(c.items, String(id))
+    return nothing
+end
+
+"""
+    note_job_args!(args)
+
+Tell the running job to add `args` to the args it records, when it is done.
+An importer uses it to record what it worked out, such as the layout it read
+from a template, so the job can run again the same way. Outside a job this
+does nothing.
+"""
+function note_job_args!(args::AbstractDict)
+    c = job_context()
+    c === nothing || merge!(c.args, Dict{String,Any}(String(k) => v for (k, v) in args))
     return nothing
 end
 
