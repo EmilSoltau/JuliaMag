@@ -1,20 +1,21 @@
 # Channel statistics (spec 9.3, "Statistics pane").
 #
 # `channel_stats` reads the channel in blocks with a `block_reader`, so memory
-# stays flat however long the lines are. It reads the data three times:
+# stays flat however long the lines are. It reads the data at least three times:
 #
 # 1. Count, missing, min, max, and the sum for the mean (a compensated sum,
 #    so the mean is as exact as one division allows).
 # 2. The histogram, and the sum of squared distances from the mean for the
 #    standard deviation (the two-pass method, with its small correction term).
-# 3. Finer bins inside the histogram bins that hold the median, p5 and p95.
-#    Each such bin is cut into 1024 fine bins that also note their smallest and
-#    largest value.
+# 3. Median, p5 and p95: passes that narrow a value range around each wanted
+#    rank until few enough values are left to collect (see "exact quantiles").
+#    Usually one or two passes; one extreme value adds at most one.
 #
-# Precision: median, p5 and p95 are within one fine bin, (max - min) / (bins * 1024),
-# of the exact value. They are exact when each needed value is alone in its
-# fine bin, as with small data. The quantile is the one `Statistics.quantile`
-# gives by default: linear between the two nearest values in sorted order.
+# Precision: median, p5 and p95 are exact. The quantile is the one
+# `Statistics.quantile` gives by default: linear between the two nearest values
+# in sorted order. (Only data made to defeat the fine bins, which still has more
+# than 100,000 values in the range after 64 passes, gets a value read between
+# the ends of that range, which is then about 1024^64 times narrower than max - min.)
 #
 # Values that are missing or not finite (NaN, Inf, -Inf) count as missing.
 # Every value of an array channel counts as one value.
@@ -45,7 +46,7 @@ end
 "Rows read at a time."
 const STATS_BLOCK = 1 << 16
 
-"Fine bins per histogram bin in the third pass."
+"Fine bins per refining pass of the quantiles."
 const STATS_FINE = 1024
 
 "The quantiles `ChannelStats` holds, in field order: median, p5, p95."
@@ -112,41 +113,6 @@ function add_value!(p::SecondPass, x::Float64)
     return nothing
 end
 
-"The fine bins of one histogram bin: counts and the smallest and largest value in each."
-struct FineBins
-    bin::Int
-    start::Float64
-    width::Float64
-    count::Vector{Int}
-    lo::Vector{Float64}
-    hi::Vector{Float64}
-end
-
-FineBins(b::Bins, k::Int) =
-    FineBins(k, b.min + (k - 1) * b.width, b.width / STATS_FINE, zeros(Int, STATS_FINE),
-             fill(Inf, STATS_FINE), fill(-Inf, STATS_FINE))
-
-"Pass 3: fine bins for the histogram bins that hold the wanted ranks."
-struct ThirdPass
-    bins::Bins
-    fine::Vector{FineBins}
-end
-
-function add_value!(p::ThirdPass, x::Float64)
-    isfinite(x) || return nothing
-    k = bin_of(p.bins, x)
-    for f in p.fine
-        f.bin == k || continue
-        j = f.width > 0 ? floor((x - f.start) / f.width) : 0.0
-        i = j < 0 ? 1 : j >= STATS_FINE ? STATS_FINE : Int(j) + 1
-        f.count[i] += 1
-        x < f.lo[i] && (f.lo[i] = x)
-        x > f.hi[i] && (f.hi[i] = x)
-        break
-    end
-    return nothing
-end
-
 "Feed every value of the channel on `lines` to `pass`, one block at a time."
 function read_pass!(pass, db::LineDatabase, name::AbstractString, lines::Vector{LineInfo})
     r = block_reader(db, name)
@@ -168,8 +134,6 @@ function add_block!(pass, block::AbstractArray)
     return nothing
 end
 
-# ---- quantiles -------------------------------------------------------------
-
 "The ranks (from 1) whose values give quantile `q` of `n` values, and the weight of the second."
 function quantile_ranks(n::Int, q::Float64)::Tuple{Int,Int,Float64}
     h = (n - 1) * q + 1
@@ -177,30 +141,135 @@ function quantile_ranks(n::Int, q::Float64)::Tuple{Int,Int,Float64}
     return lo, min(lo + 1, n), h - lo
 end
 
-"The histogram bin that holds rank `r`, and the rank within that bin."
-function bin_of_rank(hist::Vector{Int}, r::Int)::Tuple{Int,Int}
-    seen = 0
-    for (k, c) in enumerate(hist)
-        seen + c >= r && return k, r - seen
-        seen += c
-    end
-    throw(ArgumentError("rank $r is past the $seen values of the histogram"))
+# ---- exact quantiles -------------------------------------------------------
+#
+# A value of known rank is found by narrowing a value range [lo, hi] that holds it.
+# The count of values in the range, and the rank of the wanted one among them,
+# are known.
+# - With few enough values in the range (`STATS_COLLECT`), a pass collects them,
+#   and a partial sort gives the exact value.
+# - Else a pass counts the values of the range in `STATS_FINE` fine bins, noting
+#   the smallest and largest value of each. The fine bin that holds the rank
+#   becomes the new range, cut to its smallest and largest value. So the range
+#   shrinks to where the data is, and one extreme value costs at most one pass.
+# A rank that is the first or last value of its fine bin, or a fine bin of equal
+# values, is exact at once. The fine bins are ordered by value, so the values in
+# a fine bin are exactly the data values from its smallest to its largest.
+
+"Most values collected for one wanted rank."
+const STATS_COLLECT = 100_000
+
+"""
+Most refining passes. Only data made to defeat the fine bins needs more (each
+pass cuts the range at least 1024 times). Then the value is read between the
+ends of the last range, and is within that range of the exact value.
+"""
+const STATS_MAX_PASSES = 64
+
+"A search for the value of one rank: the range that holds it, the count of values in it, and the rank among them."
+mutable struct RankSearch
+    lo::Float64
+    hi::Float64
+    count::Int
+    rank::Int
+    value::Float64
+    done::Bool
+    "Collected values (when the range holds at most `STATS_COLLECT` values)."
+    values::Vector{Float64}
+    "Fine bins (when it holds more): count, smallest and largest value of each."
+    fcount::Vector{Int}
+    flo::Vector{Float64}
+    fhi::Vector{Float64}
 end
 
-"The value of rank `r` within the fine bins: exact when it is alone, else read between the fine bin's ends."
-function value_of_rank(f::FineBins, r::Int)::Float64
+RankSearch(lo::Float64, hi::Float64, count::Int, rank::Int) =
+    RankSearch(lo, hi, count, rank, NaN, false, Float64[], Int[], Float64[], Float64[])
+
+collecting(r::RankSearch) = r.count <= STATS_COLLECT
+
+"One pass over the data, for the searches that are not done."
+struct RefinePass
+    searches::Vector{RankSearch}
+end
+
+function add_value!(p::RefinePass, x::Float64)
+    isfinite(x) || return nothing
+    for r in p.searches
+        (x < r.lo || x > r.hi) && continue
+        if collecting(r)
+            push!(r.values, x)
+        else
+            w = r.hi / STATS_FINE - r.lo / STATS_FINE        # divide first: no overflow
+            j = w > 0 ? floor((x - r.lo) / w) : 0.0             # 0 only for tiny subnormal ranges
+            i = j < 0 ? 1 : j >= STATS_FINE ? STATS_FINE : Int(j) + 1
+            r.fcount[i] += 1
+            x < r.flo[i] && (r.flo[i] = x)
+            x > r.fhi[i] && (r.fhi[i] = x)
+        end
+    end
+    return nothing
+end
+
+"Make the search ready for its next pass."
+function prepare!(r::RankSearch)
+    if collecting(r)
+        r.values = sizehint!(Float64[], r.count)
+    else
+        r.fcount = zeros(Int, STATS_FINE)
+        r.flo = fill(Inf, STATS_FINE)
+        r.fhi = fill(-Inf, STATS_FINE)
+    end
+    return nothing
+end
+
+changed_error() = DatabaseError("the channel changed while its statistics were read")
+
+"After a pass: find the value, or narrow the range. With `last`, the value must be found now."
+function settle!(r::RankSearch, last::Bool)
+    if collecting(r)
+        length(r.values) == r.count || throw(changed_error())
+        r.value, r.done = partialsort!(r.values, r.rank), true
+        r.values = Float64[]
+        return nothing
+    end
     seen = 0
     for i in 1:STATS_FINE
-        c = f.count[i]
-        if seen + c >= r
-            j = r - seen
-            (c == 1 || j == 1) && return f.lo[i]
-            j == c && return f.hi[i]
-            return f.lo[i] + (f.hi[i] - f.lo[i]) * (j - 1) / (c - 1)
+        c = r.fcount[i]
+        if seen + c >= r.rank
+            j = r.rank - seen
+            if j == 1 || r.flo[i] == r.fhi[i]
+                r.value, r.done = r.flo[i], true
+            elseif j == c
+                r.value, r.done = r.fhi[i], true
+            elseif last
+                r.value, r.done = r.flo[i] + (r.fhi[i] - r.flo[i]) * (j - 1) / (c - 1), true
+            else
+                r.lo, r.hi, r.count, r.rank = r.flo[i], r.fhi[i], c, j
+            end
+            r.fcount, r.flo, r.fhi = Int[], Float64[], Float64[]
+            return nothing
         end
         seen += c
     end
-    throw(ArgumentError("rank $r is past the $seen values of the fine bins"))
+    throw(changed_error())
+end
+
+"""
+The values of the ranks `ranks` (from 1) among the `n` finite values, which lie
+from `lo` to `hi`. Exact (see above). Memory stays below `STATS_COLLECT` values
+per rank.
+"""
+function values_of_ranks(db::LineDatabase, name::AbstractString, ls::Vector{LineInfo}, lo::Float64,
+                         hi::Float64, n::Int, ranks::Vector{Int})::Dict{Int,Float64}
+    searches = Dict{Int,RankSearch}(r => RankSearch(lo, hi, n, r) for r in unique(ranks))
+    for pass in 1:STATS_MAX_PASSES
+        open = RankSearch[r for r in values(searches) if !r.done]
+        isempty(open) && break
+        foreach(prepare!, open)
+        read_pass!(RefinePass(open), db, name, ls)
+        foreach(r -> settle!(r, pass == STATS_MAX_PASSES), open)
+    end
+    return Dict{Int,Float64}(k => r.value for (k, r) in searches)
 end
 
 # ---- channel_stats ---------------------------------------------------------
@@ -211,8 +280,8 @@ end
 Statistics of a channel of numbers over the lines with ids `lines`.
 Reads the channel in blocks, so memory stays flat. Count, missing, min, max and
 mean are exact. The standard deviation uses two passes. Median, p5 and p95 are
-within `(max - min) / (bins * 1024)` of the exact value (see the top of
-`statistics.jl`). A channel with no values gives count 0 and `NaN`s.
+exact; they take one or more extra passes (see the top of `statistics.jl`).
+A channel with no values gives count 0 and `NaN`s.
 
 Throws `DatabaseError` for an unknown channel or line, and `ArgumentError` for
 a text channel or fewer than 1 bin.
@@ -236,22 +305,17 @@ function channel_stats(db::LineDatabase, name::AbstractString;
     qs = if p1.min == p1.max
         fill(p1.min, length(STATS_QUANTILES))
     else
-        quantiles(db, name, ls, b, p2.hist, n)
+        quantiles(db, name, ls, p1.min, p1.max, n)
     end
     return ChannelStats(n, p1.missing, p1.min, p1.max, mean, std, qs[1], qs[2], qs[3], p2.hist, edges)
 end
 
-"The values of `STATS_QUANTILES`, from a third pass with fine bins."
-function quantiles(db::LineDatabase, name::AbstractString, ls::Vector{LineInfo}, b::Bins,
-                   hist::Vector{Int}, n::Int)::Vector{Float64}
+"The values of `STATS_QUANTILES`, exact (see `values_of_ranks`)."
+function quantiles(db::LineDatabase, name::AbstractString, ls::Vector{LineInfo}, lo::Float64, hi::Float64,
+                   n::Int)::Vector{Float64}
     ranks = [quantile_ranks(n, q) for q in STATS_QUANTILES]
-    wanted = unique!([first(bin_of_rank(hist, r)) for (lo, hi, _) in ranks for r in (lo, hi)])
-    p3 = read_pass!(ThirdPass(b, [FineBins(b, k) for k in wanted]), db, name, ls)
-    function value(r::Int)
-        k, j = bin_of_rank(hist, r)
-        return value_of_rank(p3.fine[findfirst(f -> f.bin == k, p3.fine)::Int], j)
-    end
-    return Float64[(v = value(lo); w == 0 ? v : v + w * (value(hi) - v)) for (lo, hi, w) in ranks]
+    v = values_of_ranks(db, name, ls, lo, hi, n, Int[r for (a, b, _) in ranks for r in (a, b)])
+    return Float64[w == 0 ? v[a] : v[a] + w * (v[b] - v[a]) for (a, b, w) in ranks]
 end
 
 # ---- the tool --------------------------------------------------------------

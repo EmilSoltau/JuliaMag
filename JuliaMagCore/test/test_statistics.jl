@@ -31,15 +31,32 @@ end
         @test st.mean ≈ sum(good) / n rtol = 1e-14
         m = sum(good) / n
         @test st.std ≈ sqrt(sum((x - m)^2 for x in good) / (n - 1)) rtol = 1e-12
-        width = (good[end] - good[1]) / (bins * 1024)
-        @test abs(st.median - exact_quantile(good, 0.5)) <= width
-        @test abs(st.p5 - exact_quantile(good, 0.05)) <= width
-        @test abs(st.p95 - exact_quantile(good, 0.95)) <= width
+        @test st.median == exact_quantile(good, 0.5)
+        @test st.p5 == exact_quantile(good, 0.05)
+        @test st.p95 == exact_quantile(good, 0.95)
         @test length(st.histogram) == bins && sum(st.histogram) == n
         @test length(st.edges) == bins + 1 && issorted(st.edges)
         # the histogram counts agree with the edges
         @test st.histogram[1] == count(x -> x < st.edges[2], good) || bins == 1
     end
+end
+
+@testset "channel statistics: one extreme value does not spoil the quantiles" begin
+    rng = TestRng(11)
+    v = [50000.0 + 100.0 * -log(1.0 - next_unit!(rng)) for _ in 1:200_000]
+    push!(v, 1e30)
+    (; db) = make_db_with(V = v)
+    good = sort(v)
+    st = channel_stats(db, "V")
+    @test st.count == 200_001 && st.max == 1e30
+    @test st.median == exact_quantile(good, 0.5)
+    @test st.p5 == exact_quantile(good, 0.05)
+    @test st.p95 == exact_quantile(good, 0.95)
+    # many equal values around the median are exact too
+    w = vcat(fill(7.0, 150_000), [-1e300, 1e300], collect(1.0:10.0))
+    st = channel_stats(make_db_with(V = w).db, "V")
+    sw = sort(w)
+    @test (st.median, st.p5, st.p95) == (exact_quantile(sw, 0.5), exact_quantile(sw, 0.05), exact_quantile(sw, 0.95))
 end
 
 @testset "channel statistics: special cases" begin
@@ -86,7 +103,7 @@ end
     t = make_db_with(V = collect(1.0:n))
     st = channel_stats(t.db, "V")
     @test st.count == n && st.mean == (n + 1) / 2 && st.max == n
-    @test abs(st.median - (n + 1) / 2) <= (n - 1) / (64 * 1024)
+    @test st.median == (n + 1) / 2
 end
 
 @testset "statistics tool" begin

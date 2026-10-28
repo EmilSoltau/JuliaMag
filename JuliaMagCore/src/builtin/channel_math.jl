@@ -1,8 +1,10 @@
 # Channel Math (spec 9.4): the user writes `OUT = <expression>` over channel
 # names, such as `MAG_IGRF = MAG - IGRF`, and the result goes to channel OUT.
 #
-# Safety: the text is never run as Julia code. `parse_channel_expr` parses it
-# with `Meta.parse` and checks every part against a short list. Allowed are
+# Safety: the text is never run as Julia code. `parse_channel_expr` first
+# refuses text that is too long or nested too deep (see `expr_text_problem`),
+# so no stack can overflow. It then parses it with `Meta.parseall`, refuses a
+# tree nested more than 200 deep, and checks every part against a short list. Allowed are
 # number literals, channel names, the constants `pi`, `e`, `NaN` and `Inf`
 # (ruling R14; `NaN` masks values, such as `ifelse(ALT > 200, NaN, MAG)`), and calls to
 #
@@ -109,6 +111,24 @@ function backtick_name(x)::Union{Nothing,String}
     return s isa String ? s : nothing
 end
 
+"Most levels of calls in a checked expression, so checking and computing it never overflow the stack."
+const CM_MAX_DEPTH = 200
+
+"The levels of `Expr` in a parsed tree, counted without recursion."
+function tree_depth(x)::Int
+    deepest = 0
+    stack = Tuple{Any,Int}[(x, 1)]
+    while !isempty(stack)
+        node, d = pop!(stack)
+        node isa Expr || continue
+        deepest = max(deepest, d)
+        for a in node.args
+            a isa Expr && push!(stack, (a, d + 1))
+        end
+    end
+    return deepest
+end
+
 "Throw the message for a name that is not a channel."
 function unknown_channel(name::String, channels::Vector{String})
     k = findfirst(c -> lowercase(c) == lowercase(name), channels)
@@ -137,11 +157,14 @@ OUT may be a new channel name.
 
 Throws `ToolError` with a plain message for a syntax error, an unknown name,
 a call to a function that is not allowed, or any other form, such as field
-access, macros, text, ranges or keyword arguments.
+access, macros, text, ranges or keyword arguments. Text over 10,000 characters,
+or nested too deep, is refused before it is parsed.
 The text is only parsed, never run.
 """
 function parse_channel_expr(text::String, channels::Vector{String})::Union{Expr,Symbol}
     isempty(strip(text)) && cm_error("The expression is empty.")
+    problem = expr_text_problem(text, "The expression")
+    problem === nothing || cm_error(problem)
     top = Meta.parseall(text)
     parts = Any[a for a in top.args if !(a isa LineNumberNode)]
     for a in parts
@@ -154,9 +177,10 @@ function parse_channel_expr(text::String, channels::Vector{String})::Union{Expr,
     ex = parts[1]
     (ex isa Expr && ex.head === :(=) && length(ex.args) == 2) || cm_error(CM_FORM)
     lhs, rhs = ex.args
-    target = lhs isa Symbol ? lhs : backtick_name(lhs)
-    target === nothing && cm_error("The left side of = must be one channel name, such as MAG_IGRF.")
+    target = lhs isa Symbol ? String(lhs) : backtick_name(lhs)
+    (target === nothing || isempty(target)) && cm_error("The left side of = must be one channel name, such as MAG_IGRF.")
     (rhs isa Expr && rhs.head === :(=)) && cm_error("Use only one = in the expression.")
+    tree_depth(rhs) > CM_MAX_DEPTH && cm_error("The expression is nested more than $CM_MAX_DEPTH deep.")
     checked, _ = cm_check(rhs, channels)
     return Expr(:(=), Symbol(target), checked)
 end
@@ -181,6 +205,7 @@ function cm_check(x, channels::Vector{String})::Tuple{Any,Symbol}
     x isa Expr || cm_error("This part of the expression is not allowed: $(first(string(x), 60)).")
     name = backtick_name(x)
     if name !== nothing
+        isempty(name) && cm_error("Empty backticks are not a channel name.")
         name in channels || unknown_channel(name, channels)
         return (Symbol(name), :num)
     end

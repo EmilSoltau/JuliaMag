@@ -124,6 +124,37 @@ end
     @test msg("A = MAG'") == "This part of the expression is not allowed: '."
 end
 
+@testset "channel math: deep nesting is refused, never a stack overflow" begin
+    deep_call = "A = " * "sqrt("^10_000 * "MAG" * ")"^10_000
+    deep_brackets = "A = " * "("^100_000 * "MAG" * ")"^100_000
+    msg(text) = try
+        parse_channel_expr(text, ["MAG"])
+        ""
+    catch err
+        err isa ToolError ? err.msg : rethrow()
+    end
+    @test msg(deep_call) == "The expression is too long: it has 60007 characters, and at most 10000 are allowed."
+    @test msg(deep_brackets) == "The expression is too long: it has 200007 characters, and at most 10000 are allowed."
+    @test msg("A = " * "sqrt("^201 * "MAG" * ")"^201) == "The expression has brackets nested more than 200 deep."
+    @test msg("A = " * "- "^1001 * "MAG") == "The expression has more than 1000 operator characters."
+    @test msg("A = " * "MAG^"^400 * "MAG") == "The expression is nested more than 200 deep."
+    @test msg("A = " * "MAG-"^300 * "MAG") == "The expression is nested more than 200 deep."
+    @test parse_channel_expr("A = " * "sqrt("^200 * "MAG" * ")"^200, ["MAG"]) isa Expr    # 200 deep is allowed
+    @test parse_channel_expr("A = " * "("^200 * "MAG" * ")"^200, ["MAG"]) == :(A = MAG)   # plain brackets add no depth
+    @test parse_channel_expr("A = " * "- "^190 * "MAG", ["MAG"]) isa Expr
+    @test parse_channel_expr("A = " * join(fill("MAG", 150), " + "), ["MAG"]) isa Expr  # one flat call
+    # through run_tool: a refusal, not a job, and nothing on stderr
+    (; s, id) = make_db_with(MAG = [1.0])
+    for text in (deep_call, deep_brackets)
+        r = run_tool(s, "database.channel_math"; inputs = Dict("database" => id), expr = text, lines = "all")
+        @test r isa Tuple && r[1] == false && r[3] === nothing
+        @test startswith(r[2], "Expression is too long")
+    end
+    # empty backticks
+    @test msg("`` = MAG") == "The left side of = must be one channel name, such as MAG_IGRF."
+    @test msg("A = `` + MAG") == "Empty backticks are not a channel name."
+end
+
 @testset "channel math: evaluation" begin
     chans = ["X", "Y"]
     ev(text; X = [4.0, -1.0, 0.0, NaN], Y = [2.0, 0.0, 0.0, 1.0]) =

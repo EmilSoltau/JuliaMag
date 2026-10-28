@@ -318,9 +318,53 @@ end
 setting_problem(st::Union{TextSetting,CRSSetting,PairSetting}, x)::Union{Nothing,String} =
     istext(x) ? nothing : "$(st.label) must be text."
 
+# Limits on expression text, checked before it is parsed. Deep nesting would
+# overflow the stack of the Julia parser (and of any code that walks the tree),
+# which can leave the process in a broken state. Within these limits it cannot.
+const MAX_EXPR_CHARS = 10_000
+const MAX_EXPR_BRACKETS = 200
+const MAX_EXPR_OPERATORS = 1000
+
+"A character that may be part of an operator: not a letter, digit, space, `_`, `.`, `,`, bracket or quote."
+is_operator_char(c::Char) =
+    !(isletter(c) || isdigit(c) || isspace(c) || c in "_.,()[]{}\"'`")
+
+"""
+    expr_text_problem(text, what)::Union{Nothing,String}
+
+What makes expression text unsafe to parse, as a sentence that starts with
+`what` (such as `"Expression"`), or `nothing`. The text may have at most
+$MAX_EXPR_CHARS characters, brackets nested at most $MAX_EXPR_BRACKETS deep,
+and at most $MAX_EXPR_OPERATORS operator characters (long prefix or `^`
+chains nest without brackets).
+"""
+function expr_text_problem(text::AbstractString, what::AbstractString)::Union{Nothing,String}
+    n = length(text)
+    n > MAX_EXPR_CHARS &&
+        return "$what is too long: it has $n characters, and at most $MAX_EXPR_CHARS are allowed."
+    depth = 0
+    deepest = 0
+    ops = 0
+    for c in text
+        if c in "([{"
+            depth += 1
+            deepest = max(deepest, depth)
+        elseif c in ")]}"
+            depth = max(depth - 1, 0)
+        elseif is_operator_char(c)
+            ops += 1
+        end
+    end
+    deepest > MAX_EXPR_BRACKETS && return "$what has brackets nested more than $MAX_EXPR_BRACKETS deep."
+    ops > MAX_EXPR_OPERATORS && return "$what has more than $MAX_EXPR_OPERATORS operator characters."
+    return nothing
+end
+
 function setting_problem(st::ExprSetting, x)::Union{Nothing,String}
     istext(x) || return "$(st.label) must be text."
     isempty(strip(x)) && return "$(st.label) is empty."
+    p = expr_text_problem(x, st.label)
+    p === nothing || return p
     ex = Meta.parseall(String(x))
     for a in (ex isa Expr ? ex.args : Any[])
         if a isa Expr && a.head in (:error, :incomplete)

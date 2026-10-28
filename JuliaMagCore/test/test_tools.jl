@@ -91,6 +91,13 @@ end
     @test length(problems) == 13
     @test validate(t, Dict("need" => 1, "n" => 11, "e" => " ", "ext" => [1, 2, 3])) ==
           ["Size must be at most 10.5.", "Expression is empty.", "Area must be four numbers: west, south, east and north."]
+    # text that would overflow the parser's stack is refused before it is parsed
+    @test validate(t, Dict("need" => 1, "e" => "A = " * "("^201 * "B" * ")"^201)) ==
+          ["Expression has brackets nested more than 200 deep."]
+    @test validate(t, Dict("need" => 1, "e" => "A = " * "-"^1001 * "B")) ==
+          ["Expression has more than 1000 operator characters."]
+    @test validate(t, Dict("need" => 1, "e" => "A = " * "B"^10_000)) ==
+          ["Expression is too long: it has 10004 characters, and at most 10000 are allowed."]
     @test validate(t, Dict("need" => Inf, "n" => true, "f" => "B.GRD")) ==
           ["Size must be a number.", "Need must be a finite number."]
     # bad tool descriptions are refused when they are made
