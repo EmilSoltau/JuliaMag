@@ -103,6 +103,7 @@ end
         add_channel!(db, chan("MAG", Float64))
         add_line!(db, lineinfo(1, 2))
         add_line!(db, lineinfo(2, 3))
+        end_line!(db)
         save_meta(db)
         v = read_channel(db, LineId(LINE, 2, 0), "MAG")
         @test v isa SubArray
@@ -118,6 +119,7 @@ end
         add_channel!(db, chan("FLAG", Int16))
         add_line!(db, lineinfo(1, 2))
         add_line!(db, lineinfo(2, 3))
+        end_line!(db)
         L2 = LineId(LINE, 2, 0)
         old = write_channel!(db, L2, "MAG", [1.0, 2.0, 3.0])
         @test all(isnan, old) && old isa Vector{Float64}
@@ -250,5 +252,124 @@ end
         write(f, replace(read(f, String), "\"Float64\"" => "\"Base.Libc.FILE\""))
         e = err(() -> open_database(joinpath(dir, "d")))
         @test e isa DatabaseError && occursin("Base.Libc.FILE", e.msg)
+    end
+end
+
+# Fix round 1: appenders write at a known row, and database.json is the commit point.
+
+mag_db(dir) = (db = create_database(joinpath(dir, "d"), "d");
+               add_channel!(db, chan("MAG", Float64)); add_channel!(db, chan("ALT", Float64)); db)
+L(n) = LineId(LINE, n, 0)
+function append_all!(db, name, xs)
+    apps = open_appenders(db, [name])
+    foreach(x -> append_value!(apps[name], x), xs)
+    close_appenders!(apps)
+end
+
+@testset "database: reads and saves do not move the append position" begin
+    for between in (:read_done, :read_pending, :save)
+        mktempdir() do dir
+            db = mag_db(dir)
+            add_line!(db, lineinfo(1, 2))
+            append_all!(db, "MAG", (1.0, 2.0))
+            add_line!(db, lineinfo(2, 2))
+            between == :read_done && read_channel(db, L(1), "MAG")
+            between == :read_pending && @test all(isnan, read_channel(db, L(2), "MAG"))
+            between == :save && save_meta(db)
+            append_all!(db, "MAG", (3.0, 4.0))
+            @test collect(read_channel(db, L(1), "MAG")) == [1.0, 2.0]
+            @test collect(read_channel(db, L(2), "MAG")) == [3.0, 4.0]
+            save_meta(db)
+            @test collect(read_channel(open_database(joinpath(dir, "d")), L(2), "MAG")) == [3.0, 4.0]
+        end
+    end
+end
+
+@testset "database: a line without data reads as missing and is not grown" begin
+    mktempdir() do dir
+        db = mag_db(dir)
+        add_line!(db, lineinfo(1, 3))
+        @test_throws DatabaseError open_appenders(db, ["MAG", "MAG"])
+        @test all(isnan, read_channel(db, L(1), "MAG"))
+        @test filesize(joinpath(dir, "d", "channels", "MAG.f64")) == 0
+        @test_throws DatabaseError write_value!(db, L(1), "MAG", 1, 1.0)
+        @test_throws DatabaseError write_channel!(db, L(1), "MAG", [1.0, 2.0, 3.0])
+        # Lines added without appenders stay open together; end_line! ends them.
+        add_line!(db, lineinfo(2, 1))
+        @test filesize(joinpath(dir, "d", "channels", "MAG.f64")) == 0
+        end_line!(db)
+        @test filesize(joinpath(dir, "d", "channels", "MAG.f64")) == 4 * 8
+        @test write_value!(db, L(2), "MAG", 1, 5.0) |> isnan
+        # Only one set of appenders at a time.
+        apps = open_appenders(db, ["MAG"])
+        @test_throws DatabaseError open_appenders(db, ["ALT"])
+        close_appenders!(apps)
+    end
+end
+
+@testset "database: open cuts rows that database.json does not cover" begin
+    mktempdir() do dir
+        db = mag_db(dir)
+        add_channel!(db, chan("NOTE", String))
+        add_line!(db, lineinfo(1, 2))
+        apps = open_appenders(db, ["MAG", "NOTE"])
+        foreach(x -> append_value!(apps["MAG"], x), (1.0, 2.0))
+        foreach(x -> append_value!(apps["NOTE"], x), ("a", "b"))
+        close_appenders!(apps)
+        save_meta(db)
+        add_line!(db, lineinfo(2, 3))           # an import that stops before save_meta
+        apps = open_appenders(db, ["MAG", "NOTE"])
+        foreach(x -> append_value!(apps["MAG"], x), (3.0, 4.0, 5.0))
+        foreach(x -> append_value!(apps["NOTE"], x), ("ccc", "d", "e"))
+        close_appenders!(apps)
+        db = open_database(joinpath(dir, "d"))
+        @test length(db.lines) == 1
+        @test collect(read_channel(db, L(1), "MAG")) == [1.0, 2.0]
+        @test all(isnan, read_channel(db, L(1), "ALT"))
+        @test read_channel(db, L(1), "NOTE") == ["a", "b"]
+        ch = joinpath(dir, "d", "channels")
+        @test filesize(joinpath(ch, "MAG.f64")) == 16 && filesize(joinpath(ch, "ALT.f64")) == 16
+        @test filesize(joinpath(ch, "NOTE.off")) == 16 && filesize(joinpath(ch, "NOTE.str")) == 2
+        # The next import continues right after the saved rows.
+        add_line!(db, lineinfo(3, 1))
+        append_all!(db, "MAG", (6.0,))
+        @test collect(read_channel(db, L(3), "MAG")) == [6.0]
+
+        # A file shorter than database.json says is damage, not something to hide.
+        save_meta(db)
+        open(io -> truncate(io, 8), joinpath(ch, "ALT.f64"), "r+")
+        e = try open_database(joinpath(dir, "d")); nothing catch err; err end
+        @test e isa DatabaseError && occursin("ALT", e.msg)
+    end
+end
+
+@testset "database: lines stay apart when appenders stay open" begin
+    for explicit in (true, false)
+        mktempdir() do dir
+            db = mag_db(dir)
+            add_line!(db, lineinfo(1, 2))
+            apps = open_appenders(db, ["MAG", "ALT"])
+            append_value!(apps["MAG"], 1.0); append_value!(apps["MAG"], 2.0)
+            explicit && end_line!(apps)
+            add_line!(db, lineinfo(2, 1))       # also ends line 1
+            append_value!(apps["MAG"], 3.0); append_value!(apps["ALT"], 7.0)
+            close_appenders!(apps)
+            @test all(isnan, read_channel(db, L(1), "ALT"))
+            @test collect(read_channel(db, L(2), "ALT")) == [7.0]
+            @test collect(read_channel(db, L(2), "MAG")) == [3.0]
+        end
+    end
+    mktempdir() do dir
+        db = mag_db(dir)
+        add_line!(db, lineinfo(1, 2))
+        apps = open_appenders(db, ["MAG"])
+        foreach(x -> append_value!(apps["MAG"], x), (1.0, 2.0, 3.0))
+        e = try end_line!(apps); nothing catch err; err end
+        @test e isa DatabaseError && occursin("MAG", e.msg) && occursin("L1", e.msg)
+        @test_throws DatabaseError close_appenders!(apps)
+        # The files are closed, and the extra value never counts.
+        @test all(isnan, read_channel(db, L(1), "MAG"))
+        append_all!(db, "MAG", (4.0, 5.0))
+        @test collect(read_channel(db, L(1), "MAG")) == [4.0, 5.0]
     end
 end

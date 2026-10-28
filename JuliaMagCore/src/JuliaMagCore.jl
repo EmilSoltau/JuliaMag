@@ -18,7 +18,7 @@ export LineId, LineInfo, ChannelInfo, PositionPair
 export missing_value, ismissingvalue
 export LineDatabase, DatabaseError, create_database, open_database, save_meta
 export add_channel!, add_line!, channel, line, total_rows
-export ColumnAppender, open_appenders, append_value!, close_appenders!
+export ColumnAppender, open_appenders, append_value!, end_line!, close_appenders!
 export read_channel, write_value!, write_channel!
 
 end # module

@@ -78,6 +78,15 @@ function map_column(path::AbstractString, ::Type{T})::Vector{T} where {T}
     end
 end
 
+"""
+Cut a column file back to `n` values. The caller makes sure no map of the file
+is open (see `release_map!`).
+"""
+function cut_column(path::AbstractString, ::Type{T}, n::Integer) where {T}
+    filesize(path) > n * sizeof(T) && open(io -> truncate(io, n * sizeof(T)), path, "r+")
+    return nothing
+end
+
 # ---- string columns --------------------------------------------------------
 
 "Create an empty string column: no bytes, and `n` rows that all end at offset 0."
@@ -109,6 +118,16 @@ function pad_string_column(offpath::AbstractString, n::Integer)
         last = last_offset(offpath)
         open(io -> write_repeated(io, last, n - have), offpath, "a")
     end
+    return nothing
+end
+
+"""
+Cut a string column back to `n` rows: the `.off` file to `n` offsets,
+and the `.str` file to the end of row `n`.
+"""
+function cut_string_column(strpath::AbstractString, offpath::AbstractString, n::Integer)
+    cut_column(offpath, Int64, n)
+    cut_column(strpath, UInt8, last_offset(offpath))
     return nothing
 end
 

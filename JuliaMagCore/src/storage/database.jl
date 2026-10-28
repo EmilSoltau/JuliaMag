@@ -1,6 +1,17 @@
 # A line database: a folder with `database.json` and one file (or two) per channel.
 # All lines are stored end to end in each channel file.
 # A line's rows are `offset+1 : offset+nrows`.
+#
+# Written rows. Every channel file holds exactly `rows_written` rows, and that
+# number is always the end of a line (or 0). Lines past it are "open": their rows
+# are being appended. `end_line!` pads every channel to the end of the last line
+# and moves `rows_written` there. While appenders are open, adding a line ends
+# the line before it. So appenders always write at a known row:
+# `rows_written` plus what they appended.
+#
+# `database.json` is the commit point. It stores `rows_written`. When a database
+# is opened, file rows past it (from an import that stopped before `save_meta`)
+# are cut off.
 
 using JSON3, StructTypes
 
@@ -11,10 +22,13 @@ end
 
 Base.showerror(io::IO, e::DatabaseError) = print(io, "DatabaseError: ", e.msg)
 
+"Supertype of `ColumnAppender`, so a database can list its open appenders."
+abstract type AbstractAppender end
+
 """
 A line database stored in `folder`.
 
-The fields after `made_by` are internal caches. They are not saved.
+The fields after `rows_written` are internal caches. They are not saved.
 """
 mutable struct LineDatabase
     folder::String
@@ -27,16 +41,20 @@ mutable struct LineDatabase
     current_pair::Int
     "Id of the job that made the database, or `\"\"`."
     made_by::String
+    "Rows that every channel file holds. Saved in `database.json`. See the top of this file."
+    rows_written::Int
     "Mapped column files by channel name. See `release_map!`."
     maps::Dict{String,Vector}
-    "Channels that have an open appender."
-    appending::Set{String}
+    "Open appenders by channel name."
+    appenders::Dict{String,AbstractAppender}
     line_index::Dict{LineId,Int}
     channel_index::Dict{String,Int}
 
-    function LineDatabase(folder, name, description, lines, channels, pairs, current_pair, made_by)
+    function LineDatabase(folder, name, description, lines, channels, pairs, current_pair, made_by,
+                          rows_written = 0)
         return new(folder, name, description, lines, channels, pairs, current_pair, made_by,
-                   Dict{String,Vector}(), Set{String}(), Dict{LineId,Int}(), Dict{String,Int}())
+                   rows_written, Dict{String,Vector}(), Dict{String,AbstractAppender}(),
+                   Dict{LineId,Int}(), Dict{String,Int}())
     end
 end
 
@@ -78,6 +96,7 @@ struct MetaRecord
     pairs::Vector{PositionPair}
     current_pair::Int
     made_by::String
+    rows_written::Int
 end
 StructTypes.StructType(::Type{MetaRecord}) = StructTypes.Struct()
 
@@ -118,7 +137,9 @@ end
 
 Open the database in `folder`.
 Throws `DatabaseError` when `database.json` is missing or broken,
-or when a channel file is missing.
+or when a channel file is missing or shorter than `database.json` says.
+A shorter file means data was lost, so it is never hidden by padding.
+Rows past the saved `rows_written` were never committed and are cut off.
 """
 function open_database(folder::String)::LineDatabase
     path = joinpath(folder, META_FILE)
@@ -133,8 +154,9 @@ function open_database(folder::String)::LineDatabase
         throw(DatabaseError("$META_FILE in $folder has version $(rec.version); this program reads version $META_VERSION"))
     channels = ChannelInfo[ChannelInfo(r) for r in rec.channels]
     db = LineDatabase(folder, rec.name, rec.description, rec.lines, channels, rec.pairs,
-                      rec.current_pair, rec.made_by)
+                      rec.current_pair, rec.made_by, rec.rows_written)
     check_meta(db)
+    cut_uncommitted!(db)
     return db
 end
 
@@ -160,6 +182,47 @@ function check_meta(db::LineDatabase)
     end
     0 <= db.current_pair <= length(db.pairs) ||
         broken("current_pair $(db.current_pair) does not name a position pair")
+    (db.rows_written == 0 || any(l -> l.offset + l.nrows == db.rows_written, db.lines)) ||
+        broken("rows_written $(db.rows_written) is not the end of a line")
+    return nothing
+end
+
+"Number of values in the file of a channel (rows for a string channel)."
+function values_in_file(db::LineDatabase, c::ChannelInfo)::Int
+    files = channel_files(db, c)
+    return c.eltype === String ? column_length(files[2], Int64) : column_length(files[1], c.eltype)
+end
+
+"Number of values a channel holds for `rows` rows."
+values_for(c::ChannelInfo, rows::Integer) = c.eltype === String ? rows : rows * c.arraylen
+
+"Cut a channel file back to `rows` rows. Drops its map first."
+function cut_channel!(db::LineDatabase, c::ChannelInfo, rows::Integer)
+    release_map!(db, c.name)
+    files = channel_files(db, c)
+    if c.eltype === String
+        cut_string_column(files[1], files[2], rows)
+    else
+        cut_column(files[1], c.eltype, rows * c.arraylen)
+    end
+    return nothing
+end
+
+"On open: cut file rows that `database.json` does not cover; refuse files that are too short."
+function cut_uncommitted!(db::LineDatabase)
+    for c in db.channels
+        have = values_in_file(db, c)
+        want = values_for(c, db.rows_written)
+        have < want && throw(DatabaseError(
+            "channel $(c.name) of database $(db.name) is damaged: its file holds $have values, " *
+            "but $META_FILE says $want were written"))
+        have > want && cut_channel!(db, c, db.rows_written)
+        if c.eltype === String
+            files = channel_files(db, c)
+            filesize(files[1]) < last_offset(files[2]) && throw(DatabaseError(
+                "channel $(c.name) of database $(db.name) is damaged: its text file is too short"))
+        end
+    end
     return nothing
 end
 
@@ -168,15 +231,14 @@ end
 
 Write `database.json`. The file is first written to `database.json.tmp`
 and then moved over the old one, so a crash never leaves a half-written file.
-Channel files shorter than `total_rows(db)` are first padded with missing values.
+Channel files are not touched. Saving while appenders are open is allowed:
+rows appended after `rows_written` are only kept once their line has ended
+and `save_meta` runs again.
 """
 function save_meta(db::LineDatabase)
-    isempty(db.appending) ||
-        throw(DatabaseError("close the appenders of $(join(sort!(collect(db.appending)), ", ")) before saving"))
-    pad_channels!(db)
     rec = MetaRecord(META_VERSION, db.name, db.description, db.lines,
                      ChannelRecord[ChannelRecord(c) for c in db.channels],
-                     db.pairs, db.current_pair, db.made_by)
+                     db.pairs, db.current_pair, db.made_by, db.rows_written)
     path = meta_path(db)
     tmp = path * ".tmp"
     open(tmp, "w") do io
@@ -189,7 +251,7 @@ end
 
 # ---- lookups ---------------------------------------------------------------
 
-"Total number of rows of all lines. Every channel file holds this many rows."
+"Total number of rows of all lines, including lines whose rows are still being appended."
 total_rows(db::LineDatabase)::Int = sum(l -> l.nrows, db.lines; init = 0)
 
 # The indexes are caches. A lookup checks the hit and rebuilds the index on a miss,
@@ -261,12 +323,13 @@ end
 """
     add_channel!(db, info)
 
-Add a channel. Its file is created at once with `total_rows(db)` missing values.
+Add a channel. Its file is created at once with missing values for the written rows.
+Rows of an open line are padded when the line ends.
 Call `save_meta` to store the change in `database.json`.
 """
 function add_channel!(db::LineDatabase, info::ChannelInfo)
     check_channel_info(info, Set{String}(lowercase(c.name) for c in db.channels))
-    n = total_rows(db)
+    n = db.rows_written
     files = channel_files(db, info)
     if info.eltype === String
         create_string_column(files[1], files[2], n)
@@ -282,13 +345,14 @@ end
 
 Add a line after the last one. Sets `info.offset` to the current total rows.
 The rows of the line are written with appenders.
-Channels that get no values are padded with missing values by
-`close_appenders!` and `save_meta`.
+While appenders are open, the line before it is ended first (see `end_line!`),
+so a channel that got too few rows can not spill into the new line.
 """
 function add_line!(db::LineDatabase, info::LineInfo)
     line_position(db, info.id) == 0 ||
         throw(DatabaseError("line $(line_name(info.id)) is already in database $(db.name)"))
     info.nrows >= 0 || throw(DatabaseError("line $(line_name(info.id)) cannot have $(info.nrows) rows"))
+    isempty(db.appenders) || end_line!(db)
     info.offset = total_rows(db)
     push!(db.lines, info)
     return info
@@ -298,7 +362,7 @@ end
 #
 # Mapped column files are kept in `db.maps`, one per channel.
 # Windows does not allow a file to be resized, truncated or renamed while it is mapped.
-# So before a channel file grows, `release_map!` drops its map from the cache,
+# So before a channel file grows or is cut, `release_map!` drops its map from the cache,
 # and the next read maps the file again with its new size.
 # On Windows the dropped map is only unmapped when the garbage collector frees it,
 # so `release_map!` runs the collector there. A view that a caller still holds
@@ -311,18 +375,20 @@ function release_map!(db::LineDatabase, name::AbstractString)
 end
 
 # A separate function, so `mapped` holds no reference to an old map
-# while `pad_channel!` releases it.
+# while it releases it.
 map_fits(m, ::Type{T}, need::Integer) where {T} = m isa Vector{T} && length(m) >= need
 
 """
 Return the mapped file of a numeric channel, or the mapped `.off` file of a string channel.
-The map holds at least `need` values. When the file is shorter (a line was added
-and no appender wrote its rows yet), it is first padded to `total_rows(db)`.
+The map holds at least `need` values. Throws `DatabaseError` when the file is too short.
 """
 function mapped(db::LineDatabase, c::ChannelInfo, ::Type{T}, need::Integer) where {T}
     if !map_fits(get(db.maps, c.name, nothing), T, need)
-        pad_channel!(db, c)
+        release_map!(db, c.name)
         path = c.eltype === String ? channel_files(db, c)[2] : channel_files(db, c)[1]
+        have = column_length(path, T)
+        have >= need || throw(DatabaseError(
+            "channel $(c.name) of database $(db.name) is damaged: its file holds $have values, but needs $need"))
         db.maps[c.name] = map_column(path, T)
     end
     return db.maps[c.name]::Vector{T}
@@ -332,9 +398,18 @@ end
 function locate(db::LineDatabase, id::LineId, name::AbstractString)
     c = channel(db, name)
     l = line(db, id)
-    name in db.appending &&
+    haskey(db.appenders, c.name) &&
         throw(DatabaseError("channel $name is being appended to; close its appender first"))
     return c, l
+end
+
+"True when the line is past `rows_written`: its rows are still being appended."
+is_open_line(db::LineDatabase, l::LineInfo) = l.offset + l.nrows > db.rows_written
+
+function check_written(db::LineDatabase, c::ChannelInfo, l::LineInfo)
+    is_open_line(db, l) && throw(DatabaseError(
+        "line $(line_name(l.id)) has no data yet in channel $(c.name); end the line first (end_line!)"))
+    return nothing
 end
 
 # ---- reading ---------------------------------------------------------------
@@ -347,6 +422,9 @@ Return the values of channel `name` on line `line`.
 - A plain numeric channel gives a view into the mapped file (no copy).
 - An array channel gives an `arraylen x nrows` view into the mapped file.
 - A string channel gives a new `Vector{String}`.
+
+A line that is still open (its rows are being appended) has no data in the files yet.
+It reads as missing values, in a new array; the files are not touched.
 """
 function read_channel(db::LineDatabase, id::LineId, name::String)::AbstractArray
     c, l = locate(db, id, name)
@@ -355,12 +433,16 @@ end
 
 function read_rows(db::LineDatabase, c::ChannelInfo, l::LineInfo, ::Type{T}) where {T<:NumericEltype}
     a = c.arraylen
+    if is_open_line(db, l)
+        return a == 1 ? fill(missing_value(T), l.nrows) : fill(missing_value(T), a, l.nrows)
+    end
     m = mapped(db, c, T, (l.offset + l.nrows) * a)
     v = view(m, (l.offset * a + 1):((l.offset + l.nrows) * a))
     return a == 1 ? v : reshape(v, a, l.nrows)
 end
 
 function read_rows(db::LineDatabase, c::ChannelInfo, l::LineInfo, ::Type{String})
+    is_open_line(db, l) && return fill("", l.nrows)
     offs = mapped(db, c, Int64, l.offset + l.nrows)
     return read_strings(channel_files(db, c)[1], offs, (l.offset + 1):(l.offset + l.nrows))
 end
@@ -399,10 +481,12 @@ end
 Write one value at `row` (counted from 1 within the line) and return the old value.
 For an array channel `x` is a vector of `arraylen` values, and the old row is returned.
 The value goes straight to the file.
+Throws `DatabaseError` for a line that is still open.
 """
 function write_value!(db::LineDatabase, id::LineId, name::String, row::Int, x)
     c, l = locate(db, id, name)
     check_row(c, l, row)
+    check_written(db, c, l)
     return write_one!(db, c, l, row, x, c.eltype)
 end
 
@@ -445,9 +529,11 @@ write_one!(::LineDatabase, c::ChannelInfo, ::LineInfo, ::Int, _, T::Type) =
 Write all values of a channel on one line and return the old values (a copy).
 `values` must have one value per row of the line.
 For an array channel it is an `arraylen x nrows` matrix.
+Throws `DatabaseError` for a line that is still open.
 """
 function write_channel!(db::LineDatabase, id::LineId, name::String, values::AbstractArray)
     c, l = locate(db, id, name)
+    check_written(db, c, l)
     want = c.arraylen == 1 ? (l.nrows,) : (c.arraylen, l.nrows)
     size(values) == want || throw(DatabaseError(
         "channel $name on line $(line_name(id)) needs $(join(want, " x ")) values, not $(join(size(values), " x "))"))
@@ -479,35 +565,51 @@ write_all!(::LineDatabase, c::ChannelInfo, ::LineInfo, _, T::Type) =
 # ---- appending -------------------------------------------------------------
 
 """
-Buffered writer that appends values to the end of one channel file.
+Buffered writer that appends the rows of one channel.
 Made by `open_appenders`; each appender buffers 1 MiB.
+It writes from row `start` on, where `start` is `rows_written` when it was opened.
 """
-mutable struct ColumnAppender{W<:Union{NumericWriter,StringWriter}}
+mutable struct ColumnAppender{W<:Union{NumericWriter,StringWriter}} <: AbstractAppender
     db::LineDatabase
     channel::ChannelInfo
     writer::W
+    start::Int
     open::Bool
+end
+
+"Rows an appender has reached: where its next value goes. Throws on a partial array row."
+function rows_reached(a::ColumnAppender)::Int
+    n = a.writer.written
+    al = a.channel.arraylen
+    n % al == 0 || throw(DatabaseError(
+        "channel $(a.channel.name) got a partial row: $n values with $al values per row"))
+    return a.start + n ÷ al
 end
 
 """
     open_appenders(db, names) -> Dict{String,ColumnAppender}
 
-Open one appender per channel name. Values go after the current end of each
-channel file. Close them all with `close_appenders!`.
+Open one appender per channel name. Values go to the rows of the open line,
+starting right after the written rows (`rows_written`).
+Only one set of appenders can be open per database.
+Close them with `close_appenders!`.
 """
 function open_appenders(db::LineDatabase, names)::Dict{String,ColumnAppender}
     chans = ChannelInfo[channel(db, n) for n in names]
-    for c in chans
-        c.name in db.appending && throw(DatabaseError("channel $(c.name) already has an open appender"))
-    end
+    isempty(db.appenders) || throw(DatabaseError(
+        "database $(db.name) already has open appenders ($(join(sort!(collect(keys(db.appenders))), ", "))); close them first"))
+    length(unique(c.name for c in chans)) == length(chans) ||
+        throw(DatabaseError("a channel is named twice in open_appenders"))
     out = Dict{String,ColumnAppender}()
     try
         for c in chans
-            release_map!(db, c.name)
+            # Rows past `rows_written` are left over from appenders that failed. Drop them.
+            cut_channel!(db, c, db.rows_written)
             files = channel_files(db, c)
             w = c.eltype === String ? StringWriter(files[1], files[2]) : NumericWriter{c.eltype}(files[1])
-            out[c.name] = ColumnAppender(db, c, w, true)
-            push!(db.appending, c.name)
+            a = ColumnAppender(db, c, w, db.rows_written, true)
+            out[c.name] = a
+            db.appenders[c.name] = a
         end
     catch
         close_appenders!(out)
@@ -540,16 +642,90 @@ end
 append_to!(w::StringWriter, c::ChannelInfo, x) = writer_put!(w, to_value(String, x, c))
 
 """
+    end_line!(apps)
+    end_line!(db)
+
+End the open line: pad every channel of the database with missing values up to
+the end of the last line, and mark those rows as written.
+Throws `DatabaseError`, and changes nothing, when a channel got more rows than
+the line has. `close_appenders!` calls this, and so does `add_line!` while
+appenders are open. Call it yourself to end lines that were added without
+appending (their rows then read as missing values and can be written).
+"""
+end_line!(apps::AbstractDict{String,<:ColumnAppender}) = foreach(end_line!, databases_of(apps))
+
+function end_line!(db::LineDatabase)
+    target = total_rows(db)
+    target == db.rows_written && isempty(db.appenders) && return nothing
+    # Check everything first, so a failure changes nothing.
+    for a in values(db.appenders)
+        a = a::ColumnAppender
+        reached = rows_reached(a)
+        reached > target && throw(DatabaseError(
+            "channel $(a.channel.name) got $(reached - db.rows_written) rows, but " *
+            (isempty(db.lines) ? "there is no line" :
+             "line $(line_name(db.lines[end].id)) ends at row $(target - db.rows_written)")))
+    end
+    for c in db.channels
+        a = get(db.appenders, c.name, nothing)
+        if a === nothing
+            have = values_in_file(db, c)
+            have < values_for(c, db.rows_written) && throw(DatabaseError(
+                "channel $(c.name) of database $(db.name) is damaged: its file holds $have values"))
+            # Rows past `rows_written` are left over from appenders that failed. Drop them.
+            cut_channel!(db, c, db.rows_written)
+            files = channel_files(db, c)
+            if c.eltype === String
+                pad_string_column(files[2], target)
+            else
+                pad_column(files[1], c.eltype, target * c.arraylen)
+            end
+        else
+            pad_appender!(a::ColumnAppender, target)
+        end
+    end
+    db.rows_written = target
+    return nothing
+end
+
+function pad_appender!(a::ColumnAppender{NumericWriter{T}}, target::Int) where {T}
+    for _ in 1:((target - rows_reached(a)) * a.channel.arraylen)
+        writer_put!(a.writer, missing_value(T))
+    end
+    flush_writer!(a.writer)
+    return nothing
+end
+
+function pad_appender!(a::ColumnAppender{StringWriter}, target::Int)
+    for _ in 1:(target - rows_reached(a))
+        writer_put!(a.writer, "")
+    end
+    flush_writer!(a.writer)
+    return nothing
+end
+
+function databases_of(apps::AbstractDict{String,<:ColumnAppender})
+    dbs = LineDatabase[]
+    for a in values(apps)
+        a.open && !any(x -> x === a.db, dbs) && push!(dbs, a.db)
+    end
+    return dbs
+end
+
+"""
     close_appenders!(d)
 
-Write out the buffers and close the files. Then every channel of the database
-that is shorter than `total_rows(db)` is padded with missing values,
-so all channels stay aligned. Throws `DatabaseError` when a channel got more
-values than the lines have rows.
+End the open line (see `end_line!`), then write out the buffers and close the files.
+The files are closed even when ending the line fails; the error is then thrown,
+and the rows those appenders wrote are dropped by the next `open_appenders`.
 """
 function close_appenders!(d::AbstractDict{String,<:ColumnAppender})
-    dbs = LineDatabase[]
     failure = nothing
+    try
+        end_line!(d)
+    catch e
+        failure = e
+    end
     for a in values(d)
         a.open || continue
         try
@@ -559,39 +735,8 @@ function close_appenders!(d::AbstractDict{String,<:ColumnAppender})
             failure === nothing && (failure = e)
         end
         a.open = false
-        delete!(a.db.appending, a.channel.name)
-        any(x -> x === a.db, dbs) || push!(dbs, a.db)
+        delete!(a.db.appenders, a.channel.name)
     end
     failure === nothing || throw(failure)
-    foreach(pad_channels!, dbs)
-    return nothing
-end
-
-"Pad every channel file that is shorter than `total_rows(db)` with missing values."
-function pad_channels!(db::LineDatabase)
-    for c in db.channels
-        c.name in db.appending || pad_channel!(db, c)
-    end
-    return nothing
-end
-
-"""
-Pad one channel file to `total_rows(db)` rows with missing values.
-Throws `DatabaseError` when the file holds more rows than that.
-"""
-function pad_channel!(db::LineDatabase, c::ChannelInfo)
-    n = total_rows(db)
-    files = channel_files(db, c)
-    have = c.eltype === String ? column_length(files[2], Int64) : column_length(files[1], c.eltype)
-    want = c.eltype === String ? n : n * c.arraylen
-    have == want && return nothing
-    have > want && throw(DatabaseError(
-        "channel $(c.name) of database $(db.name) has $have values, but the lines need $want"))
-    release_map!(db, c.name)
-    if c.eltype === String
-        pad_string_column(files[2], n)
-    else
-        pad_column(files[1], c.eltype, want)
-    end
     return nothing
 end
