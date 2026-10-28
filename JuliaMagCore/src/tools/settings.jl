@@ -325,42 +325,104 @@ setting_problem(st::Union{TextSetting,CRSSetting,PairSetting}, x)::Union{Nothing
 #
 # Expression text (`ExprSetting`, Channel Math) is checked token by token before
 # it is parsed. The Julia parser is recursive, and some text nests deeply
-# without any brackets (`return return ...`, `begin begin ... end end`, `- - ...`,
+# (`return return ...`, `begin begin ... end end`, `x->x->...`, `- - ...`,
 # `a^a^...`). Nesting deep enough overflows its stack, which can leave the
 # process broken. So the check is a whitelist. Allowed are only:
 #
-# - names that are not Julia keywords, and the constants of Channel Math;
+# - names that are not Julia keywords;
 # - number literals (decimal, with a fraction or exponent, or 0x, 0b, 0o);
 # - names in backticks (their text is not scanned: the parser does not look inside);
-# - the operators `+ - * / ^ < > <= >= == != & | = .` (`.` for dotted forms);
+# - whole operator tokens: `+ - * / ^ < > <= >= == != & |`, the same with a dot
+#   in front, and `=`; each may be followed by one unary `-` or `+` (as in `x^-1`),
+#   but not to make `++` or `--`; a lone `.` only right before `(`, as in `sqrt.(x)`;
 # - round brackets, commas, white space, and `#` comments to the end of the line.
 #
-# And within that: at most 10,000 characters, round brackets nested at most 200
-# deep, and at most 1,000 operator characters. Anything else is refused with a
-# message that names it.
+# And within that: at most 10,000 characters, round brackets nested at most 100
+# deep, and at most 500 operator characters. Anything else is refused with a
+# message that names it. Text that passes is parsed by `parse_expr_text`, in a
+# task with its own 64 MiB stack.
 #
-# What this guarantees: text that passes reaches the parser only as names,
-# numbers, those operators, commas and round brackets. The deepest nesting the
-# parser can then build is 200 brackets plus 1,000 operators. That was tested not
-# to overflow the stack on Julia 1.12 with the default stack size; it is a tested
-# margin, not a proof for every Julia version. Code that walks the parsed tree
-# must still limit its own depth (Channel Math refuses trees over 200 deep).
+# What was tested (Julia 1.12.7, Linux x86_64), each case in a fresh process,
+# through `parse_channel_expr` and the `ExprSetting` check, on the main thread
+# and in a `Threads.@spawn` task: brackets alone, unary minus and plus chains,
+# `^` chains (plain, dotted, with unary minus), nested `sqrt(`, `sqrt.(` and
+# `ifelse(` calls, comparison, equality, `-`, `&` and `+` chains, tuples,
+# juxtaposition, calls on calls, and brackets combined with each chain, all at
+# the limits. None printed anything on stderr. The worst case, brackets around a
+# `^` chain, still parses in the 64 MiB task at 16 times the bracket and operator
+# limits (1,600 brackets and 8,000 operators) and first overflows at 32 times.
+# Without the big stack, it overflows at 3 times the old limits of 200 and 1,000.
+# This is a tested margin, not a proof for every Julia version. Code that walks
+# the parsed tree must still limit its own depth (Channel Math refuses trees
+# over 200 deep).
 
 const MAX_EXPR_CHARS = 10_000
-const MAX_EXPR_BRACKETS = 200
-const MAX_EXPR_OPERATORS = 1000
+const MAX_EXPR_BRACKETS = 100
+const MAX_EXPR_OPERATORS = 500
+
+"Stack of the task that parses expression text (bytes). See `parse_expr_text`."
+const PARSE_STACK = 64 << 20
+
+"""
+    parse_expr_text(text)
+
+`Meta.parseall(text)`, run in a task with its own 64 MiB stack. So the room the
+parser has does not depend on where it is called from (the main thread, a job,
+a UI callback deep in its own stack) or on the platform. Call it only on text
+that `expr_text_problem` passed.
+"""
+function parse_expr_text(text::String)
+    t = Task(() -> try
+                 Meta.parseall(text)
+             catch e
+                 e
+             end, PARSE_STACK)
+    schedule(t)
+    r = fetch(t)
+    r isa Exception && throw(r)
+    return r
+end
 
 "Words of Julia syntax. They may not appear as bare names in an expression."
 const EXPR_KEYWORDS = Set(["begin", "end", "let", "if", "elseif", "else", "return", "local", "global", "const",
     "quote", "try", "catch", "finally", "for", "while", "function", "macro", "module", "baremodule", "struct",
     "mutable", "abstract", "primitive", "type", "do", "using", "import", "export", "outer", "where", "in",
-    "isa", "true", "false", "break", "continue"])
+    "isa", "true", "false", "break", "continue", "public"])
 
-"Operators of two characters, tried before those of one."
-const EXPR_OPERATORS_2 = ("<=", ">=", "==", "!=")
-const EXPR_OPERATORS_1 = "+-*/^<>=&|."
+"""
+The operator tokens that may appear, whole: those of Channel Math, their dotted
+forms, and `=`. `.` alone may only start a dotted call such as `sqrt.(x)`.
+"""
+const EXPR_OPERATORS = Set(vcat(["+", "-", "*", "/", "^", "<", ">", "<=", ">=", "==", "!=", "&", "|"],
+                                [".$o" for o in ("+", "-", "*", "/", "^", "<", ">", "<=", ">=", "==", "!=", "&", "|")],
+                                ["="]))
 
-not_allowed(tok::AbstractString) = "\"$tok\" is not allowed in a channel expression."
+"A character that is not a name, number, bracket, comma, quote, comment or space: part of an operator token."
+is_operator_char(c::Char) =
+    c == '!' || !(isspace(c) || Base.is_id_char(c) || c in "(),`\"#\$@")
+
+"""
+Whether a run of operator characters is allowed: one allowed operator, or one
+followed by a single unary `-` or `+` (Julia reads `*-` as `*` then `-`). Julia
+reads `++` and `--` as tokens of their own, so those are refused.
+"""
+function operator_run_ok(run::String)::Bool
+    run in EXPR_OPERATORS && return true
+    length(run) >= 2 || return false
+    t, u = chop(run), last(run)
+    return u in "+-" && t in EXPR_OPERATORS && last(t) != u
+end
+
+"The clean text of a parse error, such as ``Expected `)` or `,`.``"
+function parse_problem(e)::String
+    msg = e isa Meta.ParseError ? e.msg : string(e)
+    m = match(r"── (.*)", msg)
+    text = m === nothing ? String(strip(first(split(msg, '\n')))) : String(strip(something(m[1])))
+    return endswith(text, '.') ? text : text * "."
+end
+
+not_allowed(tok::AbstractString) =
+    "\"$(length(tok) > 20 ? first(tok, 20) * "..." : tok)\" is not allowed in a channel expression."
 
 """
     expr_text_problem(text, what)::Union{Nothing,String}
@@ -412,12 +474,22 @@ function expr_text_problem(text::AbstractString, what::AbstractString)::Union{No
             word in EXPR_KEYWORDS && return not_allowed(word) *
                 " A channel of that name goes in backticks, such as `$word`."
             i = j
-        elseif i < length(cs) && string(c, cs[i + 1]) in EXPR_OPERATORS_2
-            ops += 2
-            i += 2
-        elseif c in EXPR_OPERATORS_1
-            ops += 1
-            i += 1
+        elseif is_operator_char(c)
+            j = i
+            while j <= length(cs) && is_operator_char(cs[j])
+                j += 1
+            end
+            run = String(cs[i:(j - 1)])
+            next = j <= length(cs) ? cs[j] : ' '
+            if run == "."
+                next == '(' || return "Field access with . is not allowed."   # only `f.(x)` uses a lone dot
+            elseif !operator_run_ok(run)
+                startswith(run, "&&") && return "&& is not allowed. Use & instead."
+                startswith(run, "||") && return "|| is not allowed. Use | instead."
+                return not_allowed(run)
+            end
+            ops += length(run)
+            i = j
         else
             c == '"' && return "Text in quotes is not allowed."
             c == '$' && return "Interpolation with \$ is not allowed."
@@ -472,11 +544,10 @@ function setting_problem(st::ExprSetting, x)::Union{Nothing,String}
     isempty(strip(x)) && return "$(st.label) is empty."
     p = expr_text_problem(x, st.label)
     p === nothing || return p
-    ex = Meta.parseall(String(x))
+    ex = parse_expr_text(String(x))
     for a in (ex isa Expr ? ex.args : Any[])
         if a isa Expr && a.head in (:error, :incomplete)
-            msg = isempty(a.args) ? "" : string(a.args[1])
-            return "$(st.label) is not a valid Julia expression: $(first(split(msg, '\n')))"
+            return "$(st.label) is not a valid Julia expression: " * parse_problem(isempty(a.args) ? "" : a.args[1])
         end
     end
     return nothing

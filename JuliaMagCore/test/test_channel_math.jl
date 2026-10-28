@@ -88,9 +88,9 @@ end
     @test msg("MAG - IGRF") == "Write the expression as OUT = <expression>, such as MAG_IGRF = MAG - IGRF."
     @test msg("A = 1\nB = 2") == "Write one expression only, such as MAG_IGRF = MAG - IGRF."
     @test msg("A = B = MAG") == "Use only one = in the expression."
-    @test msg("A += 1") == "Write the expression as OUT = <expression>, such as MAG_IGRF = MAG - IGRF."
+    @test msg("A += 1") == "\"+=\" is not allowed in a channel expression."
     @test msg("f(x) = x") == "The left side of = must be one channel name, such as MAG_IGRF."
-    @test msg("A.b = MAG") == "The left side of = must be one channel name, such as MAG_IGRF."
+    @test msg("A.b = MAG") == "Field access with . is not allowed."
     @test msg("A = MAG.x") == "Field access with . is not allowed."
     @test msg("A = Base.run(MAG)") == "Field access with . is not allowed."
     @test msg("A = @time MAG") == "Macros (names that start with @) are not allowed."
@@ -128,11 +128,20 @@ end
     @test parse_channel_expr("A = `end` + 1", ["end"]) == Expr(:(=), :A, Expr(:call, :+, :end, 1.0))
     @test msg("A = `end(` + 1") == "There is no channel end(."             # backtick text is not scanned
     @test msg("A = false") == "true and false are not allowed. Use a comparison, such as MAG > 0."
-    @test msg("A = (x -> x)(MAG)") == "Only the allowed functions can be called, by name."
+    @test msg("A = (x -> x)(MAG)") == "\"->\" is not allowed in a channel expression."
+    # operators are whole tokens: only the allowed ones pass, each may be followed by one sign
+    for op in ("=>", "|>", "<|", "-->", "<--", ".=", "===", "!==", "//", "<:", ">:", "<<", ">>", ".->", "-=",
+               "*=", "^=", "++", "--", ".--", "+++", "*/", "<>", "=<", "==-+")
+        @test msg("A = MAG $(op) IGRF") == "\"$op\" is not allowed in a channel expression."
+    end
+    @test parse_channel_expr("A = MAG^-1 *-IGRF /+2 .<-3 >=-1", ["MAG", "IGRF"]) isa Expr
+    @test parse_channel_expr("A=-MAG .+ IGRF .^ 2 .== 1", ["MAG", "IGRF"]) isa Expr
+    @test parse_channel_expr("A = MAG +-IGRF", ["MAG", "IGRF"]) == :(A = MAG + -IGRF)
+    @test parse_channel_expr("A = sqrt.(MAG)", ["MAG"]) == :(A = sqrt(MAG))
     @test msg("A = begin MAG end") == "\"begin\" is not allowed in a channel expression. " *
         "A channel of that name goes in backticks, such as `begin`."
     @test msg("A = MAG'") == "\"'\" is not allowed in a channel expression."
-    @test msg("A = MAG...") == "This part of the expression is not allowed: ...."
+    @test msg("A = MAG...") == "\"...\" is not allowed in a channel expression."
 end
 
 @testset "channel math: deep nesting is refused, never a stack overflow" begin
@@ -146,12 +155,16 @@ end
     end
     @test msg(deep_call) == "The expression is too long: it has 60007 characters, and at most 10000 are allowed."
     @test msg(deep_brackets) == "The expression is too long: it has 200007 characters, and at most 10000 are allowed."
-    @test msg("A = " * "sqrt("^201 * "MAG" * ")"^201) == "The expression has brackets nested more than 200 deep."
-    @test msg("A = " * "- "^1001 * "MAG") == "The expression has more than 1000 operator characters."
+    @test msg("A = " * "sqrt("^101 * "MAG" * ")"^101) == "The expression has brackets nested more than 100 deep."
+    @test msg("A = " * "- "^501 * "MAG") == "The expression has more than 500 operator characters."
+    arrows = "A = " * "(x->"^200 * "x->"^220 * "MAG" * ")"^200
+    @test msg(arrows) == "\"->\" is not allowed in a channel expression."
+    @test JuliaMagCore.setting_problem(ExprSetting("e", "Expression"), arrows) ==
+          "\"->\" is not allowed in a channel expression."
     @test msg("A = " * "MAG^"^400 * "MAG") == "The expression is nested more than 200 deep."
     @test msg("A = " * "MAG-"^300 * "MAG") == "The expression is nested more than 200 deep."
-    @test parse_channel_expr("A = " * "sqrt("^200 * "MAG" * ")"^200, ["MAG"]) isa Expr    # 200 deep is allowed
-    @test parse_channel_expr("A = " * "("^200 * "MAG" * ")"^200, ["MAG"]) == :(A = MAG)   # plain brackets add no depth
+    @test parse_channel_expr("A = " * "sqrt("^100 * "MAG" * ")"^100, ["MAG"]) isa Expr    # 100 deep is allowed
+    @test parse_channel_expr("A = " * "("^100 * "MAG" * ")"^100, ["MAG"]) == :(A = MAG)   # plain brackets add no depth
     @test parse_channel_expr("A = " * "- "^190 * "MAG", ["MAG"]) isa Expr
     @test parse_channel_expr("A = " * join(fill("MAG", 150), " + "), ["MAG"]) isa Expr  # one flat call
     # through run_tool: a refusal, not a job, and nothing on stderr
@@ -183,18 +196,19 @@ end
     for word in ("begin", "end", "let", "if", "elseif", "else", "return", "local", "global", "const", "quote",
                  "try", "catch", "finally", "for", "while", "function", "macro", "module", "baremodule",
                  "struct", "mutable", "abstract", "primitive", "type", "do", "using", "import", "export",
-                 "outer", "where", "in", "isa")
+                 "outer", "where", "in", "isa", "public")
         @test startswith(msg("A = MAG + $word"), "\"$word\" is not allowed in a channel expression.")
     end
     # in a fresh process, nothing is printed on stderr: no stack overflow warning
     code = """
         using JuliaMagCore
-        texts = ["A = " * "return "^600 * "MAG", "A = " * "local "^1400 * "MAG",
+        refused = ["A = " * "(x->"^200 * "x->"^220 * "MAG" * ")"^200,
+                 "A = " * "return "^600 * "MAG", "A = " * "local "^1400 * "MAG",
                  "A = " * "begin "^900 * "MAG" * " end"^900, "A = " * "let "^1200 * "MAG" * " end"^1200,
                  "A = " * "if MAG "^600 * "MAG" * " end"^600, "A = " * "try "^900 * "MAG" * " end"^900,
                  "A = " * "quote "^900 * "MAG" * " end"^900, "A = " * "sqrt("^10_000 * "MAG" * ")"^10_000,
                  "A = " * "("^100_000 * "MAG" * ")"^100_000]
-        for t in texts
+        for t in refused
             try
                 parse_channel_expr(t, ["MAG"])
                 error("not refused")
@@ -202,6 +216,28 @@ end
                 e isa ToolError || rethrow()
             end
             JuliaMagCore.setting_problem(ExprSetting("e", "Expression"), t) === nothing && error("not refused")
+        end
+        # the worst cases found that pass the scan, at its limits (see settings.jl)
+        worst = ["A = " * "("^100 * "MAG^"^499 * "MAG" * ")"^100,
+                 "A = " * "("^100 * "- "^499 * "MAG" * ")"^100,
+                 "A = " * "(MAG^-"^100 * "MAG^-"^149 * "MAG" * ")"^100,
+                 "A = " * "sqrt("^100 * "MAG" * ")"^100,
+                 "A = " * "ifelse(MAG>0,MAG,"^100 * "MAG" * ")"^100,
+                 "A = " * "MAG<"^499 * "MAG",
+                 "A = " * "(MAG)"^1999]
+        function check(t)
+            JuliaMagCore.expr_text_problem(t, "E") === nothing || error("refused by the scan: " * t[1:20])
+            try
+                parse_channel_expr(t, ["MAG"])
+            catch e
+                e isa ToolError || rethrow()
+            end
+            JuliaMagCore.setting_problem(ExprSetting("e", "Expression"), t)
+            return nothing
+        end
+        for t in worst
+            check(t)
+            fetch(Threads.@spawn check(t))
         end
         print("refused all")
         """

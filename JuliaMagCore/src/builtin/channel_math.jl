@@ -3,11 +3,12 @@
 #
 # Safety: the text is never run as Julia code. `parse_channel_expr` first scans
 # the raw text with `expr_text_problem`, a token whitelist with size and nesting
-# limits; text with any other token (keywords, quotes, `$`, `@`, `:`, `;`,
+# limits; text with any other token (keywords, quotes, `$`, `@`, `:`, `;`, `->`,
 # brackets other than round ones, ...) never reaches the parser. Then it parses
-# with `Meta.parseall`, refuses a tree nested more than 200 deep (so checking and
-# computing recurse at most 200 levels), and checks every part against a short
-# list. Allowed are
+# with `parse_expr_text` (`Meta.parseall` in a task with a 64 MiB stack; see
+# settings.jl for what was tested), refuses a tree nested more than 200 deep (so
+# checking and computing recurse at most 200 levels), and checks every part
+# against a short list. Allowed are
 # number literals, channel names, the constants `pi`, `e`, `NaN` and `Inf`
 # (ruling R14; `NaN` masks values, such as `ifelse(ALT > 200, NaN, MAG)`), and calls to
 #
@@ -139,14 +140,6 @@ function unknown_channel(name::String, channels::Vector{String})
     cm_error("There is no channel $name. Did you mean $(channels[k])?")
 end
 
-"The problem text of a parse error, such as ``Expected `)` or `,` ``."
-function parse_problem(e)::String
-    msg = e isa Meta.ParseError ? e.msg : string(e)
-    m = match(r"── (.*)", msg)
-    text = m === nothing ? String(strip(first(split(msg, '\n')))) : String(strip(something(m[1])))
-    return endswith(text, '.') ? text : text * "."
-end
-
 """
     parse_channel_expr(text, channels)::Expr
 
@@ -169,7 +162,7 @@ function parse_channel_expr(text::String, channels::Vector{String})::Union{Expr,
     isempty(strip(text)) && cm_error("The expression is empty.")
     problem = expr_text_problem(text, "The expression")
     problem === nothing || cm_error(problem)
-    top = Meta.parseall(text)
+    top = parse_expr_text(text)
     parts = Any[a for a in top.args if !(a isa LineNumberNode)]
     for a in parts
         if a isa Expr && a.head in (:error, :incomplete)

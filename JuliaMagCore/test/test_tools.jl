@@ -78,7 +78,7 @@ end
     @test problems[1] == "Size must be at least 1."
     @test problems[2] == "Need must be a number."
     @test problems[3] == "Title must be text."
-    @test startswith(problems[4], "Expression is not a valid Julia expression")
+    @test problems[4] == "Expression is not a valid Julia expression: Expected `)` or `,`."
     @test problems[5] == "Mode must be one of: new, append."
     @test problems[6] == "Flag must be true or false."
     @test problems[7] == "Grid file must be a .grd or .ers file."
@@ -92,10 +92,13 @@ end
     @test validate(t, Dict("need" => 1, "n" => 11, "e" => " ", "ext" => [1, 2, 3])) ==
           ["Size must be at most 10.5.", "Expression is empty.", "Area must be four numbers: west, south, east and north."]
     # text that would overflow the parser's stack is refused before it is parsed
-    @test validate(t, Dict("need" => 1, "e" => "A = " * "("^201 * "B" * ")"^201)) ==
-          ["Expression has brackets nested more than 200 deep."]
-    @test validate(t, Dict("need" => 1, "e" => "A = " * "-"^1001 * "B")) ==
-          ["Expression has more than 1000 operator characters."]
+    @test validate(t, Dict("need" => 1, "e" => "A = " * "("^101 * "B" * ")"^101)) ==
+          ["Expression has brackets nested more than 100 deep."]
+    @test validate(t, Dict("need" => 1, "e" => "A = " * "- "^501 * "B")) ==
+          ["Expression has more than 500 operator characters."]
+    @test validate(t, Dict("need" => 1, "e" => "A = " * "-"^30 * "B")) ==
+          ["\"--------------------...\" is not allowed in a channel expression."]
+    @test validate(t, Dict("need" => 1, "e" => "A = (x -> x)(B)")) == ["\"->\" is not allowed in a channel expression."]
     @test validate(t, Dict("need" => 1, "e" => "A = " * "B"^10_000)) ==
           ["Expression is too long: it has 10004 characters, and at most 10000 are allowed."]
     @test validate(t, Dict("need" => Inf, "n" => true, "f" => "B.GRD")) ==
