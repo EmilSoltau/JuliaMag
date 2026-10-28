@@ -53,6 +53,7 @@ One importer.
 - `id` is the command name in the history, such as `"import.geosoft_xyz"`.
 - `extensions` are lower case and start with a dot, such as `".xyz"`.
 - `kind` is the kind of item it makes.
+- `settings` describe the settings `run` takes, for the import dialog.
 - `run(session, path, settings::Dict, progress)` returns an `ImportResult`.
   It does not record the import in the history. `import_file` runs it as a
   job, and the job records it once, with the job id.
@@ -62,16 +63,23 @@ struct ImporterSpec
     name::String
     extensions::Vector{String}
     kind::ItemKind
-    # Task 8 tightens this to Vector{SettingSpec}.
-    settings::Vector{Any}
+    settings::Vector{SettingSpec}
     run::Function
 end
+
+"The default value of each setting of the importer, by key."
+default_settings(spec::ImporterSpec)::Dict{String,Any} = default_settings(spec.settings)
+
+"The problems with importer settings, as plain sentences. Empty means fine."
+validate(spec::ImporterSpec, settings::AbstractDict)::Vector{String} =
+    validate_settings(spec.settings, settings, spec.name)
 
 const IMPORTERS = ImporterSpec[]
 const IMPORTERS_LOCK = ReentrantLock()
 
 "Add an importer, or replace the one with the same id."
 function register_importer!(spec::ImporterSpec)
+    check_setting_keys(spec.settings, "importer \"$(spec.id)\"")
     lock(IMPORTERS_LOCK) do
         k = findfirst(i -> i.id == spec.id, IMPORTERS)
         k === nothing ? push!(IMPORTERS, spec) : (IMPORTERS[k] = spec)

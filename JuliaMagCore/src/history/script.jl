@@ -7,6 +7,20 @@ end
 # Keyword name for `run_tool`. Names that are not identifiers are quoted with var"...".
 kwname(k::AbstractString) = Base.isidentifier(k) ? String(k) : "var" * repr(String(k))
 
+# A value as Julia source. Dictionaries become `Dict(k => v, ...)` with sorted keys,
+# so `inputs = Dict("database" => "db-1")` reads well. Other values use `repr`.
+function literal(x)::String
+    x isa AbstractDict || return repr(x)
+    ks = sort!([String(k) for k in keys(x)])
+    return "Dict(" * join(("$(repr(k)) => $(literal(x[k]))" for k in ks), ", ") * ")"
+end
+
+kwtext(a::AbstractDict, ks) = join(("$(kwname(k)) = $(literal(a[k]))" for k in sort!(collect(ks))), ", ")
+
+# True when the command is a registered importer and the args name the file.
+is_import(c::String, a::AbstractDict) =
+    any(i -> i.id == c, importers()) && get(a, "path", nothing) isa AbstractString
+
 function call_text(e::HistoryEntry)::String
     a = e.args
     c = e.command
@@ -20,7 +34,11 @@ function call_text(e::HistoryEntry)::String
     elseif c == "session.redo"
         return "redo!(s)"
     end
-    kw = join(("$(kwname(k)) = $(repr(a[k]))" for k in sort!(collect(keys(a)))), ", ")
+    if is_import(c, a)
+        kw = kwtext(a, filter(!=("path"), collect(keys(a))))
+        return isempty(kw) ? "import_file(s, $(repr(a["path"])))" : "import_file(s, $(repr(a["path"])); $kw)"
+    end
+    kw = kwtext(a, keys(a))
     return isempty(kw) ? "run_tool(s, $(repr(c)))" : "run_tool(s, $(repr(c)); $kw)"
 end
 
@@ -29,8 +47,9 @@ end
 
 The history as a Julia script. It starts with `using JuliaMagCore` and
 `s = open_session(<project folder>)`. Each entry is one call.
-Commands that have a core function become that call.
-Other commands become `run_tool(s, "<command>"; <args>...)`.
+Commands that have a core function become that call. Imports become
+`import_file(s, path; <settings>...)`. Other commands become
+`run_tool(s, "<command>"; <args>...)`, with tool inputs as `inputs = Dict(...)`.
 """
 function script_text(s::Session)::String
     lock(s.lock) do

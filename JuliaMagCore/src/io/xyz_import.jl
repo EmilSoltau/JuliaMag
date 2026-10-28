@@ -670,17 +670,33 @@ end
 
 # ---- registration ----------------------------------------------------------
 
+"The settings of the XYZ importer, for the import dialog and for checks."
+const XYZ_SETTINGS = SettingSpec[
+    ChoiceSetting("mode", "Import into", ["new", "append"]; default = "new",
+                  help = "new makes a new database. append adds the lines to an existing one."),
+    TextSetting("name", "Database name"; help = "Leave blank to name it after the file."),
+    TextSetting("target", "Append to"; help = "The id of the database to append to, such as db-1."),
+    CRSSetting("crs", "Coordinate system"; help = "The code of the X and Y coordinates, such as EPSG:7855."),
+]
+
 """
 Run the XYZ importer from settings: `name`, `crs`, `mode` (\"new\" or \"append\"), `target`.
+Missing settings take their defaults. Bad settings throw a `ToolError`
+with the problems, so the job fails with a message the user can read.
 Not recorded: the job that runs it records it (see `ImporterSpec`).
 """
 function run_xyz_importer(s::Session, path::String, settings::AbstractDict, progress::Progress)::ImportResult
-    get_text(k, default) = String(get(settings, k, default))
-    name = get_text("name", "")
+    problems = validate_settings(XYZ_SETTINGS, settings, "Geosoft XYZ")
+    isempty(problems) || throw(ToolError(join(problems, " ")))
+    v = default_settings(XYZ_SETTINGS)
+    for st in XYZ_SETTINGS
+        haskey(settings, st.key) && (v[st.key] = setting_value(st, settings[st.key]))
+    end
+    name = v["name"]::String
     return import_xyz(s, path; name = isempty(name) ? splitext(basename(path))[1] : name,
-                      crs = get_text("crs", ""), mode = Symbol(get_text("mode", "new")),
-                      target = get_text("target", ""), progress, record = false)
+                      crs = v["crs"]::String, mode = Symbol(v["mode"]::String),
+                      target = v["target"]::String, progress, record = false)
 end
 
 register_importer!(ImporterSpec("import.geosoft_xyz", "Geosoft XYZ", [".xyz"], ITEM_DATABASE,
-                                Any[], run_xyz_importer))
+                                XYZ_SETTINGS, run_xyz_importer))

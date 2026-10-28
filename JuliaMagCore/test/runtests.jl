@@ -9,4 +9,5 @@ using Test
     include("test_session.jl")
     include("test_xyz.jl")
     include("test_jobs.jl")
+    include("test_tools.jl")
 end

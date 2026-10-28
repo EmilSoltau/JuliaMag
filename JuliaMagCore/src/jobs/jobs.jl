@@ -404,6 +404,7 @@ end
     rerun!(s, job; args = job.args, replace = false)::Job
 
 Run the command of a job again, with the same or new `args` (spec 8.5).
+The command is an importer or a `:job` tool.
 With `replace = true`, the outputs of the old job are taken out of the project
 once the new job is done; undo puts them back.
 A command that cannot run again gives a failed job; nothing is thrown.
@@ -423,6 +424,8 @@ function rerun!(s::Session, job::Job; args::AbstractDict = job.args, replace::Bo
         return start_job!(s, job.command, a, (_, _) -> throw(ArgumentError(
             "the job args have no file path, so \"$(job.command)\" cannot run again")), old)
     end
+    t = find_tool(job.command)
+    t !== nothing && t.mode == :job && return start_job!(s, job.command, a, tool_rerun_work(s, t, a), old)
     return start_job!(s, job.command, a, (_, _) -> throw(ArgumentError(
         "the command \"$(job.command)\" cannot be run again")), old)
 end

@@ -72,6 +72,7 @@ mutable struct Session
     history::Vector{HistoryEntry}
     cursor::Union{Nothing,Cursor}
     marked::Union{Nothing,Tuple{Int,Int}}
+    "Last settings per tool id. Saved in `project.jmag.json` under `settings.tools`."
     remembered::Dict{String,Dict{String,Any}}
     lock::ReentrantLock
     "Problems found while loading, such as skipped history lines."
@@ -93,7 +94,7 @@ function Session(p::Project)
     warnings = String[]
     history = load_history(p, warnings)
     s = Session(p, UndoStep[], UndoStep[], history, nothing, nothing,
-                Dict{String,Dict{String,Any}}(), ReentrantLock(), warnings, Job[], 1,
+                load_remembered(p, warnings), ReentrantLock(), warnings, Job[], 1,
                 ReentrantLock(), Set{String}())
     load_jobs!(s)
     return s
@@ -105,6 +106,26 @@ open_session(folder::AbstractString) = Session(open_project(String(folder)))
 "Make a new project in `folder` and a session for it."
 new_session(folder::AbstractString, name::AbstractString) =
     Session(create_project(String(folder), String(name)))
+
+# Read the remembered tool settings from `settings.tools` of the project.
+# A bad entry is skipped and reported in `warnings`.
+function load_remembered(p::Project, warnings::Vector{String})::Dict{String,Dict{String,Any}}
+    out = Dict{String,Dict{String,Any}}()
+    t = get(p.settings, "tools", nothing)
+    t === nothing && return out
+    if !(t isa AbstractDict)
+        push!(warnings, "$(project_path(p.folder)): settings.tools is not an object; it was ignored")
+        return out
+    end
+    for (id, v) in t
+        if v isa AbstractDict
+            out[String(id)] = Dict{String,Any}(String(k) => x for (k, x) in v)
+        else
+            push!(warnings, "$(project_path(p.folder)): settings.tools.$id is not an object; it was ignored")
+        end
+    end
+    return out
+end
 
 # ---- history ---------------------------------------------------------------
 
