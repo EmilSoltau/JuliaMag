@@ -51,7 +51,6 @@ warn!(st::XyzState, file_line::Int, msg::String) = warn!(st.log, file_line, msg)
 
 # ---- one line of the file --------------------------------------------------
 
-@inline is_ascii_letter(b::UInt8) = (0x41 <= b <= 0x5a) || (0x61 <= b <= 0x7a)
 
 function xyz_line!(st::XyzState, lineno::Int, line::SubString{String}, bytes_read::Int)
     tick!(st.ticker, bytes_read)

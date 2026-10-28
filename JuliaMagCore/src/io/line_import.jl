@@ -30,6 +30,9 @@ const XAppender = ColumnAppender{NumericWriter{Float64}}
 "True for a space or a tab."
 @inline is_blank(b::UInt8) = b == 0x20 || b == 0x09
 
+"True for an ASCII letter."
+@inline is_ascii_letter(b::UInt8) = (0x41 <= b <= 0x5a) || (0x61 <= b <= 0x7a)
+
 # ---- warnings --------------------------------------------------------------
 
 "The warnings of one import. At most `MAX_WARNINGS` are kept; the rest are counted."

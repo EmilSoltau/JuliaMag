@@ -359,6 +359,22 @@ end
     end
 end
 
+@testset "csv numbers read the same with either decimal mark" begin
+    pt = JuliaMagCore.FieldSplitter(CsvLayout(; delimiter = ';'), 4)
+    cm = JuliaMagCore.FieldSplitter(CsvLayout(; delimiter = ';', decimal = ','), 4)
+    read_one(sp, t) = (u = "A;" * t; JuliaMagCore.split_fields!(sp, u, 1, ncodeunits(u)); JuliaMagCore.field_number(sp, u, 2))
+    # Each text with '.', and the same text with ','.
+    for (t, want) in (("1.", 1.0), ("1.e5", 1.0e5), (".5", 0.5), ("-.5", -0.5), ("+3.", 3.0), ("1e5", 1.0e5),
+                      ("1E+5", 1.0e5), ("2.5", 2.5), ("inf", Inf), ("-Inf", -Inf), ("Infinity", Inf),
+                      ("nan", NaN), ("NaN", NaN), ("1e", nothing), (".", nothing), ("+", nothing), ("e5", nothing),
+                      ("0x10", nothing), ("1f5", nothing), ("1d5", nothing), ("1_000", nothing), ("1..5", nothing),
+                      ("in", nothing), ("nanx", nothing), ("infinit", nothing), ("x1", nothing))
+        c = replace(t, '.' => ',')
+        p, q = read_one(pt, t), read_one(cm, c)
+        @test isequal(p, want) && isequal(q, want)
+    end
+end
+
 @testset "csv fixed width with leading blanks" begin
     # Widths 6, 10, 8. The first column starts with blanks; row 3 has an empty first field.
     cols = [CsvColumn("LINE", :line, String, ""), CsvColumn("X", :data, Float64, ""),
@@ -398,6 +414,21 @@ end
         write(f, "1,5;2,25;3,1\n4,5;5,25;6,1\n")
         g = sniff_csv(f)
         @test g.delimiter == ';' && g.decimal == ',' && all(c -> c.eltype === Float64, g.columns)
+        # A tab file with no heading: the tab wins over the comma too.
+        write(f, "1,5\t2,25\t3,1\n4,5\t5,25\t6,1\n")
+        g = sniff_csv(f)
+        @test g.delimiter == '\t' && g.decimal == ',' && length(g.columns) == 3
+        @test all(c -> c.eltype === Float64, g.columns)
+        s2 = fresh_session()
+        d2 = database_of(s2, import_csv(s2, f, g))
+        @test collect(read_channel(d2, d2.lines[1].id, "C2")) == [2.25, 5.25]
+        # A tab file with a heading.
+        write(f, "A\tB\n1,5\t2,5\n")
+        g = sniff_csv(f)
+        @test g.delimiter == '\t' && g.decimal == ',' && [c.name for c in g.columns] == ["A", "B"]
+        # A plain comma file stays a comma file.
+        write(f, "A,B\n1,2\n3,4\n")
+        @test sniff_csv(f).delimiter == ',' && sniff_csv(f).decimal == '.'
         # A file with points keeps '.'.
         write(f, "A;B\n1.5;2,5\n")
         @test sniff_csv(f).decimal == '.'

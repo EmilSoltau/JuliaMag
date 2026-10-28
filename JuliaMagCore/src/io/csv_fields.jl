@@ -201,16 +201,56 @@ end
 "The text of a quoted field with `\"\"` inside, unescaped."
 unescape_field(s::String, a::Int, e::Int)::String = replace(field_text(s, a, e), "\"\"" => "\"")
 
+"True when bytes `a:e` of `s` equal `word`, ignoring the case of ASCII letters."
+@inline function same_word_ci(s::String, a::Int, e::Int, word::String)::Bool
+    e - a + 1 == ncodeunits(word) || return false
+    @inbounds for k in 0:(e - a)
+        codeunit(s, a + k) | 0x20 == codeunit(word, k + 1) || return false
+    end
+    return true
+end
+
+"""
+True when bytes `a:e` of `s` look like a number with the decimal mark `decimal`:
+blanks around it, a sign, then either `inf`, `infinity` or `nan` (any case), or
+only digits, the decimal mark, `e`, `E`, `+` and `-`. The parser then checks the
+order of those. This keeps the two decimal marks to one rule: the point path
+alone would also read hex such as `0x10`, the comma path alone `1f5`.
+"""
+@inline function number_shape(s::String, a::Int, e::Int, decimal::UInt8)::Bool
+    @inbounds while a <= e && is_blank(codeunit(s, a))
+        a += 1
+    end
+    @inbounds while e >= a && is_blank(codeunit(s, e))
+        e -= 1
+    end
+    a > e && return false
+    b = codeunit(s, a)
+    (b == UInt8('+') || b == UInt8('-')) && (a += 1)
+    a > e && return false
+    if is_ascii_letter(codeunit(s, a))
+        return same_word_ci(s, a, e, "inf") || same_word_ci(s, a, e, "infinity") || same_word_ci(s, a, e, "nan")
+    end
+    @inbounds for k in a:e
+        b = codeunit(s, k)
+        (UInt8('0') <= b <= UInt8('9') || b == decimal || b == UInt8('e') || b == UInt8('E') ||
+         b == UInt8('+') || b == UInt8('-')) || return false
+    end
+    return true
+end
+
 """
     parse_number(s, a, e, decimal) -> Union{Float64,Nothing}
 
 Bytes `a:e` of `s` as a number, or `nothing`. `decimal` is the byte of the decimal
-mark, `.` or `,`. With a decimal comma the whole field must be the number, so `1.5`
-and `1,5,3` are not numbers. No memory is allocated.
+mark, `.` or `,`. Both marks follow the same rule (see `number_shape`): `1.`, `.5`,
+`1.e5`, `inf` and `nan` are numbers, and the same with `,`. With a decimal comma
+the whole field must be the number, so `1.5` and `1,5,3` are not numbers.
+No memory is allocated.
 """
 @inline function parse_number(s::String, a::Int, e::Int, decimal::UInt8)::Union{Float64,Nothing}
+    number_shape(s, a, e, decimal) || return nothing
     decimal == BYTE_POINT && return parse_field(s, a, e)
-    a > e && return nothing
     r = Parsers.xparse(Float64, codeunits(s), a, e, COMMA_NUMBER)
     return Parsers.ok(r.code) && r.tlen == e - a + 1 ? r.val : nothing
 end

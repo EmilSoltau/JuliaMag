@@ -269,8 +269,8 @@ end
 
 """
 Guess the delimiter: the one that splits most lines into the same number (2 or more)
-of fields. A semicolon that does this for as many lines as a comma wins over the
-comma, since then the commas are most likely decimal commas.
+of fields. A semicolon or a tab that does this for as many lines as a comma wins
+over the comma, since then the commas are most likely decimal commas.
 """
 function guess_delimiter(lines::Vector{String})::Char
     body = filter(!isblankline, lines)
@@ -284,7 +284,11 @@ function guess_delimiter(lines::Vector{String})::Char
         # Most lines first; then the most fields. Earlier delimiters win a tie.
         (times, n) > score && ((best, score) = (d, (times, n)))
     end
-    best == ',' && haskey(scores, ';') && scores[';'][1] >= score[1] && return ';'
+    if best == ','
+        for d in (';', '\t')
+            haskey(scores, d) && scores[d][1] >= score[1] && return d
+        end
+    end
     return best
 end
 
