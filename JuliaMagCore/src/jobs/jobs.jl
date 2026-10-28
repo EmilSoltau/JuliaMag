@@ -48,13 +48,15 @@ project itself). It should check `is_cancelled(progress)` now and then.
 
 When the work is done, its new items are in the project, the job is recorded in
 the history as `command` with `args`, and an undo step takes the items out again.
+With `undoable = false` the job gets no undo step. Use it for work that does
+not change the project, such as an export.
 An error becomes `JOB_FAILED`; nothing is thrown.
 """
-start_job!(s::Session, command::AbstractString, args::AbstractDict, work::Function)::Job =
-    start_job!(s, command, args, work, nothing)
+start_job!(s::Session, command::AbstractString, args::AbstractDict, work::Function; undoable::Bool = true)::Job =
+    start_job!(s, command, args, work, nothing; undoable)
 
 function start_job!(s::Session, command::AbstractString, args::AbstractDict, work::Function,
-                    replaces::Union{Nothing,Job})::Job
+                    replaces::Union{Nothing,Job}; undoable::Bool = true)::Job
     a = Dict{String,Any}(String(k) => v for (k, v) in args)
     before = lock(() -> Set{String}(i.id for i in s.project.items), s.lock)
     # The lock makes `job.task` set before any other thread can see the job.
@@ -64,7 +66,7 @@ function start_job!(s::Session, command::AbstractString, args::AbstractDict, wor
                   IOBuffer(), String[], "", nothing)
         push!(s.jobs, job)
         save_job_quietly(s, job)
-        job.task = Threads.@spawn run_job!(s, job, work, before, replaces)
+        job.task = Threads.@spawn run_job!(s, job, work, before, replaces, undoable)
         return job
     end
 end
@@ -93,7 +95,8 @@ end
 
 # ---- running ---------------------------------------------------------------
 
-function run_job!(s::Session, job::Job, work::Function, before::Set{String}, replaces::Union{Nothing,Job})
+function run_job!(s::Session, job::Job, work::Function, before::Set{String}, replaces::Union{Nothing,Job},
+                  undoable::Bool)
     ctx = JobContext()
     try
         progress = Progress(f -> (job.progress[] = clamp(Float64(f), 0.0, 1.0); nothing), () -> job.cancel[])
@@ -101,7 +104,7 @@ function run_job!(s::Session, job::Job, work::Function, before::Set{String}, rep
             job.cancel[] && throw(JobCancelled())
             return work(progress, job.report)
         end
-        finish_job!(s, job, job_outputs(result), before, replaces, ctx)
+        finish_job!(s, job, job_outputs(result), before, replaces, ctx, undoable)
     catch e
         fail_job!(s, job, e, ctx)
     end
@@ -116,9 +119,9 @@ function job_outputs(result)::Vector{ProjectItem}
     return ProjectItem[x for x in result]
 end
 
-"Add the outputs, record the job and push its undo step. Undoes its own changes on error."
+"Add the outputs, record the job and push its undo step (when `undoable`). Undoes its own changes on error."
 function finish_job!(s::Session, job::Job, items::Vector{ProjectItem}, before::Set{String},
-                     replaces::Union{Nothing,Job}, ctx::JobContext)
+                     replaces::Union{Nothing,Job}, ctx::JobContext, undoable::Bool)
     lock(s.lock) do
         p = s.project
         new = ProjectItem[it for it in items if !(it.id in before)]
@@ -160,6 +163,7 @@ function finish_job!(s::Session, job::Job, items::Vector{ProjectItem}, before::S
             set_status!(replaces, JOB_UNDONE)
             save_job_quietly(s, replaces)
         end
+        undoable || return nothing
         noted = copy(ctx.undos)
         replaced_all = !kept_old
         undo = () -> begin
@@ -233,7 +237,7 @@ end
 
 "End a job that threw. Never throws."
 function fail_job!(s::Session, job::Job, e, ctx::JobContext)
-    cancel_error = e isa ImportCancelled || e isa JobCancelled
+    cancel_error = e isa ImportCancelled || e isa ExportCancelled || e isa JobCancelled
     cancelled = job.cancel[] || cancel_error
     try
         lock(s.lock) do
@@ -371,6 +375,7 @@ end
 
 "Values for the history: symbols become text."
 plain_arg(x::Symbol) = String(x)
+plain_arg(x::AbstractChar) = string(x)
 plain_arg(x) = x
 
 """
@@ -405,9 +410,10 @@ end
     rerun!(s, job; args = job.args, replace = false)::Job
 
 Run the command of a job again, with the same or new `args` (spec 8.5).
-The command is an importer or a `:job` tool.
+The command is an importer, an exporter or a `:job` tool.
 With `replace = true`, the outputs of the old job are taken out of the project
-once the new job is done; undo puts them back.
+once the new job is done; undo puts them back. An export makes no items, so
+`replace` does nothing for it, and the new export job has no undo step.
 A command that cannot run again gives a failed job; nothing is thrown.
 """
 function rerun!(s::Session, job::Job; args::AbstractDict = job.args, replace::Bool = false)::Job
@@ -425,8 +431,57 @@ function rerun!(s::Session, job::Job; args::AbstractDict = job.args, replace::Bo
         return start_job!(s, job.command, a, (_, _) -> throw(ArgumentError(
             "the job args have no file path, so \"$(job.command)\" cannot run again")), old)
     end
+    e = exporter_for(job.command)
+    if e !== nothing && e.id == job.command
+        item_id, path = get(a, "item", ""), get(a, "path", "")
+        if item_id isa AbstractString && path isa AbstractString && !isempty(item_id) && !isempty(path)
+            settings = Dict{String,Any}(key => v for (key, v) in a if !(key in ("item", "path")))
+            return start_job!(s, job.command, a, export_work(s, e, String(item_id), String(path), settings), nothing;
+                              undoable = false)
+        end
+        return start_job!(s, job.command, a, (_, _) -> throw(ArgumentError(
+            "the job args have no item or no file path, so \"$(job.command)\" cannot run again")); undoable = false)
+    end
     t = find_tool(job.command)
     t !== nothing && t.mode == :job && return start_job!(s, job.command, a, tool_rerun_work(s, t, a), old)
     return start_job!(s, job.command, a, (_, _) -> throw(ArgumentError(
         "the command \"$(job.command)\" cannot be run again")), old)
+end
+
+# ---- exports ---------------------------------------------------------------
+
+"""
+    export_file(s, item_id, path; exporter = "", settings...)::Job
+
+Export item `item_id` to the file `path` as a job (spec 7). `exporter` is an
+exporter id, such as `"export.csv"`; blank picks the exporter by the extension
+of `path` (see `exporter_for`). The settings go to the exporter, such as
+`lines`, `channels` or `delimiter`.
+
+The job reports progress by rows and can be cancelled. The file is written to
+`path * ".tmp"` and renamed at the end; on cancel or failure the temp file is
+removed and `path` is not touched. The job makes no project item and has no
+undo step. It is recorded as the exporter id with `item`, `path` and the
+settings. An unknown exporter gives a failed job; nothing is thrown.
+"""
+function export_file(s::Session, item_id::AbstractString, path::AbstractString; exporter::AbstractString = "",
+                     kwargs...)::Job
+    settings = Dict{String,Any}(String(k) => plain_arg(v) for (k, v) in kwargs)
+    args = merge(settings, Dict{String,Any}("item" => String(item_id), "path" => String(path)))
+    spec = exporter_for(isempty(exporter) ? path : exporter)
+    if spec === nothing || (!isempty(exporter) && spec.id != exporter)
+        what = isempty(exporter) ? "no exporter for the file type of $path" : "no exporter with id \"$exporter\""
+        return start_job!(s, "export", args, (_, _) -> throw(ArgumentError(what)); undoable = false)
+    end
+    return start_job!(s, spec.id, args, export_work(s, spec, String(item_id), String(path), settings);
+                      undoable = false)
+end
+
+function export_work(s::Session, spec::ExporterSpec, item_id::String, path::String, settings::Dict{String,Any})
+    return (progress::Progress, io::IO) -> begin
+        r = spec.run(s, item_id, path, settings, progress)::ExportResult
+        println(io, spec.name, " export of ", item_id, " to ", r.path, ": ", r.rows, " rows in ", r.lines, " lines")
+        foreach(n -> println(io, n), r.notes)
+        return ProjectItem[]
+    end
 end

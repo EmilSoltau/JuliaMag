@@ -45,7 +45,7 @@ struct ToolSpec
         names = first.(inputs)
         allunique(names) || throw(ArgumentError("tool \"$id\" has two inputs with the same name"))
         for st in settings
-            if st isa Union{ChannelSetting,PairSetting} && !(st.input in names)
+            if st isa Union{ChannelSetting,ChannelListSetting,PairSetting} && !(st.input in names)
                 throw(ArgumentError("tool \"$id\": setting \"$(st.key)\" uses input \"$(st.input)\", which the tool does not have"))
             end
         end

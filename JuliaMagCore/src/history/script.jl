@@ -21,8 +21,15 @@ kwtext(a::AbstractDict, ks) = join(("$(kwname(k)) = $(literal(a[k]))" for k in s
 is_import(c::String, a::AbstractDict) =
     any(i -> i.id == c, importers()) && get(a, "path", nothing) isa AbstractString
 
+# True when the command is a registered exporter and the args name the item and the file.
+is_export(c::String, a::AbstractDict) =
+    any(x -> x.id == c, exporters()) && get(a, "item", nothing) isa AbstractString &&
+    get(a, "path", nothing) isa AbstractString
+
 # A job returns at once. The script waits for it, so the next line sees its result.
-call_text(e::HistoryEntry)::String = isempty(e.job) ? command_text(e) : "wait_job($(command_text(e)))"
+# An export always runs as a job in the script, even when it was called directly.
+call_text(e::HistoryEntry)::String =
+    isempty(e.job) && !is_export(e.command, e.args) ? command_text(e) : "wait_job($(command_text(e)))"
 
 function command_text(e::HistoryEntry)::String
     a = e.args
@@ -41,6 +48,11 @@ function command_text(e::HistoryEntry)::String
         kw = kwtext(a, filter(!=("path"), collect(keys(a))))
         return isempty(kw) ? "import_file(s, $(repr(a["path"])))" : "import_file(s, $(repr(a["path"])); $kw)"
     end
+    if is_export(c, a)
+        kw = kwtext(a, filter(k -> !(k in ("item", "path")), collect(keys(a))))
+        head = "export_file(s, $(repr(a["item"])), $(repr(a["path"])); exporter = $(repr(c))"
+        return isempty(kw) ? head * ")" : head * ", " * kw * ")"
+    end
     kw = kwtext(a, keys(a))
     return isempty(kw) ? "run_tool(s, $(repr(c)))" : "run_tool(s, $(repr(c)); $kw)"
 end
@@ -51,10 +63,11 @@ end
 The history as a Julia script. It starts with `using JuliaMagCore` and
 `s = open_session(<project folder>)`. Each entry is one call.
 Commands that have a core function become that call. Imports become
-`import_file(s, path; <settings>...)`. Other commands become
+`import_file(s, path; <settings>...)`. Exports become
+`export_file(s, item, path; exporter = "<id>", <settings>...)`. Other commands become
 `run_tool(s, "<command>"; <args>...)`, with tool inputs as `inputs = Dict(...)`.
-An entry that ran as a job is wrapped in `wait_job(...)`, so the script waits
-for the job before the next line.
+An entry that ran as a job, and every export, is wrapped in `wait_job(...)`,
+so the script waits for the job before the next line.
 """
 function script_text(s::Session)::String
     lock(s.lock) do

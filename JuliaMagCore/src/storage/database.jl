@@ -507,6 +507,138 @@ end
 read_rows(::LineDatabase, c::ChannelInfo, ::LineInfo, T::Type) =
     throw(DatabaseError("channel $(c.name) has a type that cannot be read: $T"))
 
+# ---- reading in blocks -----------------------------------------------------
+#
+# Exports read a channel in blocks of rows with plain file reads, into a buffer
+# the reader keeps. Memory then stays flat however long a line is. The file is
+# not mapped, so on Windows an import can still grow it, and a file cut by an
+# undo gives a `DatabaseError`, not a crash.
+
+"Reads blocks of rows of one channel. Make it with `block_reader`, close it with `close`."
+abstract type BlockReader end
+
+mutable struct NumericBlockReader{T<:NumericEltype} <: BlockReader
+    db::LineDatabase
+    channel::ChannelInfo
+    io::IOStream
+    buf::Vector{T}
+end
+
+mutable struct StringBlockReader <: BlockReader
+    db::LineDatabase
+    channel::ChannelInfo
+    io::IOStream
+    offio::IOStream
+    offs::Vector{Int64}
+    bytes::Vector{UInt8}
+    out::Vector{String}
+end
+
+"""
+    block_reader(db, name) -> BlockReader
+
+A reader for channel `name` (see `read_block`). It keeps its files open until `close`.
+"""
+function block_reader(db::LineDatabase, name::AbstractString)::BlockReader
+    c = channel(db, name)
+    files = channel_files(db, c)
+    T = c.eltype
+    T === String && return open_string_reader(db, c, files)
+    T in values(CHANNEL_ELTYPES) || throw(DatabaseError("channel $(c.name) has a type that cannot be read: $T"))
+    return open_numeric_reader(db, c, files[1], T)
+end
+
+function open_string_reader(db::LineDatabase, c::ChannelInfo, files::Vector{String})::StringBlockReader
+    io = open(files[1], "r")
+    offio = try
+        open(files[2], "r")
+    catch
+        close(io)
+        rethrow()
+    end
+    return StringBlockReader(db, c, io, offio, Int64[], UInt8[], String[])
+end
+
+open_numeric_reader(db::LineDatabase, c::ChannelInfo, path::String, ::Type{T}) where {T<:NumericEltype} =
+    NumericBlockReader{T}(db, c, open(path, "r"), T[])
+
+function Base.close(r::NumericBlockReader)
+    close(r.io)
+    return nothing
+end
+
+function Base.close(r::StringBlockReader)
+    close(r.io)
+    close(r.offio)
+    return nothing
+end
+
+function check_block(r::BlockReader, l::LineInfo, rows::UnitRange{Int})
+    (first(rows) >= 1 && last(rows) <= l.nrows) || throw(DatabaseError(
+        "rows $rows are not on line $(line_name(l.id)), which has $(l.nrows) rows"))
+    is_open_line(r.db, l) && throw(DatabaseError(
+        "line $(line_name(l.id)) has no data yet in channel $(r.channel.name); its rows are being appended"))
+    return nothing
+end
+
+"Read `n` values of type `T` at value index `first` (from 0) into the start of `buf`."
+function read_values!(io::IOStream, buf::Vector{T}, first::Int, n::Int, c::ChannelInfo) where {T}
+    n == 0 && return nothing
+    length(buf) < n && resize!(buf, n)
+    seek(io, first * sizeof(T))
+    try
+        GC.@preserve buf unsafe_read(io, pointer(buf), n * sizeof(T))
+    catch e
+        e isa EOFError || rethrow()
+        throw(DatabaseError("channel $(c.name) is damaged or was cut while it was read: its file is too short"))
+    end
+    return nothing
+end
+
+"""
+    read_block(r, line, rows) -> AbstractArray
+
+Rows `rows` (from 1) of line `line`, as `read_channel` gives them: a vector, an
+`arraylen x n` matrix for an array channel, or a `Vector{String}`.
+The result is a view of the reader's buffer: the next `read_block` overwrites it.
+"""
+function read_block(r::NumericBlockReader{T}, l::LineInfo, rows::UnitRange{Int}) where {T}
+    check_block(r, l, rows)
+    a = r.channel.arraylen
+    n = length(rows)
+    read_values!(r.io, r.buf, (l.offset + first(rows) - 1) * a, n * a, r.channel)
+    v = view(r.buf, 1:(n * a))
+    return a == 1 ? v : reshape(v, a, n)
+end
+
+function read_block(r::StringBlockReader, l::LineInfo, rows::UnitRange{Int})
+    check_block(r, l, rows)
+    n = length(rows)
+    resize!(r.out, n)
+    n == 0 && return r.out
+    # The end offsets of the row before the block and of each row in it.
+    k = l.offset + first(rows) - 1
+    if k == 0
+        read_values!(r.offio, r.offs, 0, n, r.channel)
+        start = Int64(0)
+    else
+        read_values!(r.offio, r.offs, k - 1, n + 1, r.channel)
+        start = r.offs[1]
+        copyto!(r.offs, 1, r.offs, 2, n)
+    end
+    nbytes = Int(r.offs[n] - start)
+    nbytes >= 0 || throw(DatabaseError("channel $(r.channel.name) is damaged: its offsets go down"))
+    read_values!(r.io, r.bytes, Int(start), nbytes, r.channel)
+    p = start
+    for i in 1:n
+        q = r.offs[i]
+        (p <= q <= start + nbytes) || throw(DatabaseError("channel $(r.channel.name) is damaged: its offsets go down"))
+        r.out[i] = String(r.bytes[(p - start + 1):(q - start)])
+        p = q
+    end
+    return r.out
+end
+
 # ---- writing ---------------------------------------------------------------
 
 "Convert `x` to the element type of a channel. A missing value of any type stays missing."

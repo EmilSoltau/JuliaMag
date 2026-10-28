@@ -165,6 +165,28 @@ struct ChannelSetting <: SettingSpec
             allow_array, allow_new, String(default))
 end
 
+"""
+    ChannelListSetting(key, label; input = "database", allow_array = true, default = String[],
+                       help = "", advanced = false)
+
+A list of channel names of the database given as tool input `input`.
+An empty list means all channels. `allow_array` allows array channels.
+The value is a `Vector{String}`.
+"""
+struct ChannelListSetting <: SettingSpec
+    key::String
+    label::String
+    help::String
+    advanced::Bool
+    input::String
+    allow_array::Bool
+    default::Vector{String}
+    ChannelListSetting(key, label; input = "database", allow_array::Bool = true,
+                       default::AbstractVector{<:AbstractString} = String[], help = "", advanced::Bool = false) =
+        new(String(key), String(label), String(help), advanced, String(input), allow_array,
+            String[d for d in default])
+end
+
 "The values of a `LinesSetting`."
 const LINES_CHOICES = ("all", "selected", "current")
 
@@ -237,6 +259,7 @@ end
 
 "The default value of a setting. Vectors are copied, so callers may change them."
 setting_default(st::SettingSpec) = st.default
+setting_default(st::ChannelListSetting) = copy(st.default)
 function setting_default(st::Union{ExtentSetting,PointSetting})
     d = st.default
     return d === nothing ? nothing : copy(d)
@@ -261,6 +284,10 @@ A value that does not fit is returned as it is, for `setting_problem` to report.
 setting_value(::SettingSpec, x) = x
 setting_value(::SettingSpec, x::Union{AbstractString,Symbol}) = String(x)
 setting_value(st::NumberSetting, x::Real) = x isa Bool ? x : number_value(st.integer, x)
+function setting_value(::ChannelListSetting, x::AbstractVector)
+    all(v -> v isa Union{AbstractString,Symbol}, x) || return x
+    return String[String(v) for v in x]
+end
 function setting_value(::Union{ExtentSetting,PointSetting}, x::AbstractVector)
     all(v -> v isa Real && !(v isa Bool), x) || return x
     return Float64[v for v in x]
@@ -327,6 +354,12 @@ end
 function setting_problem(st::ChannelSetting, x)::Union{Nothing,String}
     istext(x) || return "$(st.label) must be a channel name."
     isempty(x) && return "$(st.label) is not set."
+    return nothing
+end
+
+function setting_problem(st::ChannelListSetting, x)::Union{Nothing,String}
+    (x isa AbstractVector && all(istext, x)) || return "$(st.label) must be a list of channel names."
+    any(isempty, x) && return "$(st.label) has an empty channel name."
     return nothing
 end
 

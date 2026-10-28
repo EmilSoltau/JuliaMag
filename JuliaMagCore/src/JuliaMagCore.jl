@@ -23,6 +23,8 @@ include("io/xyz_import.jl")
 include("io/csv_fields.jl")
 include("io/csv_import.jl")
 include("io/csv_templates.jl")
+include("io/line_export.jl")
+include("io/parquet_export.jl")
 include("jobs/jobs.jl")
 include("tools/registry.jl")
 
@@ -47,9 +49,11 @@ export ImporterSpec, register_importer!, importers, importer_for, import_xyz
 export CsvColumn, CsvLayout, sniff_csv, preview_rows, import_csv
 export save_template, load_template, list_templates, layout_json
 export JobStatus, JOB_RUNNING, JOB_DONE, JOB_FAILED, JOB_CANCELLED, JOB_UNDONE, Job
-export start_job!, cancel!, status, wait_job, jobs, rerun!, import_file
+export start_job!, cancel!, status, wait_job, jobs, rerun!, import_file, export_file
+export ExportResult, ExporterSpec, register_exporter!, exporters, exporter_for
+export export_xyz, export_csv, export_parquet
 export SettingSpec, NumberSetting, TextSetting, ExprSetting, ChoiceSetting, BoolSetting, FileSetting,
-    ChannelSetting, LinesSetting, CRSSetting, PairSetting, ExtentSetting, PointSetting
+    ChannelSetting, ChannelListSetting, LinesSetting, CRSSetting, PairSetting, ExtentSetting, PointSetting
 export Place, ToolSpec, ToolError, register_tool!, unregister_tool!, tools, tool, tabs
 export default_settings, validate, last_settings, reset_settings!, run_tool
 

@@ -11,4 +11,5 @@ using Test
     include("test_csv.jl")
     include("test_jobs.jl")
     include("test_tools.jl")
+    include("test_export.jl")
 end
