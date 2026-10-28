@@ -1,13 +1,14 @@
 # Import benchmark
 
 This page records how fast JuliaMagCore imports big files, and how much memory it needs.
-The tool fails if imports are slow or crash on large files, so these numbers are a guard.
+These numbers are a guard: a slow import or a crash on a large file would show here.
 
 ## Machine
 
 - CPU: 13th Gen Intel Core i9-13900 (32 logical CPUs).
 - RAM: 23 GB (WSL2), swap 8 GB.
-- OS: Linux 6.18 on WSL2. Files were on the Linux disk.
+- OS: Linux 6.18 on WSL2.
+- Files were on the Linux disk.
 - Julia: 1.12.7.
 - Threads: `JULIA_NUM_THREADS=4`.
 
@@ -69,11 +70,19 @@ It still finishes in 5.5 s.
   Both were fixed in the package (`line_is_new`, and `total_rows` reads the end of the last line).
   The same case now takes 5.5 s.
 - The scan itself allocates nothing per value, so no change was needed there.
-- In `end_line!`, the cost is mostly 12 file flushes per line, about 90 microseconds per line.
-  The channels that have no appender are cut and released per line, as the suspect said.
+- In `end_line!`, the cost is probably 12 file flushes per line, about 90 microseconds per line.
+  This is an estimate, not a measurement.
+  The channels that have no appender are cut and released per line.
   An XYZ import has an appender for every channel, so that path was not hit here.
   It was not measured.
-- On Windows, `release_map!` runs `GC.gc()`. This was not measured here, because the machine is Linux.
+- On Windows, `release_map!` runs `GC.gc()`.
+  This was not measured here, because the machine is Linux.
+
+## Limits
+
+- The benchmark runs on Linux only.
+- The memory figure is sampled every 50 ms.
+  It is approximate and can miss short peaks.
 
 ## How to re-run
 
@@ -87,9 +96,12 @@ JULIA_NUM_THREADS=4 julia --project=JuliaMagCore bench/import_xyz.jl 500 --csv
 ```
 
 - The first argument is the size in MB.
-- `--lines N` sets the number of lines. The default is about one line per 8 MB.
+- `--lines N` sets the number of lines.
+  The default is about one line per 8 MB.
 - `--csv` writes and imports a CSV instead of an XYZ.
-- `--dir DIR` says where to put the temporary files. The default is the system temp folder.
+- `--dir DIR` says where to put the temporary files.
+  The default is the system temp folder.
 - `--keep` keeps the files.
 - The script writes the file, imports it, prints the numbers and deletes the files.
-- The file writer is in the script. It makes 500 MB in under a second.
+- The file writer is in the script.
+  It makes 500 MB in under a second.
