@@ -146,6 +146,7 @@ end
     @test isequal(ev("A = -X + +Y"), [-2.0, 1.0, 0.0, NaN])
     @test isequal(ev("A = atan(Y, X)"), [atan(2.0, 4.0), atan(0.0, -1.0), 0.0, NaN])
     @test isequal(ev("A = abs(X) * pi"), [4pi, pi, 0.0, NaN])
+    @test isequal(ev("A = ifelse(X > 0, NaN, -Inf)"), [NaN, -Inf, -Inf, -Inf])
     @test isequal(ev("A = X"; X = Float64[], Y = Float64[]), Float64[])
     @test isequal(ev("A = 1 + 2"; X = Float64[], Y = Float64[]), Float64[])
 end
@@ -269,6 +270,16 @@ end
     @test status(job) in (JOB_CANCELLED, JOB_DONE)
     status(job) == JOB_DONE && undo!(s)
     @test read(cm_file(s, id, "MAG")) == bytes && cm_meta(s, id) == meta && isempty(s.busy)
+end
+
+@testset "channel math: masking with NaN (R14)" begin
+    (; s, id, L) = make_db_with(MAG = [50000.0, 50010.0, 50020.0], ALT = [150.0, 250.0, NaN])
+    job = wait_job(run_tool(s, "database.channel_math"; inputs = Dict("database" => id),
+                            expr = "MAG_M = ifelse(ALT > 200, NaN, MAG)", lines = "all"))
+    @test status(job) == JOB_DONE
+    @test isequal(collect(read_channel(database(s.project, id), L, "MAG_M")), [50000.0, NaN, 50020.0])
+    @test parse_channel_expr("A = Inf", ["MAG"]) == Expr(:(=), :A, Inf)
+    @test parse_channel_expr("A = NaN", ["NaN"]) == :(A = NaN)     # a channel named NaN wins
 end
 
 @testset "channel math replays by script" begin

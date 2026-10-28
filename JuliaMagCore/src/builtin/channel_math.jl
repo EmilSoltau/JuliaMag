@@ -3,7 +3,8 @@
 #
 # Safety: the text is never run as Julia code. `parse_channel_expr` parses it
 # with `Meta.parse` and checks every part against a short list. Allowed are
-# number literals, channel names, the constants `pi` and `e`, and calls to
+# number literals, channel names, the constants `pi`, `e`, `NaN` and `Inf`
+# (ruling R14; `NaN` masks values, such as `ifelse(ALT > 200, NaN, MAG)`), and calls to
 #
 #     + - * / ^ abs sqrt exp log log10 sin cos tan atan min max ifelse isnan
 #     < > <= >= == != & |
@@ -91,7 +92,7 @@ const CM_FUNCTIONS = Dict{Symbol,CmFunction}(
 
 "Names that stand for a number, when no channel has the name."
 const CM_CONSTANTS = Dict{Symbol,Float64}(:pi => Float64(pi), :π => Float64(pi), :e => Float64(ℯ),
-                                          :ℯ => Float64(ℯ))
+                                          :ℯ => Float64(ℯ), :NaN => NaN, :Inf => Inf)
 
 const CM_ALLOWED_TEXT = "Allowed functions: " * join(string.(CM_ORDER), " ") * "."
 const CM_FORM = "Write the expression as OUT = <expression>, such as MAG_IGRF = MAG - IGRF."
@@ -129,7 +130,8 @@ end
 Parse and check a Channel Math expression `OUT = <expression>`. `channels` are
 the channel names of the database. Returns `:(OUT = <checked expression>)`:
 in the checked expression every name is a channel (a `Symbol`, which may hold
-any text), every number is a `Float64`, every call is to an allowed function,
+any text), every number is a `Float64` (the constants `pi`, `e`, `NaN` and `Inf`
+become numbers too), every call is to an allowed function,
 dotted calls are plain, and `a < b < c` is `(a < b) & (b < c)`.
 OUT may be a new channel name.
 
@@ -475,6 +477,6 @@ register_tool!(ToolSpec("database.channel_math", "Channel Math",
     "Names that are not Julia names go in backticks, such as `MAG-IGRF`.", "math",
     [Place("Database Tools", "Channels")], DATABASE_INPUT,
     SettingSpec[ExprSetting("expr", "Expression";
-                            help = "OUT = <expression>. " * CM_ALLOWED_TEXT * " Constants: pi, e."),
+                            help = "OUT = <expression>. " * CM_ALLOWED_TEXT * " Constants: pi, e, NaN, Inf."),
                 LinesSetting("lines", "Lines")],
     :job, run_channel_math))
