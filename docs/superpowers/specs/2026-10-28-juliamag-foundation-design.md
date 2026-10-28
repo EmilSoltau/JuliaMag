@@ -611,7 +611,9 @@ These are open to change.
   The app ships with the Julia runtime and a package environment.
   At start, it loads extra tool packages from a plugins folder and from the user's own tool folder.
   The user can reload a changed tool without restarting (Revise.jl, when present).
-- **Storage:** one memory-mapped file per channel and per grid (Apache Arrow is the lean for channels), plus a text project file.
+- **Storage:** one raw memory-mapped file per channel and per grid, plus JSON metadata and a JSON project file.
+  Raw files were chosen over Apache Arrow during planning, because cells must be edited in place and Arrow files are read-only when memory-mapped.
+  Parquet stays an export format.
 - **Code layout:** the core (data model, project, import, export, tool registry, jobs) has no UI dependency.
   The UI sits on top.
   This mirrors RustGIS's layer rule, keeps the core scriptable, and lets tools be tested without the UI.
