@@ -1,10 +1,13 @@
 # Channel Math (spec 9.4): the user writes `OUT = <expression>` over channel
 # names, such as `MAG_IGRF = MAG - IGRF`, and the result goes to channel OUT.
 #
-# Safety: the text is never run as Julia code. `parse_channel_expr` first
-# refuses text that is too long or nested too deep (see `expr_text_problem`),
-# so no stack can overflow. It then parses it with `Meta.parseall`, refuses a
-# tree nested more than 200 deep, and checks every part against a short list. Allowed are
+# Safety: the text is never run as Julia code. `parse_channel_expr` first scans
+# the raw text with `expr_text_problem`, a token whitelist with size and nesting
+# limits; text with any other token (keywords, quotes, `$`, `@`, `:`, `;`,
+# brackets other than round ones, ...) never reaches the parser. Then it parses
+# with `Meta.parseall`, refuses a tree nested more than 200 deep (so checking and
+# computing recurse at most 200 levels), and checks every part against a short
+# list. Allowed are
 # number literals, channel names, the constants `pi`, `e`, `NaN` and `Inf`
 # (ruling R14; `NaN` masks values, such as `ifelse(ALT > 200, NaN, MAG)`), and calls to
 #
@@ -157,8 +160,9 @@ OUT may be a new channel name.
 
 Throws `ToolError` with a plain message for a syntax error, an unknown name,
 a call to a function that is not allowed, or any other form, such as field
-access, macros, text, ranges or keyword arguments. Text over 10,000 characters,
-or nested too deep, is refused before it is parsed.
+access, macros, text, ranges or keyword arguments. Text with a token outside
+the whitelist of `expr_text_problem`, over 10,000 characters, or nested too
+deep, is refused before it is parsed.
 The text is only parsed, never run.
 """
 function parse_channel_expr(text::String, channels::Vector{String})::Union{Expr,Symbol}

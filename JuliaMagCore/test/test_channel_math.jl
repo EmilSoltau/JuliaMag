@@ -94,19 +94,19 @@ end
     @test msg("A = MAG.x") == "Field access with . is not allowed."
     @test msg("A = Base.run(MAG)") == "Field access with . is not allowed."
     @test msg("A = @time MAG") == "Macros (names that start with @) are not allowed."
-    @test msg("A = [x for x in MAG]") == "Comprehensions and generators are not allowed."
-    @test msg("A = sum(x for x in MAG)") == "sum is not an allowed function. Allowed functions: " *
-        "+ - * / ^ abs sqrt exp log log10 sin cos tan atan min max ifelse isnan < > <= >= == != & |."
-    @test msg("A = 1:3") == "Ranges with : are not allowed."
+    @test msg("A = [x for x in MAG]") == "\"[\" is not allowed in a channel expression."
+    @test msg("A = sum(x for x in MAG)") == "\"for\" is not allowed in a channel expression. " *
+        "A channel of that name goes in backticks, such as `for`."
+    @test msg("A = 1:3") == "\":\" is not allowed in a channel expression."
     @test msg("A = \"MAG\"") == "Text in quotes is not allowed."
     @test msg("A = \"\$MAG\"") == "Text in quotes is not allowed."
     @test msg("A = \$MAG") == "Interpolation with \$ is not allowed."
-    @test msg("A = max(MAG; init = 0)") == "Keyword arguments are not allowed."
+    @test msg("A = max(MAG; init = 0)") == "\";\" is not allowed in a channel expression."
     @test msg("A = max(MAG, init = 0)") == "Keyword arguments are not allowed."
-    @test msg("A = MAG[1]") == "Indexing with [ ] is not allowed."
-    @test msg("A = [MAG, IGRF]") == "Lists of values are not allowed."
+    @test msg("A = MAG[1]") == "\"[\" is not allowed in a channel expression."
+    @test msg("A = {MAG}") == "\"{\" is not allowed in a channel expression."
     @test msg("A = (MAG, IGRF)") == "Lists of values are not allowed."
-    @test msg("A = :MAG") == "Symbols such as :name are not allowed."
+    @test msg("A = :MAG") == "\":\" is not allowed in a channel expression."
     @test msg("A = true") == "true and false are not allowed. Use a comparison, such as MAG > 0."
     @test msg("A = 99999999999999999999") == "The number 99999999999999999999 is too large."
     @test msg("A = sqrt") == "sqrt is a function. Call it with values in brackets, such as sqrt(MAG)."
@@ -117,11 +117,22 @@ end
     @test msg("A = ifelse(MAG, 1, 2)") == "The first value of ifelse must be true or false, such as MAG > 0."
     @test msg("A = MAG && IGRF") == "&& is not allowed. Use & instead."
     @test msg("A = MAG || IGRF") == "|| is not allowed. Use | instead."
-    @test msg("A = !isnan(MAG)") == "! is not an allowed function. Allowed functions: " *
-        "+ - * / ^ abs sqrt exp log log10 sin cos tan atan min max ifelse isnan < > <= >= == != & |."
+    @test msg("A = !isnan(MAG)") == "\"!\" is not allowed in a channel expression."
+    @test msg("A = MAG ? 1 : 2") == "\"?\" is not allowed in a channel expression."
+    @test msg("A = MAG % 2") == "\"%\" is not allowed in a channel expression."
+    @test msg("A = √MAG") == "\"√\" is not allowed in a channel expression."
+    @test msg("A = MAG #= note =#") == "Block comments #= =# are not allowed."
+    @test msg("A = MAG == 1e-3 + 0x1F + .5 + 1.5E+2 + 2MAG") == ""            # numbers and juxtaposition pass
+    @test msg("A = 2begin MAG end") == "\"begin\" is not allowed in a channel expression. " *
+        "A channel of that name goes in backticks, such as `begin`."
+    @test parse_channel_expr("A = `end` + 1", ["end"]) == Expr(:(=), :A, Expr(:call, :+, :end, 1.0))
+    @test msg("A = `end(` + 1") == "There is no channel end(."             # backtick text is not scanned
+    @test msg("A = false") == "true and false are not allowed. Use a comparison, such as MAG > 0."
     @test msg("A = (x -> x)(MAG)") == "Only the allowed functions can be called, by name."
-    @test msg("A = begin MAG end") == "This part of the expression is not allowed: begin."
-    @test msg("A = MAG'") == "This part of the expression is not allowed: '."
+    @test msg("A = begin MAG end") == "\"begin\" is not allowed in a channel expression. " *
+        "A channel of that name goes in backticks, such as `begin`."
+    @test msg("A = MAG'") == "\"'\" is not allowed in a channel expression."
+    @test msg("A = MAG...") == "This part of the expression is not allowed: ...."
 end
 
 @testset "channel math: deep nesting is refused, never a stack overflow" begin
@@ -150,6 +161,55 @@ end
         @test r isa Tuple && r[1] == false && r[3] === nothing
         @test startswith(r[2], "Expression is too long")
     end
+    # keyword nesting has no brackets and no operators; it is refused before any parse
+    keyword_nests = [
+        "A = " * "return "^600 * "MAG" => "return",
+        "A = " * "local "^1400 * "MAG" => "local",
+        "A = " * "begin "^900 * "MAG" * " end"^900 => "begin",
+        "A = " * "let "^1200 * "MAG" * " end"^1200 => "let",
+        "A = " * "if MAG "^600 * "MAG" * " end"^600 => "if",
+        "A = " * "try "^900 * "MAG" * " end"^900 => "try",
+        "A = " * "quote "^900 * "MAG" * " end"^900 => "quote",
+    ]
+    for (text, word) in keyword_nests
+        want = "\"$word\" is not allowed in a channel expression. " *
+               "A channel of that name goes in backticks, such as `$word`."
+        @test msg(text) == want
+        @test JuliaMagCore.setting_problem(ExprSetting("e", "Expression"), text) == want
+        r = run_tool(s, "database.channel_math"; inputs = Dict("database" => id), expr = text, lines = "all")
+        @test r isa Tuple && r == (false, want, nothing)
+    end
+    # every Julia keyword is refused
+    for word in ("begin", "end", "let", "if", "elseif", "else", "return", "local", "global", "const", "quote",
+                 "try", "catch", "finally", "for", "while", "function", "macro", "module", "baremodule",
+                 "struct", "mutable", "abstract", "primitive", "type", "do", "using", "import", "export",
+                 "outer", "where", "in", "isa")
+        @test startswith(msg("A = MAG + $word"), "\"$word\" is not allowed in a channel expression.")
+    end
+    # in a fresh process, nothing is printed on stderr: no stack overflow warning
+    code = """
+        using JuliaMagCore
+        texts = ["A = " * "return "^600 * "MAG", "A = " * "local "^1400 * "MAG",
+                 "A = " * "begin "^900 * "MAG" * " end"^900, "A = " * "let "^1200 * "MAG" * " end"^1200,
+                 "A = " * "if MAG "^600 * "MAG" * " end"^600, "A = " * "try "^900 * "MAG" * " end"^900,
+                 "A = " * "quote "^900 * "MAG" * " end"^900, "A = " * "sqrt("^10_000 * "MAG" * ")"^10_000,
+                 "A = " * "("^100_000 * "MAG" * ")"^100_000]
+        for t in texts
+            try
+                parse_channel_expr(t, ["MAG"])
+                error("not refused")
+            catch e
+                e isa ToolError || rethrow()
+            end
+            JuliaMagCore.setting_problem(ExprSetting("e", "Expression"), t) === nothing && error("not refused")
+        end
+        print("refused all")
+        """
+    err = IOBuffer()
+    out = read(pipeline(`$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $code`;
+                        stderr = err), String)
+    @test out == "refused all"
+    @test isempty(String(take!(err)))
     # empty backticks
     @test msg("`` = MAG") == "The left side of = must be one channel name, such as MAG_IGRF."
     @test msg("A = `` + MAG") == "Empty backticks are not a channel name."

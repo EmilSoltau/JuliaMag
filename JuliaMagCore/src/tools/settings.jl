@@ -72,7 +72,10 @@ struct TextSetting <: SettingSpec
         new(String(key), String(label), String(help), advanced, String(default))
 end
 
-"A Julia expression, such as `MAG_IGRF = MAG - IGRF`. The value is a `String` that must parse."
+"""
+An expression over channels, such as `MAG_IGRF = MAG - IGRF`. The value is a `String` that must parse.
+Only the tokens of Channel Math are allowed, within size and nesting limits (see `expr_text_problem`).
+"""
 struct ExprSetting <: SettingSpec
     key::String
     label::String
@@ -318,46 +321,150 @@ end
 setting_problem(st::Union{TextSetting,CRSSetting,PairSetting}, x)::Union{Nothing,String} =
     istext(x) ? nothing : "$(st.label) must be text."
 
-# Limits on expression text, checked before it is parsed. Deep nesting would
-# overflow the stack of the Julia parser (and of any code that walks the tree),
-# which can leave the process in a broken state. Within these limits it cannot.
+# ---- expression text -------------------------------------------------------
+#
+# Expression text (`ExprSetting`, Channel Math) is checked token by token before
+# it is parsed. The Julia parser is recursive, and some text nests deeply
+# without any brackets (`return return ...`, `begin begin ... end end`, `- - ...`,
+# `a^a^...`). Nesting deep enough overflows its stack, which can leave the
+# process broken. So the check is a whitelist. Allowed are only:
+#
+# - names that are not Julia keywords, and the constants of Channel Math;
+# - number literals (decimal, with a fraction or exponent, or 0x, 0b, 0o);
+# - names in backticks (their text is not scanned: the parser does not look inside);
+# - the operators `+ - * / ^ < > <= >= == != & | = .` (`.` for dotted forms);
+# - round brackets, commas, white space, and `#` comments to the end of the line.
+#
+# And within that: at most 10,000 characters, round brackets nested at most 200
+# deep, and at most 1,000 operator characters. Anything else is refused with a
+# message that names it.
+#
+# What this guarantees: text that passes reaches the parser only as names,
+# numbers, those operators, commas and round brackets. The deepest nesting the
+# parser can then build is 200 brackets plus 1,000 operators. That was tested not
+# to overflow the stack on Julia 1.12 with the default stack size; it is a tested
+# margin, not a proof for every Julia version. Code that walks the parsed tree
+# must still limit its own depth (Channel Math refuses trees over 200 deep).
+
 const MAX_EXPR_CHARS = 10_000
 const MAX_EXPR_BRACKETS = 200
 const MAX_EXPR_OPERATORS = 1000
 
-"A character that may be part of an operator: not a letter, digit, space, `_`, `.`, `,`, bracket or quote."
-is_operator_char(c::Char) =
-    !(isletter(c) || isdigit(c) || isspace(c) || c in "_.,()[]{}\"'`")
+"Words of Julia syntax. They may not appear as bare names in an expression."
+const EXPR_KEYWORDS = Set(["begin", "end", "let", "if", "elseif", "else", "return", "local", "global", "const",
+    "quote", "try", "catch", "finally", "for", "while", "function", "macro", "module", "baremodule", "struct",
+    "mutable", "abstract", "primitive", "type", "do", "using", "import", "export", "outer", "where", "in",
+    "isa", "true", "false", "break", "continue"])
+
+"Operators of two characters, tried before those of one."
+const EXPR_OPERATORS_2 = ("<=", ">=", "==", "!=")
+const EXPR_OPERATORS_1 = "+-*/^<>=&|."
+
+not_allowed(tok::AbstractString) = "\"$tok\" is not allowed in a channel expression."
 
 """
     expr_text_problem(text, what)::Union{Nothing,String}
 
-What makes expression text unsafe to parse, as a sentence that starts with
-`what` (such as `"Expression"`), or `nothing`. The text may have at most
-$MAX_EXPR_CHARS characters, brackets nested at most $MAX_EXPR_BRACKETS deep,
-and at most $MAX_EXPR_OPERATORS operator characters (long prefix or `^`
-chains nest without brackets).
+What makes expression text unsafe to parse, as a sentence, or `nothing`.
+Sentences about size start with `what`, such as `"Expression"`. See
+"expression text" above for exactly what passes and what that guarantees.
 """
 function expr_text_problem(text::AbstractString, what::AbstractString)::Union{Nothing,String}
     n = length(text)
     n > MAX_EXPR_CHARS &&
         return "$what is too long: it has $n characters, and at most $MAX_EXPR_CHARS are allowed."
+    cs = collect(text)
+    i = 1
     depth = 0
     deepest = 0
     ops = 0
-    for c in text
-        if c in "([{"
+    while i <= length(cs)
+        c = cs[i]
+        if isspace(c) || c == ','
+            i += 1
+        elseif c == '#'
+            i < length(cs) && cs[i + 1] == '=' && return "Block comments #= =# are not allowed."
+            while i <= length(cs) && cs[i] != '\n'
+                i += 1
+            end
+        elseif c == '('
             depth += 1
             deepest = max(deepest, depth)
-        elseif c in ")]}"
+            i += 1
+        elseif c == ')'
             depth = max(depth - 1, 0)
-        elseif is_operator_char(c)
+            i += 1
+        elseif c == '`'
+            i += 1                                   # a name in backticks; `\` escapes a character
+            while i <= length(cs) && cs[i] != '`'
+                i += cs[i] == '\\' ? 2 : 1
+            end
+            i += 1
+        elseif isdigit(c) || (c == '.' && i < length(cs) && isdigit(cs[i + 1]))
+            i = number_end(cs, i)
+        elseif Base.is_id_start_char(c)
+            j = i
+            while j <= length(cs) && Base.is_id_char(cs[j])
+                j += 1
+            end
+            word = String(cs[i:(j - 1)])
+            word in ("true", "false") && return "true and false are not allowed. Use a comparison, such as MAG > 0."
+            word in EXPR_KEYWORDS && return not_allowed(word) *
+                " A channel of that name goes in backticks, such as `$word`."
+            i = j
+        elseif i < length(cs) && string(c, cs[i + 1]) in EXPR_OPERATORS_2
+            ops += 2
+            i += 2
+        elseif c in EXPR_OPERATORS_1
             ops += 1
+            i += 1
+        else
+            c == '"' && return "Text in quotes is not allowed."
+            c == '$' && return "Interpolation with \$ is not allowed."
+            c == '@' && return "Macros (names that start with @) are not allowed."
+            return not_allowed(string(c))
         end
     end
     deepest > MAX_EXPR_BRACKETS && return "$what has brackets nested more than $MAX_EXPR_BRACKETS deep."
     ops > MAX_EXPR_OPERATORS && return "$what has more than $MAX_EXPR_OPERATORS operator characters."
     return nothing
+end
+
+"""
+The index after the number literal that starts at `i`: digits and `_`, then a
+fraction and an exponent (`e`, `E` or `f`, with an optional sign), or the
+digits of `0x`, `0b` or `0o`. Letters after it are scanned as a name.
+"""
+function number_end(cs::Vector{Char}, i::Int)::Int
+    n = length(cs)
+    digit(k, f = isdigit) = k <= n && (f(cs[k]) || cs[k] == '_')
+    if cs[i] == '0' && i < n && cs[i + 1] in "xbo"
+        i += 2
+        while digit(i, isxdigit)
+            i += 1
+        end
+        return i
+    end
+    while digit(i)
+        i += 1
+    end
+    if i <= n && cs[i] == '.' && digit(i + 1)
+        i += 1
+        while digit(i)
+            i += 1
+        end
+    end
+    if i <= n && cs[i] in "eEf"
+        k = i + 1
+        k <= n && cs[k] in "+-" && (k += 1)
+        if k <= n && isdigit(cs[k])
+            i = k
+            while digit(i)
+                i += 1
+            end
+        end
+    end
+    return i
 end
 
 function setting_problem(st::ExprSetting, x)::Union{Nothing,String}
