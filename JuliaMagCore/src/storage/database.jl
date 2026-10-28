@@ -239,13 +239,7 @@ function save_meta(db::LineDatabase)
     rec = MetaRecord(META_VERSION, db.name, db.description, db.lines,
                      ChannelRecord[ChannelRecord(c) for c in db.channels],
                      db.pairs, db.current_pair, db.made_by, db.rows_written)
-    path = meta_path(db)
-    tmp = path * ".tmp"
-    open(tmp, "w") do io
-        JSON3.pretty(io, JSON3.write(rec; allow_inf = true); allow_inf = true)
-        println(io)
-    end
-    mv(tmp, path; force = true)
+    write_json_atomic(meta_path(db), rec; allow_inf = true)
     return nothing
 end
 
