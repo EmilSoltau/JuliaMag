@@ -673,6 +673,7 @@ end
 "The settings of the XYZ importer, for the import dialog and for checks."
 const XYZ_SETTINGS = SettingSpec[
     ChoiceSetting("mode", "Import into", ["new", "append"]; default = "new",
+                  labels = ["New database", "Append to existing"],
                   help = "new makes a new database. append adds the lines to an existing one."),
     TextSetting("name", "Database name"; help = "Leave blank to name it after the file."),
     TextSetting("target", "Append to"; help = "The id of the database to append to, such as db-1."),

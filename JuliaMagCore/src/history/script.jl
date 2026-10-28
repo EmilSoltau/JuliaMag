@@ -21,7 +21,10 @@ kwtext(a::AbstractDict, ks) = join(("$(kwname(k)) = $(literal(a[k]))" for k in s
 is_import(c::String, a::AbstractDict) =
     any(i -> i.id == c, importers()) && get(a, "path", nothing) isa AbstractString
 
-function call_text(e::HistoryEntry)::String
+# A job returns at once. The script waits for it, so the next line sees its result.
+call_text(e::HistoryEntry)::String = isempty(e.job) ? command_text(e) : "wait_job($(command_text(e)))"
+
+function command_text(e::HistoryEntry)::String
     a = e.args
     c = e.command
     if c == "database.set_cell"
@@ -50,6 +53,8 @@ The history as a Julia script. It starts with `using JuliaMagCore` and
 Commands that have a core function become that call. Imports become
 `import_file(s, path; <settings>...)`. Other commands become
 `run_tool(s, "<command>"; <args>...)`, with tool inputs as `inputs = Dict(...)`.
+An entry that ran as a job is wrapped in `wait_job(...)`, so the script waits
+for the job before the next line.
 """
 function script_text(s::Session)::String
     lock(s.lock) do

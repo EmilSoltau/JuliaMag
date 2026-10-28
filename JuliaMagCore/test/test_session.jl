@@ -75,13 +75,13 @@ using JuliaMagCore
             txt = script_text(s2)
             @test startswith(txt, "using JuliaMagCore\ns = open_session(")
             @test occursin("set_cell!(s, \"$id\", LineId(LINE, 1001, 0), \"MAG\", 2, 0.30000000000000004)", txt)
-            @test occursin("run_tool(s, \"tool.demo\"; var\"bad key\" = 1.5, list = Any[1, 2], n = 3, name = \"a\\\"b\")", txt)
+            @test occursin("wait_job(run_tool(s, \"tool.demo\"; var\"bad key\" = 1.5, list = Any[1, 2], n = 3, name = \"a\\\"b\"))", txt)
             @test Meta.parseall(txt) isa Expr
             # run the script (without run_tool) on a copy: same data as the original
             copy_dir = joinpath(dir, "copy")
             cp(folder, copy_dir)
             lines = split(txt, '\n')
-            body = join(filter(l -> !startswith(l, "run_tool") && !startswith(l, "s = open_session"), lines), "\n")
+            body = join(filter(l -> !occursin("run_tool", l) && !startswith(l, "s = open_session"), lines), "\n")
             s3 = open_session(copy_dir)
             # restore the original values first
             write_value!(database(s3.project, id), L, "MAG", 2, 2.0)

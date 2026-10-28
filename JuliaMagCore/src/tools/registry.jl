@@ -44,6 +44,11 @@ struct ToolSpec
         check_setting_keys(settings, "tool \"$id\"")
         names = first.(inputs)
         allunique(names) || throw(ArgumentError("tool \"$id\" has two inputs with the same name"))
+        for st in settings
+            if st isa Union{ChannelSetting,PairSetting} && !(st.input in names)
+                throw(ArgumentError("tool \"$id\": setting \"$(st.key)\" uses input \"$(st.input)\", which the tool does not have"))
+            end
+        end
         return new(String(id), String(name), String(help), String(icon), places, inputs, settings, mode, run)
     end
 end
@@ -102,7 +107,10 @@ function tabs()::Vector{String}
     return out
 end
 
-"The default value of each setting of the tool, by key."
+"""
+The default value of each setting of the tool, by key. Expression, channel and
+file settings without a tool default are empty and must be set before a run.
+"""
 default_settings(spec::ToolSpec)::Dict{String,Any} = default_settings(spec.settings)
 
 """

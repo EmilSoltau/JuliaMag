@@ -1,3 +1,4 @@
+try
 @testset "tools" begin
     spec = ToolSpec("test.scale", "Scale", "Multiply a channel.", "math",
         [Place("Database Tools", "Channels"), Place("Magnetics", "Corrections")],
@@ -19,8 +20,10 @@
     @test !ok && msg == "Tool failed: x"
     @test occursin("run_tool(s, \"test.scale\"", script_text(s))
 end
-# Keep the registry as other test files expect it.
-unregister_tool!("test.scale"); unregister_tool!("test.boom")
+finally
+    # Keep the registry as other test files expect it.
+    unregister_tool!("test.scale"); unregister_tool!("test.boom")
+end
 
 # A quick tool that changes data: it scales a channel on every line and pushes its own undo step.
 function scale_channel_tool(s, i, st, p, r)
@@ -61,7 +64,7 @@ end
         LinesSetting("l", "Lines"), CRSSetting("crs", "CRS"), PairSetting("pair", "Pair"),
         ExtentSetting("ext", "Area"), PointSetting("pt", "Point"; default = [1, 2]),
     ]
-    t = ToolSpec("test.kinds", "Kinds", "", "", Place[], Pair{String,ItemKind}[], all_kinds, :quick,
+    t = ToolSpec("test.kinds", "Kinds", "", "", Place[], ["database" => ITEM_DATABASE], all_kinds, :quick,
                  (s, i, st, p, r) -> nothing)
     d = default_settings(t)
     @test d["pt"] == [1.0, 2.0] && d["ext"] === nothing && d["l"] == "all" && d["c"] == "new"
@@ -97,99 +100,143 @@ end
                                         [TextSetting("a", "A"), TextSetting("a", "B")], :quick, (s, i, st, p, r) -> nothing)
     @test_throws ArgumentError ToolSpec("test.x", "X", "", "", Place[], Pair{String,ItemKind}[],
                                         [TextSetting("inputs", "A")], :quick, (s, i, st, p, r) -> nothing)
+    # channel and pair settings must name an input of the tool
+    @test_throws ArgumentError ToolSpec("test.x", "X", "", "", Place[], ["db" => ITEM_DATABASE],
+                                        [ChannelSetting("ch", "Channel")], :quick, (s, i, st, p, r) -> nothing)
+    @test_throws ArgumentError ToolSpec("test.x", "X", "", "", Place[], ["db" => ITEM_DATABASE],
+                                        [PairSetting("p", "Pair")], :quick, (s, i, st, p, r) -> nothing)
+    ok = ToolSpec("test.x", "X", "", "", Place[], ["db" => ITEM_DATABASE],
+                  [ChannelSetting("ch", "Channel"; input = "db"), PairSetting("p", "Pair"; input = "db")], :quick,
+                  (s, i, st, p, r) -> nothing)
+    @test ok.settings[2].input == "db"
+end
+
+@testset "whole numbers, units and choice labels" begin
+    n = NumberSetting("bins", "Histogram bins"; default = 40, min = 1, integer = true, unit = "bins")
+    @test n.default === 40 && n.unit == "bins" && NumberSetting("x", "X"; default = 1).unit == ""
+    @test_throws ArgumentError NumberSetting("bins", "Bins"; default = 2.5, integer = true)
+    t = ToolSpec("test.bins", "Bins", "", "", Place[], Pair{String,ItemKind}[], [n], :quick, (s, i, st, p, r) -> nothing)
+    @test validate(t, Dict("bins" => 12.0)) == String[]
+    @test validate(t, Dict("bins" => 2.5)) == ["Histogram bins must be a whole number."]
+    @test validate(t, Dict("bins" => 0)) == ["Histogram bins must be at least 1."]
+    try
+        register_tool!(t)
+        s = fresh_session()
+        @test run_tool(s, "test.bins"; bins = 12.0)[1]
+        @test last_settings(s, "test.bins")["bins"] === 12
+        @test last_settings(open_session(s.project.folder), "test.bins")["bins"] === 12   # an Int after JSON too
+        @test occursin("run_tool(s, \"test.bins\"; bins = 12)", script_text(s))
+    finally
+        unregister_tool!("test.bins")
+    end
+    c = ChoiceSetting("mode", "Mode", ["new", "append"]; labels = ["New database", "Append to existing"])
+    @test c.labels == ["New database", "Append to existing"]
+    @test ChoiceSetting("m", "M", ["a", "b"]).labels == ["a", "b"]
+    @test_throws ArgumentError ChoiceSetting("m", "M", ["a", "b"]; labels = ["A"])
+    xyz = only(filter(i -> i.id == "import.geosoft_xyz", importers()))
+    @test xyz.settings[1].labels == ["New database", "Append to existing"]
 end
 
 @testset "tool registry" begin
-    n = length(tools())
-    mk(id, places) = ToolSpec(id, id, "", "", places, Pair{String,ItemKind}[], SettingSpec[], :quick,
-                              (s, i, st, p, r) -> nothing)
-    register_tool!(mk("test.reg1", [Place("Zeta Tab", "A"), Place("Alpha Tab", "B")]))
-    register_tool!(mk("test.reg2", [Place("Alpha Tab", "C"), Place("Mid Tab", "D")]))
-    tb = tabs()
-    @test findfirst(==("Zeta Tab"), tb) < findfirst(==("Alpha Tab"), tb) < findfirst(==("Mid Tab"), tb)
-    @test count(==("Alpha Tab"), tb) == 1
-    # a second registration with the same id replaces the first and keeps its place
-    register_tool!(mk("test.reg1", [Place("Zeta Tab", "New group")]))
-    @test length(tools()) == n + 2
-    @test tool("test.reg1").places == [Place("Zeta Tab", "New group")]
-    @test findfirst(t -> t.id == "test.reg1", tools()) < findfirst(t -> t.id == "test.reg2", tools())
-    @test_throws ArgumentError tool("test.none")
-    # tools from other packages may register from any thread
-    Threads.@threads for k in 1:40
-        register_tool!(mk("test.thread$(k % 8)", Place[]))
+    try
+        n = length(tools())
+        mk(id, places) = ToolSpec(id, id, "", "", places, Pair{String,ItemKind}[], SettingSpec[], :quick,
+                                  (s, i, st, p, r) -> nothing)
+        register_tool!(mk("test.reg1", [Place("Zeta Tab", "A"), Place("Alpha Tab", "B")]))
+        register_tool!(mk("test.reg2", [Place("Alpha Tab", "C"), Place("Mid Tab", "D")]))
+        tb = tabs()
+        @test findfirst(==("Zeta Tab"), tb) < findfirst(==("Alpha Tab"), tb) < findfirst(==("Mid Tab"), tb)
+        @test count(==("Alpha Tab"), tb) == 1
+        # a second registration with the same id replaces the first and keeps its place
+        register_tool!(mk("test.reg1", [Place("Zeta Tab", "New group")]))
+        @test length(tools()) == n + 2
+        @test tool("test.reg1").places == [Place("Zeta Tab", "New group")]
+        @test findfirst(t -> t.id == "test.reg1", tools()) < findfirst(t -> t.id == "test.reg2", tools())
+        @test_throws ArgumentError tool("test.none")
+        # tools from other packages may register from any thread
+        Threads.@threads for k in 1:40
+            register_tool!(mk("test.thread$(k % 8)", Place[]))
+        end
+        @test count(t -> startswith(t.id, "test.thread"), tools()) == 8
+        foreach(k -> unregister_tool!("test.thread$k"), 0:7)
+        @test unregister_tool!("test.reg1") && unregister_tool!("test.reg2") && !unregister_tool!("test.reg2")
+        @test !("Mid Tab" in tabs()) && length(tools()) == n
+        # the XYZ importer describes its settings with setting types
+        xyz = only(filter(i -> i.id == "import.geosoft_xyz", importers()))
+        @test [st.key for st in xyz.settings] == ["mode", "name", "target", "crs"]
+        @test default_settings(xyz)["mode"] == "new"
+        @test validate(xyz, Dict("mode" => "merge")) == ["Import into must be one of: new, append."]
+    finally
+        foreach(unregister_tool!, ["test.reg1", "test.reg2", ("test.thread$k" for k in 0:7)...])
     end
-    @test count(t -> startswith(t.id, "test.thread"), tools()) == 8
-    foreach(k -> unregister_tool!("test.thread$k"), 0:7)
-    @test unregister_tool!("test.reg1") && unregister_tool!("test.reg2") && !unregister_tool!("test.reg2")
-    @test !("Mid Tab" in tabs()) && length(tools()) == n
-    # the XYZ importer describes its settings with setting types
-    xyz = only(filter(i -> i.id == "import.geosoft_xyz", importers()))
-    @test [st.key for st in xyz.settings] == ["mode", "name", "target", "crs"]
-    @test default_settings(xyz)["mode"] == "new"
-    @test validate(xyz, Dict("mode" => "merge")) == ["Import into must be one of: new, append."]
 end
 
 @testset "run_tool" begin
-    register_tool!(ToolSpec("test.scale_data", "Scale data", "Multiply a channel in place.", "math",
-        [Place("Database Tools", "Channels")], ["database" => ITEM_DATABASE],
-        [ChannelSetting("in", "Input"), NumberSetting("factor", "Factor"; default = 2.0, min = 0.0)],
-        :quick, scale_channel_tool))
-    (; s, id, L) = make_db_with(MAG = [1.0, 2.0, 3.0])
-    mag() = collect(read_channel(database(s.project, id), L, "MAG"))
-    nh = length(s.history)
+    try
+        register_tool!(ToolSpec("test.scale_data", "Scale data", "Multiply a channel in place.", "math",
+            [Place("Database Tools", "Channels")], ["database" => ITEM_DATABASE],
+            [ChannelSetting("in", "Input"), NumberSetting("factor", "Factor"; default = 2.0, min = 0.0)],
+            :quick, scale_channel_tool))
+        (; s, id, L) = make_db_with(MAG = [1.0, 2.0, 3.0])
+        mag() = collect(read_channel(database(s.project, id), L, "MAG"))
+        nh = length(s.history)
 
-    # bad settings or inputs: nothing runs, nothing is remembered or recorded
-    @test run_tool(s, "test.scale_data"; inputs = Dict("database" => id), in = "MAG", factor = -1) ==
-          (false, "Factor must be at least 0.", nothing)
-    @test run_tool(s, "test.scale_data"; in = "MAG", fctor = 3) ==
-          (false, "Scale data needs a database as input \"database\". Scale data has no setting \"fctor\".", nothing)
-    @test run_tool(s, "test.scale_data"; inputs = Dict("database" => id, "grid" => "grid-1"), in = "MAG") ==
-          (false, "Scale data has no input \"grid\".", nothing)
-    @test run_tool(s, "test.nothing_here") == (false, "There is no tool \"test.nothing_here\".", nothing)
-    @test mag() == [1.0, 2.0, 3.0] && length(s.history) == nh
-    @test last_settings(s, "test.scale_data") == Dict{String,Any}("in" => "", "factor" => 2.0)
+        # bad settings or inputs: nothing runs, nothing is remembered or recorded
+        @test run_tool(s, "test.scale_data"; inputs = Dict("database" => id), in = "MAG", factor = -1) ==
+              (false, "Factor must be at least 0.", nothing)
+        @test run_tool(s, "test.scale_data"; in = "MAG", fctor = 3) ==
+              (false, "Scale data needs a database as input \"database\". Scale data has no setting \"fctor\".", nothing)
+        @test run_tool(s, "test.scale_data"; inputs = Dict("database" => id, "grid" => "grid-1"), in = "MAG") ==
+              (false, "Scale data has no input \"grid\".", nothing)
+        @test run_tool(s, "test.nothing_here") == (false, "There is no tool \"test.nothing_here\".", nothing)
+        @test mag() == [1.0, 2.0, 3.0] && length(s.history) == nh
+        @test last_settings(s, "test.scale_data") == Dict{String,Any}("in" => "", "factor" => 2.0)
 
-    # a run that works: the data changes, undo works, the run is recorded
-    ok, msg, out = run_tool(s, "test.scale_data"; inputs = Dict("database" => id), in = "MAG", factor = 3)
-    @test ok && msg == "Scaled MAG by 3.0." && out == ProjectItem[]
-    @test mag() == [3.0, 6.0, 9.0]
-    @test undo!(s) && mag() == [1.0, 2.0, 3.0] && redo!(s) && mag() == [3.0, 6.0, 9.0]
-    e = s.history[nh+1]
-    @test e.command == "test.scale_data" && e.job == "" &&
-          e.args == Dict{String,Any}("in" => "MAG", "factor" => 3.0, "inputs" => Dict{String,Any}("database" => id))
+        # a run that works: the data changes, undo works, the run is recorded
+        ok, msg, out = run_tool(s, "test.scale_data"; inputs = Dict("database" => id), in = "MAG", factor = 3)
+        @test ok && msg == "Scaled MAG by 3.0." && out == ProjectItem[]
+        @test mag() == [3.0, 6.0, 9.0]
+        @test undo!(s) && mag() == [1.0, 2.0, 3.0] && redo!(s) && mag() == [3.0, 6.0, 9.0]
+        e = s.history[nh+1]
+        @test e.command == "test.scale_data" && e.job == "" &&
+              e.args == Dict{String,Any}("in" => "MAG", "factor" => 3.0, "inputs" => Dict{String,Any}("database" => id))
 
-    # remembered settings are saved in project.jmag.json under settings.tools
-    @test last_settings(s, "test.scale_data")["factor"] === 3.0
-    s2 = open_session(s.project.folder)
-    @test s2.project.settings["tools"]["test.scale_data"]["in"] == "MAG"
-    @test last_settings(s2, "test.scale_data") == Dict{String,Any}("in" => "MAG", "factor" => 3.0)
-    reset_settings!(s2, "test.scale_data")
-    @test !haskey(open_session(s.project.folder).project.settings["tools"], "test.scale_data")
+        # remembered settings are saved in project.jmag.json under settings.tools
+        @test last_settings(s, "test.scale_data")["factor"] === 3.0
+        s2 = open_session(s.project.folder)
+        @test s2.project.settings["tools"]["test.scale_data"]["in"] == "MAG"
+        @test last_settings(s2, "test.scale_data") == Dict{String,Any}("in" => "MAG", "factor" => 3.0)
+        reset_settings!(s2, "test.scale_data")
+        @test !haskey(open_session(s.project.folder).project.settings["tools"], "test.scale_data")
 
-    # a ToolError gives its own message; a busy item gives a plain message
-    ok, msg, out = run_tool(s, "test.scale_data"; inputs = Dict("database" => id), in = "NOPE")
-    @test !ok && msg == "There is no channel NOPE." && out === nothing
-    @test last_settings(s, "test.scale_data")["in"] == "NOPE"     # remembered, as the dialog showed it
-    push!(s.busy, id)
-    ok, msg, _ = run_tool(s, "test.scale_data"; inputs = Dict("database" => id), in = "MAG")
-    @test !ok && msg == "$id is busy: an import is running."
-    delete!(s.busy, id)
-    @test count(h -> h.command == "test.scale_data", s.history) == 1
+        # a ToolError gives its own message; a busy item gives a plain message
+        ok, msg, out = run_tool(s, "test.scale_data"; inputs = Dict("database" => id), in = "NOPE")
+        @test !ok && msg == "There is no channel NOPE." && out === nothing
+        @test last_settings(s, "test.scale_data")["in"] == "NOPE"     # remembered, as the dialog showed it
+        push!(s.busy, id)
+        ok, msg, _ = run_tool(s, "test.scale_data"; inputs = Dict("database" => id), in = "MAG")
+        @test !ok && msg == "$id is busy: an import is running."
+        delete!(s.busy, id)
+        @test count(h -> h.command == "test.scale_data", s.history) == 1
 
-    # the script repeats the run, with its inputs
-    txt = script_text(s)
-    call = "run_tool(s, \"test.scale_data\"; factor = 3.0, in = \"MAG\", inputs = Dict(\"database\" => \"$id\"))"
-    @test occursin(call, txt)
-    @test Meta.parseall(txt) isa Expr
-    Core.eval(@__MODULE__, :(s = $s))
-    @test Core.eval(@__MODULE__, Meta.parse(call))[1]
-    @test mag() == [9.0, 18.0, 27.0]
+        # the script repeats the run, with its inputs
+        txt = script_text(s)
+        call = "run_tool(s, \"test.scale_data\"; factor = 3.0, in = \"MAG\", inputs = Dict(\"database\" => \"$id\"))"
+        @test occursin(call, txt)
+        @test Meta.parseall(txt) isa Expr
+        m = Module()                                  # no global `s` left in Main
+        Core.eval(m, :(using JuliaMagCore))
+        Core.eval(m, :(s = $s))
+        @test Core.eval(m, Meta.parse(call))[1]
+        @test mag() == [9.0, 18.0, 27.0]
 
-    # remembered values that no longer fit the tool fall back to the defaults
-    s.remembered["test.scale_data"]["factor"] = "big"
-    s.remembered["test.scale_data"]["gone"] = 1
-    @test last_settings(s, "test.scale_data") == Dict{String,Any}("in" => "MAG", "factor" => 2.0)
-    unregister_tool!("test.scale_data")
+        # remembered values that no longer fit the tool fall back to the defaults
+        s.remembered["test.scale_data"]["factor"] = "big"
+        s.remembered["test.scale_data"]["gone"] = 1
+        @test last_settings(s, "test.scale_data") == Dict{String,Any}("in" => "MAG", "factor" => 2.0)
+    finally
+        unregister_tool!("test.scale_data")
+    end
 end
 
 @testset "bad settings.tools in the project file" begin
@@ -205,40 +252,43 @@ end
 end
 
 @testset "job tools" begin
-    made = Ref(0)
-    register_tool!(ToolSpec("test.make_db", "Make database", "", "database", Place[], Pair{String,ItemKind}[],
-        [TextSetting("name", "Name"; default = "made"), NumberSetting("fail", "Fail"; default = 0.0)], :job,
-        (s, i, st, p, r) -> begin
-            st["fail"] == 1.0 && throw(ToolError("The name is taken."))
-            st["fail"] == 2.0 && error("disk full")
-            made[] += 1
-            id = lock(() -> JuliaMagCore.reserve_item_id!(s.project, ITEM_DATABASE), s.lock)
-            create_database(joinpath(s.project.folder, "databases", id), st["name"])
-            report(p, 0.5)
-            println(r, "made ", st["name"])
-            return [ProjectItem(id, ITEM_DATABASE, st["name"], "databases/$id", "", "")]
-        end))
-    s = fresh_session()
-    @test run_tool(s, "test.make_db"; fail = 5.5, name = 3) == (false, "Name must be text.", nothing)
-    j = run_tool(s, "test.make_db"; name = "first")
-    @test j isa Job
-    wait_job(j)
-    @test status(j) == JOB_DONE && only(s.project.items).name == "first"
-    @test count(h -> h.command == "test.make_db", s.history) == 1 && s.history[end].job == j.id
-    @test occursin("run_tool(s, \"test.make_db\"; fail = 0.0, name = \"first\")", script_text(s))
-    @test undo!(s) && isempty(s.project.items)
-    jf = run_tool(s, "test.make_db"; fail = 1); wait_job(jf)
-    @test status(jf) == JOB_FAILED && jf.error == "The name is taken."
-    jf2 = run_tool(s, "test.make_db"; fail = 2); wait_job(jf2)
-    @test status(jf2) == JOB_FAILED && occursin("disk full", jf2.error)
-    @test isempty(s.project.items) && count(h -> h.command == "test.make_db", s.history) == 1
-    # run again, with the same or new settings
-    jr = rerun!(s, j; args = merge(j.args, Dict{String,Any}("name" => "second"))); wait_job(jr)
-    @test status(jr) == JOB_DONE && only(s.project.items).name == "second"
-    jb = rerun!(s, j; args = Dict{String,Any}("fail" => -1.0, "name" => 7)); wait_job(jb)
-    @test status(jb) == JOB_FAILED && jb.error == "Name must be text."
-    @test made[] == 2
-    unregister_tool!("test.make_db")
+    try
+        made = Ref(0)
+        register_tool!(ToolSpec("test.make_db", "Make database", "", "database", Place[], Pair{String,ItemKind}[],
+            [TextSetting("name", "Name"; default = "made"), NumberSetting("fail", "Fail"; default = 0.0)], :job,
+            (s, i, st, p, r) -> begin
+                st["fail"] == 1.0 && throw(ToolError("The name is taken."))
+                st["fail"] == 2.0 && error("disk full")
+                made[] += 1
+                id = lock(() -> JuliaMagCore.reserve_item_id!(s.project, ITEM_DATABASE), s.lock)
+                create_database(joinpath(s.project.folder, "databases", id), st["name"])
+                report(p, 0.5)
+                println(r, "made ", st["name"])
+                return [ProjectItem(id, ITEM_DATABASE, st["name"], "databases/$id", "", "")]
+            end))
+        s = fresh_session()
+        @test run_tool(s, "test.make_db"; fail = 5.5, name = 3) == (false, "Name must be text.", nothing)
+        j = run_tool(s, "test.make_db"; name = "first")
+        @test j isa Job
+        wait_job(j)
+        @test status(j) == JOB_DONE && only(s.project.items).name == "first"
+        @test count(h -> h.command == "test.make_db", s.history) == 1 && s.history[end].job == j.id
+        @test occursin("run_tool(s, \"test.make_db\"; fail = 0.0, name = \"first\")", script_text(s))
+        @test undo!(s) && isempty(s.project.items)
+        jf = run_tool(s, "test.make_db"; fail = 1); wait_job(jf)
+        @test status(jf) == JOB_FAILED && jf.error == "The name is taken."
+        jf2 = run_tool(s, "test.make_db"; fail = 2); wait_job(jf2)
+        @test status(jf2) == JOB_FAILED && occursin("disk full", jf2.error)
+        @test isempty(s.project.items) && count(h -> h.command == "test.make_db", s.history) == 1
+        # run again, with the same or new settings
+        jr = rerun!(s, j; args = merge(j.args, Dict{String,Any}("name" => "second"))); wait_job(jr)
+        @test status(jr) == JOB_DONE && only(s.project.items).name == "second"
+        jb = rerun!(s, j; args = Dict{String,Any}("fail" => -1.0, "name" => 7)); wait_job(jb)
+        @test status(jb) == JOB_FAILED && jb.error == "Name must be text."
+        @test made[] == 2
+    finally
+        unregister_tool!("test.make_db")
+    end
 end
 
 @testset "importer settings" begin
@@ -252,5 +302,34 @@ end
         txt = script_text(s)
         @test occursin("import_file(s, $(repr(f)); mode = \"new\", name = \"survey\")", txt)
         @test occursin("import_file(s, $(repr(f)); crs = 7855)", txt) == false   # failed jobs are not recorded
+    end
+end
+
+@testset "a script waits for its jobs" begin
+    mktempdir() do dir
+        folder = joinpath(dir, "p")
+        s = new_session(folder, "p")
+        start = joinpath(dir, "start")
+        cp(folder, start)                               # the project before anything ran
+        f = joinpath(dir, "a.xyz"); write_synthetic_xyz(f; lines = 2, ties = 0, rows_per_line = 20_000)
+        j = import_file(s, f); wait_job(j)
+        id = only(s.project.items).id
+        L = first(database(s.project, id).lines).id
+        set_line_selected!(s, id, L, false)             # depends on the import (imported channels are protected)
+        txt = script_text(s)
+        @test occursin("wait_job(import_file(s, $(repr(f))))", txt)
+        @test occursin("\nset_line_selected!(s, ", txt)
+        # replay on a copy of the starting project, in a module of its own
+        body = replace(txt, "open_session($(repr(folder)))" => "open_session($(repr(start)))")
+        @test body != txt
+        m = Module()
+        Core.eval(m, Meta.parseall(body))
+        c = open_session(start)
+        @test only(c.project.items).id == id
+        want = collect(read_channel(database(s.project, id), L, "MAG"))
+        got = collect(read_channel(database(c.project, id), L, "MAG"))
+        @test isequal(got, want) && length(got) == 20_000
+        @test !line(database(c.project, id), L).selected && line(database(c.project, id), last(database(c.project, id).lines).id).selected
+        @test status(only(jobs(c))) == JOB_DONE
     end
 end

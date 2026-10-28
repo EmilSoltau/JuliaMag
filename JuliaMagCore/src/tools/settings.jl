@@ -21,10 +21,13 @@ end
 Base.showerror(io::IO, e::ToolError) = print(io, e.msg)
 
 """
-    NumberSetting(key, label; default, min = -Inf, max = Inf, auto = false, help = "", advanced = false)
+    NumberSetting(key, label; default, min = -Inf, max = Inf, auto = false, integer = false,
+                  unit = "", help = "", advanced = false)
 
 A number. With `auto = true` the value may be `nothing`, which means
-"blank: the tool works out the value". The value is a `Float64`.
+"blank: the tool works out the value". The value is a `Float64`, or an `Int`
+with `integer = true` (then it must be a whole number). `unit` is shown next
+to the box, such as `"m"` or `"nT"`.
 `default = nothing` without `auto` means the user must type a number.
 """
 struct NumberSetting <: SettingSpec
@@ -32,16 +35,30 @@ struct NumberSetting <: SettingSpec
     label::String
     help::String
     advanced::Bool
-    default::Union{Nothing,Float64}
+    default::Union{Nothing,Int,Float64}
     min::Float64
     max::Float64
     auto::Bool
+    integer::Bool
+    unit::String
     function NumberSetting(key, label; default, min::Real = -Inf, max::Real = Inf, auto::Bool = false,
-                           help = "", advanced::Bool = false)
+                           integer::Bool = false, unit = "", help = "", advanced::Bool = false)
         min <= max || throw(ArgumentError("setting \"$key\": min is above max"))
-        d = default === nothing ? nothing : Float64(default)
-        return new(String(key), String(label), String(help), advanced, d, Float64(min), Float64(max), auto)
+        d = default === nothing ? nothing : number_value(integer, default)
+        integer && d isa Float64 && throw(ArgumentError("setting \"$key\": the default of a whole number setting must be whole"))
+        return new(String(key), String(label), String(help), advanced, d, Float64(min), Float64(max), auto,
+                   integer, String(unit))
     end
+end
+
+# Largest whole number that a Float64 holds exactly.
+const MAX_EXACT_INT = 2.0^53
+
+# A number as the setting keeps it: an `Int` for a whole number setting when the
+# value is whole, else a `Float64`.
+function number_value(integer::Bool, x::Real)::Union{Int,Float64}
+    f = Float64(x)
+    return integer && isfinite(f) && isinteger(f) && abs(f) <= MAX_EXACT_INT ? Int(f) : f
 end
 
 "Free text. The value is a `String`; blank is allowed."
@@ -67,9 +84,10 @@ struct ExprSetting <: SettingSpec
 end
 
 """
-    ChoiceSetting(key, label, choices; default = first(choices), help = "", advanced = false)
+    ChoiceSetting(key, label, choices; default = first(choices), labels = choices, help = "", advanced = false)
 
 One of a fixed list of words. The value is a `String` from `choices`.
+`labels` are the words the dialog shows for the choices, in the same order.
 """
 struct ChoiceSetting <: SettingSpec
     key::String
@@ -77,12 +95,17 @@ struct ChoiceSetting <: SettingSpec
     help::String
     advanced::Bool
     choices::Vector{String}
+    labels::Vector{String}
     default::String
     function ChoiceSetting(key, label, choices::AbstractVector{<:AbstractString};
-                           default = isempty(choices) ? "" : first(choices), help = "", advanced::Bool = false)
+                           default = isempty(choices) ? "" : first(choices),
+                           labels::AbstractVector{<:AbstractString} = choices, help = "", advanced::Bool = false)
         isempty(choices) && throw(ArgumentError("setting \"$key\": a choice needs at least one choice"))
         default in choices || throw(ArgumentError("setting \"$key\": the default \"$default\" is not a choice"))
-        return new(String(key), String(label), String(help), advanced, String[c for c in choices], String(default))
+        length(labels) == length(choices) ||
+            throw(ArgumentError("setting \"$key\": there must be one label for each choice"))
+        return new(String(key), String(label), String(help), advanced, String[c for c in choices],
+                   String[l for l in labels], String(default))
     end
 end
 
@@ -169,15 +192,21 @@ struct CRSSetting <: SettingSpec
         new(String(key), String(label), String(help), advanced, String(default))
 end
 
-"A position pair of the input database, such as `\"X,Y\"`. Blank means the current pair."
+"""
+    PairSetting(key, label; input = "database", default = "", help = "", advanced = false)
+
+A position pair of the database given as tool input `input`, such as `\"X,Y\"`.
+Blank means the current pair.
+"""
 struct PairSetting <: SettingSpec
     key::String
     label::String
     help::String
     advanced::Bool
+    input::String
     default::String
-    PairSetting(key, label; default = "", help = "", advanced::Bool = false) =
-        new(String(key), String(label), String(help), advanced, String(default))
+    PairSetting(key, label; input = "database", default = "", help = "", advanced::Bool = false) =
+        new(String(key), String(label), String(help), advanced, String(input), String(default))
 end
 
 "An area: `[west, south, east, north]`, or `nothing` for the whole data."
@@ -213,20 +242,25 @@ function setting_default(st::Union{ExtentSetting,PointSetting})
     return d === nothing ? nothing : copy(d)
 end
 
-"The defaults of a list of settings, by key."
+"""
+The defaults of a list of settings, by key. Expression, channel and file
+settings default to empty text unless the tool gives a default; such a value
+is a problem for `validate`, so the user must set it before the tool runs.
+"""
 default_settings(list::AbstractVector{<:SettingSpec})::Dict{String,Any} =
     Dict{String,Any}(st.key => setting_default(st) for st in list)
 
 """
     setting_value(st, x)
 
-Bring a value to the type the setting keeps: numbers to `Float64`, symbols and
+Bring a value to the type the setting keeps: numbers to `Float64` (`Int` for a
+whole number setting), symbols and
 other text to `String`, vectors of numbers to `Vector{Float64}`.
 A value that does not fit is returned as it is, for `setting_problem` to report.
 """
 setting_value(::SettingSpec, x) = x
 setting_value(::SettingSpec, x::Union{AbstractString,Symbol}) = String(x)
-setting_value(::NumberSetting, x::Real) = x isa Bool ? x : Float64(x)
+setting_value(st::NumberSetting, x::Real) = x isa Bool ? x : number_value(st.integer, x)
 function setting_value(::Union{ExtentSetting,PointSetting}, x::AbstractVector)
     all(v -> v isa Real && !(v isa Bool), x) || return x
     return Float64[v for v in x]
@@ -248,6 +282,7 @@ function setting_problem(st::NumberSetting, x)::Union{Nothing,String}
     end
     (x isa Real && !(x isa Bool)) || return "$(st.label) must be a number."
     isfinite(x) || return "$(st.label) must be a finite number."
+    st.integer && !(x isa Integer) && return "$(st.label) must be a whole number."
     x < st.min && return "$(st.label) must be at least $(numtext(st.min))."
     x > st.max && return "$(st.label) must be at most $(numtext(st.max))."
     return nothing
