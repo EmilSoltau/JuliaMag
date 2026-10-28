@@ -1,0 +1,10 @@
+# This file is machine-generated - editing it directly is not advised
+
+julia_version = "1.12.7"
+manifest_format = "2.0"
+project_hash = "28c508da13f52f427a2300af112af18d8d4b3df6"
+
+[[deps.JuliaMagCore]]
+path = "JuliaMagCore"
+uuid = "133f1fd6-5f53-418f-9a68-c205e5f9c1d6"
+version = "0.1.0"
