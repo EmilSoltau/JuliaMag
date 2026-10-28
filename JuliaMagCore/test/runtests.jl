@@ -7,4 +7,5 @@ using Test
     include("test_project.jl")
     include("support/synthetic.jl")
     include("test_session.jl")
+    include("test_xyz.jl")
 end

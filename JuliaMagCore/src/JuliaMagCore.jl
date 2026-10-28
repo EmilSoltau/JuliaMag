@@ -14,6 +14,9 @@ include("project/project.jl")
 include("session/session.jl")
 include("session/undo.jl")
 include("history/script.jl")
+include("io/textscan.jl")
+include("io/registry.jl")
+include("io/xyz_import.jl")
 
 export LineType, LINE, TIE, BASE, TEST, TREND, SPECIAL, RANDOM
 export line_letter, line_type, line_name
@@ -31,5 +34,7 @@ export read_channel, write_value!, write_channel!
 export UndoStep, HistoryEntry, Cursor, Session, ProtectedError
 export open_session, new_session, push_undo!, undo!, redo!, can_undo, can_redo
 export record!, set_cell!, set_line_selected!, set_cursor!, script_text
+export eachfileline, ImportWarning, ImportResult, Progress, report, is_cancelled, NO_PROGRESS
+export ImporterSpec, register_importer!, importers, importer_for, import_xyz
 
 end # module

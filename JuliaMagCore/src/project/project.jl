@@ -192,6 +192,19 @@ function new_item_id(p::Project, kind::ItemKind)::String
     return KIND_PREFIXES[kind] * string(n)
 end
 
+"""
+    reserve_item_id!(p, kind)::String
+
+Hand out a new id now (see `new_item_id`) and raise the counter, so a second
+call gets another id before the first item is added. Used by imports, which
+add their item only at the end. The counter is saved with `save_project`.
+"""
+function reserve_item_id!(p::Project, kind::ItemKind)::String
+    id = new_item_id(p, kind)
+    p.next_ids[kind] = something(id_number(id, kind)) + 1
+    return id
+end
+
 "Open the line database of item `id`. Throws `ProjectError` if it cannot."
 function database(p::Project, id::AbstractString)::LineDatabase
     it = item(p, id)
