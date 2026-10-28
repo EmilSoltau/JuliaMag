@@ -29,6 +29,8 @@ include("jobs/jobs.jl")
 include("tools/registry.jl")
 include("crs/crs.jl")
 include("builtin/coordinates.jl")
+include("builtin/channel_math.jl")
+include("builtin/statistics.jl")
 
 export LineType, LINE, TIE, BASE, TEST, TREND, SPECIAL, RANDOM
 export line_letter, line_type, line_name
@@ -59,5 +61,6 @@ export SettingSpec, NumberSetting, TextSetting, ExprSetting, ChoiceSetting, Bool
 export Place, ToolSpec, ToolError, register_tool!, unregister_tool!, tools, tool, tabs
 export default_settings, validate, last_settings, reset_settings!, run_tool
 export valid_crs, crs_name, guess_utm, reproject_xy
+export parse_channel_expr, ChannelStats, channel_stats
 
 end # module

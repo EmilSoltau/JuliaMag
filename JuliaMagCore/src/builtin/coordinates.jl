@@ -17,13 +17,15 @@ const COORDINATES_TAB = "Coordinates"
 """
 The database of tool input `id`, opened. Call it under `s.lock`.
 Throws `ToolError` when the item is missing, not a database, busy or broken.
+With `allow_readers = true`, an item that exports only read is not busy:
+use it for tools that only read too.
 """
-function tool_database(s::Session, id::AbstractString)::LineDatabase
+function tool_database(s::Session, id::AbstractString; allow_readers::Bool = false)::LineDatabase
     k = findfirst(i -> i.id == id, s.project.items)
     k === nothing && throw(ToolError("There is no item $id in the project."))
     s.project.items[k].kind == ITEM_DATABASE || throw(ToolError("Item $id is not a database."))
     m = get(s.busy, id, nothing)
-    m === nothing || throw(ToolError("Database $id is busy: $(busy_reason(m))."))
+    (m === nothing || (allow_readers && !m.writing)) || throw(ToolError("Database $id is busy: $(busy_reason(m))."))
     try
         return database(s.project, id)
     catch e

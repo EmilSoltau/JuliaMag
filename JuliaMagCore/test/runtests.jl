@@ -13,4 +13,6 @@ using Test
     include("test_tools.jl")
     include("test_export.jl")
     include("test_coordinates.jl")
+    include("test_channel_math.jl")
+    include("test_statistics.jl")
 end
