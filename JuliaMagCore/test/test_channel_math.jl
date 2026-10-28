@@ -425,3 +425,74 @@ end
     end
     @test read_channel(a, CM_L1, "MAG") == [1.0, -1.0, 3.0]
 end
+
+@testset "channel math: wide calls are computed pair by pair" begin
+    n = 1000
+    X = [sin(0.1k) * 1000 + 0.1k for k in 1:n]
+    Y = [cos(0.07k) * 3 for k in 1:n]
+    vals = Dict(:X => X, :Y => Y)
+    ev(text) = JuliaMagCore.eval_channel_expr(parse_channel_expr(text, ["X", "Y"]), vals, n)
+    terms = [isodd(k) ? :X : :Y for k in 1:500]
+    col(t) = vals[t]
+    # A 500-term sum: same bits as the left fold ((X + Y) + X) + ...
+    sum_text = "A = " * join(String.(terms), " + ")
+    want = foldl((a, t) -> a .+ col(t), terms[2:end]; init = copy(col(terms[1])))
+    t = @elapsed got = ev(sum_text)
+    @test got == want
+    @test t < 5
+    # A 500-value min, and products, also wide.
+    t = @elapsed got = ev("A = min(" * join(String.(terms), ", ") * ")")
+    @test got == foldl((a, t) -> min.(a, col(t)), terms[2:end]; init = copy(col(terms[1])))
+    @test t < 5
+    t = @elapsed got = ev("A = max(" * join(String.(terms), ", ") * ")")
+    @test got == foldl((a, t) -> max.(a, col(t)), terms[2:end]; init = copy(col(terms[1])))
+    @test t < 5
+    t = @elapsed got = ev("A = " * join(fill("X", 250), "*-"))
+    @test got == foldl((a, _) -> a .* .-X, 1:249; init = copy(X))
+    @test t < 5
+    # A wide comparison chain becomes a wide &.
+    t = @elapsed got = ev("A = " * join(fill("Y", 250), " <= "))      # 249 operators of 2 characters
+    @test got == ones(n)
+    t2 = @elapsed got2 = ev("A = -100 < " * join(fill("X", 300), " < ") * " < 1e9")
+    @test got2 == zeros(n)
+    @test t + t2 < 5
+    # Numbers only, and true or false values mixed with numbers, as Julia would.
+    @test ev("A = " * join(fill("0.1", 400), " + ")) == fill(foldl(+, fill(0.1, 400)), n)
+    @test ev("A = (X > 0) + (Y > 0) + X + (X > 1)") == (X .> 0) .+ (Y .> 0) .+ X .+ (X .> 1)
+    @test ev("A = (X > 0) | (Y > 0) | (X > 1) | (Y > 100)") == Float64.((X .> 0) .| (Y .> 0))
+end
+
+@testset "channel math: text that is not valid UTF-8 is refused" begin
+    s, id = two_line_db()
+    for text in ["A = MAG\xff", "A = `\xff`", "A = MAG # \xff", "A = \xc3", "A = M\xe2\x82AG"]
+        e = try
+            parse_channel_expr(text, ["MAG"]); nothing
+        catch err
+            err
+        end
+        @test e isa ToolError && e.msg == "The expression is not valid UTF-8 text."
+        @test JuliaMagCore.setting_problem(ExprSetting("e", "Expression"), text) ==
+              "Expression is not valid UTF-8 text."
+        ok, msg, job = run_tool(s, "database.channel_math"; inputs = Dict("database" => id), expr = text,
+                                lines = "all")
+        @test !ok && msg == "Expression is not valid UTF-8 text." && job === nothing
+    end
+end
+
+@testset "channel math: parsing does not leak task stacks" begin
+    if Sys.islinux()
+        vmsize() = parse(Int, split(only(filter(startswith("VmSize:"), readlines("/proc/self/status"))))[2]) * 1024
+        st = ExprSetting("e", "Expression")
+        parse_channel_expr("A = MAG + 1", ["MAG"])            # start the parser once
+        before = vmsize()
+        for k in 1:2500
+            parse_channel_expr("A = MAG + $k", ["MAG"])
+            JuliaMagCore.setting_problem(st, "A = MAG * $k")
+        end
+        @test vmsize() - before < 512 << 20
+    end
+    # Parsing works from many tasks at once.
+    texts = ["A = MAG + $k" for k in 1:200]
+    res = fetch.([Threads.@spawn parse_channel_expr(t, ["MAG"]) for t in texts])
+    @test all(k -> res[k] == :(A = MAG + $(Float64(k))), 1:200)
+end

@@ -5,11 +5,10 @@
 # the raw text with `expr_text_problem`, a token whitelist with size and nesting
 # limits; text with any other token (keywords, quotes, `$`, `@`, `:`, `;`, `->`,
 # brackets other than round ones, ...) never reaches the parser. Then it parses
-# with `parse_expr_text` (`Meta.parseall` in a task with a 64 MiB stack; see
-# settings.jl for what was tested), refuses a tree nested more than 200 deep (so
-# checking and computing recurse at most 200 levels), and checks every part
-# against a short list. Allowed are
-# number literals, channel names, the constants `pi`, `e`, `NaN` and `Inf`
+# with `parse_expr_text` (`Meta.parseall` in one long-lived task with a 64 MiB
+# stack; see settings.jl for what was tested), refuses a tree nested more than
+# 200 deep (so checking and computing recurse at most 200 levels), and checks
+# every part against a short list. Allowed are number literals, channel names, the constants `pi`, `e`, `NaN` and `Inf`
 # (ruling R14; `NaN` masks values, such as `ifelse(ALT > 200, NaN, MAG)`), and calls to
 #
 #     + - * / ^ abs sqrt exp log log10 sin cos tan atan min max ifelse isnan
@@ -159,9 +158,9 @@ deep, is refused before it is parsed.
 The text is only parsed, never run.
 """
 function parse_channel_expr(text::String, channels::Vector{String})::Union{Expr,Symbol}
-    isempty(strip(text)) && cm_error("The expression is empty.")
     problem = expr_text_problem(text, "The expression")
     problem === nothing || cm_error(problem)
+    isempty(strip(text)) && cm_error("The expression is empty.")
     top = parse_expr_text(text)
     parts = Any[a for a in top.args if !(a isa LineNumberNode)]
     for a in parts
@@ -312,10 +311,24 @@ function cm_eval(x, values::AbstractDict{Symbol,Vector{Float64}})
     x isa Symbol && return values[x]
     ex = x::Expr
     f = CM_FUNCTIONS[ex.args[1]::Symbol].impl
-    args = Any[cm_eval(a, values) for a in view(ex.args, 2:length(ex.args))]
-    all(a -> a isa Real, args) && return f(args...)
-    return broadcast(f, args...)
+    n = length(ex.args) - 1
+    # Calls with 1 to 3 values are computed in one go.
+    n <= 3 && return cm_apply(f, Any[cm_eval(a, values) for a in view(ex.args, 2:(n + 1))]...)
+    # A wider call (only + * min max & | take more than 3 values), such as a sum
+    # of 500 terms, is computed pair by pair from the left: ((a + b) + c) + ...
+    # Julia computes `a + b + c` in the same order, so the result is the same to
+    # the bit. One call with all values at once would make Julia compile new
+    # code for each count of values, which takes minutes and many GB of memory
+    # for a few hundred values.
+    acc = cm_eval(ex.args[2], values)
+    for k in 3:(n + 1)
+        acc = cm_apply(f, acc, cm_eval(ex.args[k], values))
+    end
+    return acc
 end
+
+"Apply `f` to 1 to 3 values, each a number or a vector of the rows."
+cm_apply(f, args...) = all(a -> a isa Real, args) ? f(args...) : broadcast(f, args...)
 
 # ---- lines of a tool -------------------------------------------------------
 

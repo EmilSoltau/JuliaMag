@@ -339,8 +339,9 @@ setting_problem(st::Union{TextSetting,CRSSetting,PairSetting}, x)::Union{Nothing
 #
 # And within that: at most 10,000 characters, round brackets nested at most 100
 # deep, and at most 500 operator characters. Anything else is refused with a
-# message that names it. Text that passes is parsed by `parse_expr_text`, in a
-# task with its own 64 MiB stack.
+# message that names it. Text that is not valid UTF-8 is refused first. Text
+# that passes is parsed by `parse_expr_text`, in one long-lived task with its
+# own 64 MiB stack.
 #
 # What was tested (Julia 1.12.7, Linux x86_64), each case in a fresh process,
 # through `parse_channel_expr` and the `ExprSetting` check, on the main thread
@@ -363,23 +364,59 @@ const MAX_EXPR_OPERATORS = 500
 "Stack of the task that parses expression text (bytes). See `parse_expr_text`."
 const PARSE_STACK = 64 << 20
 
+# The one parser task, made on first use. A task with its own stack maps that
+# stack until the task is garbage collected, so a new 64 MiB task per parse
+# would grow the address space by 64 MiB for each check (1,000 checks grew it
+# by 66 GB). One long-lived task maps it once.
+const PARSER_LOCK = ReentrantLock()
+const PARSER_JOBS = Ref{Union{Nothing,Channel{Tuple{String,Channel{Any}}}}}(nothing)
+
+"Parse each text sent to `jobs`, and put the result (or the error and its backtrace) on its reply channel."
+function parser_loop(jobs::Channel{Tuple{String,Channel{Any}}})
+    for (text, reply) in jobs
+        r = try
+            Meta.parseall(text)
+        catch e
+            (e, catch_backtrace())
+        end
+        put!(reply, r)
+    end
+    return nothing
+end
+
+"The channel of the parser task. Starts the task the first time, or again if it has stopped."
+function parser_jobs()::Channel{Tuple{String,Channel{Any}}}
+    lock(PARSER_LOCK) do
+        jobs = PARSER_JOBS[]
+        jobs !== nothing && isopen(jobs) && return jobs
+        jobs = Channel{Tuple{String,Channel{Any}}}(Inf)
+        t = Task(() -> parser_loop(jobs), PARSE_STACK)
+        t.sticky = false                         # free to run on any thread
+        bind(jobs, t)                            # if the task ever ends, the channel closes
+        schedule(t)
+        PARSER_JOBS[] = jobs
+        return jobs
+    end
+end
+
 """
     parse_expr_text(text)
 
-`Meta.parseall(text)`, run in a task with its own 64 MiB stack. So the room the
-parser has does not depend on where it is called from (the main thread, a job,
-a UI callback deep in its own stack) or on the platform. Call it only on text
-that `expr_text_problem` passed.
+`Meta.parseall(text)`, run in the one parser task, which has its own 64 MiB
+stack. So the room the parser has does not depend on where it is called from
+(the main thread, a job, a UI callback deep in its own stack) or on the
+platform. Calls from many tasks at once take turns. Call it only on text that
+`expr_text_problem` passed. If the parser throws, this throws `ToolError` with
+the error and the parser's backtrace.
 """
 function parse_expr_text(text::String)
-    t = Task(() -> try
-                 Meta.parseall(text)
-             catch e
-                 e
-             end, PARSE_STACK)
-    schedule(t)
-    r = fetch(t)
-    r isa Exception && throw(r)
+    reply = Channel{Any}(1)
+    put!(parser_jobs(), (text, reply))
+    r = take!(reply)
+    if r isa Tuple{Exception,Any}
+        e, bt = r
+        throw(ToolError("The expression could not be parsed: " * sprint(showerror, e, bt)))
+    end
     return r
 end
 
@@ -432,6 +469,7 @@ Sentences about size start with `what`, such as `"Expression"`. See
 "expression text" above for exactly what passes and what that guarantees.
 """
 function expr_text_problem(text::AbstractString, what::AbstractString)::Union{Nothing,String}
+    isvalid(text) || return "$what is not valid UTF-8 text."
     n = length(text)
     n > MAX_EXPR_CHARS &&
         return "$what is too long: it has $n characters, and at most $MAX_EXPR_CHARS are allowed."
@@ -541,9 +579,9 @@ end
 
 function setting_problem(st::ExprSetting, x)::Union{Nothing,String}
     istext(x) || return "$(st.label) must be text."
-    isempty(strip(x)) && return "$(st.label) is empty."
     p = expr_text_problem(x, st.label)
     p === nothing || return p
+    isempty(strip(x)) && return "$(st.label) is empty."
     ex = parse_expr_text(String(x))
     for a in (ex isa Expr ? ex.args : Any[])
         if a isa Expr && a.head in (:error, :incomplete)
