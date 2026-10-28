@@ -15,4 +15,5 @@ using Test
     include("test_coordinates.jl")
     include("test_channel_math.jl")
     include("test_statistics.jl")
+    include("test_end_to_end.jl")
 end

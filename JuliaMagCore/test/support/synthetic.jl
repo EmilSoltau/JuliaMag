@@ -73,7 +73,7 @@ end
 
 Write a valid Geosoft XYZ file: a `/` header with the channel names, a `//Flight`
 and `//Date` record, then `Line 1001, 1002, ...` blocks and `Tie 901, 902, ...` blocks.
-`X`, `Y` and `FIDUCIAL` are regular; other channels are random and every 97th
+`X`, `Y`, `LON`, `LAT` and `FIDUCIAL` are regular (`LON` and `LAT` lie near 15E, 62N); other channels are random and every 97th
 value is `*`. FIDUCIAL counts up by 1 from 0 on each line.
 Returns the number of lines and rows written.
 """
@@ -99,6 +99,8 @@ function write_synthetic_xyz(path::AbstractString; lines::Integer = 10, ties::In
                     k > 1 && print(buf, ' ')
                     u = c == "X" ? 500000.0 + 10.0 * row :
                         c == "Y" ? 7.0e6 + 100.0 * b :
+                        c == "LON" ? 15.0 + 0.0001 * row + 0.01 * b :
+                        c == "LAT" ? 62.0 + 0.0001 * row + 0.01 * b :
                         c == "FIDUCIAL" ? Float64(row - 1) :
                         count % 97 == k ? NaN : round(50000.0 + 100.0 * next_unit!(rng); digits = 3)
                     isnan(u) ? print(buf, '*') : print(buf, u)
