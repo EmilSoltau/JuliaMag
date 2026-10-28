@@ -8,6 +8,7 @@ using Test
     include("support/synthetic.jl")
     include("test_session.jl")
     include("test_xyz.jl")
+    include("test_csv.jl")
     include("test_jobs.jl")
     include("test_tools.jl")
 end

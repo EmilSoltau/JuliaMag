@@ -18,7 +18,9 @@ include("history/script.jl")
 include("io/textscan.jl")
 include("tools/settings.jl")
 include("io/registry.jl")
+include("io/line_import.jl")
 include("io/xyz_import.jl")
+include("io/csv_import.jl")
 include("jobs/jobs.jl")
 include("tools/registry.jl")
 
@@ -40,6 +42,8 @@ export open_session, new_session, check_not_busy, push_undo!, undo!, redo!, can_
 export record!, set_cell!, set_line_selected!, set_cursor!, script_text
 export eachfileline, ImportWarning, ImportResult, Progress, report, is_cancelled, NO_PROGRESS
 export ImporterSpec, register_importer!, importers, importer_for, import_xyz
+export CsvColumn, CsvLayout, sniff_csv, preview_rows, import_csv
+export save_template, load_template, list_templates, layout_json
 export JobStatus, JOB_RUNNING, JOB_DONE, JOB_FAILED, JOB_CANCELLED, JOB_UNDONE, Job
 export start_job!, cancel!, status, wait_job, jobs, rerun!, import_file
 export SettingSpec, NumberSetting, TextSetting, ExprSetting, ChoiceSetting, BoolSetting, FileSetting,

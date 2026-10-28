@@ -5,35 +5,15 @@
 # with the file. A data row is scanned by byte index; no memory is allocated
 # per value.
 #
-# Safety:
-# - A new database is written to `databases/.importing-<id>/` and moved to its
-#   final folder only when it is complete. Then the item is added to the project.
-#   On any error the temp folder is removed and the error is thrown again.
-# - In append mode the target database is written in place. `database.json` is
-#   saved only at the end, so it is the commit point. On error the channel files
-#   are cut back and new channel files are removed, so the target is as it was.
-#   The target is marked busy while the file is read. Inside a job, the append
-#   notes an undo that puts the target back (see `roll_back!`).
-
-"Most warnings kept in a result. Later ones are counted, not kept."
-const MAX_WARNINGS = 1000
-
-"Most fiducial steps kept per line to find the median step."
-const MAX_FID_STEPS = 1 << 20
-
-const LINE_KEYWORDS = Dict("line" => LINE, "tie" => TIE, "base" => BASE, "test" => TEST,
-                           "trend" => TREND, "random" => RANDOM, "special" => SPECIAL)
-
-const XAppender = ColumnAppender{NumericWriter{Float64}}
+# Staging, commit, append with rollback and undo, warnings and progress are
+# shared with the other line importers (see `line_import.jl`).
 
 "Everything the importer tracks while it reads a file."
 mutable struct XyzState
     path::String
     db::LineDatabase
     crs::String
-    progress::Progress
-    file_bytes::Int
-    last_bytes::Int
+    ticker::ChunkProgress
     # Names from "/" lines before the first data row, the last line for each count.
     names_by_count::Dict{Int,Vector{String}}
     # Columns. `ncols` is 0 until the first data row.
@@ -52,48 +32,29 @@ mutable struct XyzState
     pending_at::Int
     cur::Union{Nothing,LineInfo}
     warned::BitVector
-    # Fiducials of the current line.
-    fid_first::Float64
-    fid_first_row::Int
-    fid_prev::Float64
-    fid_prev_row::Int
-    fid_steps::Vector{Float64}
+    fid::FidTracker
     # Result.
-    warnings::Vector{ImportWarning}
-    dropped_warnings::Int
+    log::WarningLog
     rows::Int
     lines::Int
 end
 
 function XyzState(path::String, db::LineDatabase, crs::String, progress::Progress)
-    return XyzState(path, db, crs, progress, filesize(path), -1,
+    return XyzState(path, db, crs, ChunkProgress(progress, path),
                     Dict{Int,Vector{String}}(), 0, String[], XAppender[], nothing, 0,
                     Vector{Int}(undef, 64), Vector{Int}(undef, 64),
-                    0, "", nothing, 0, 0, nothing, falses(0),
-                    NaN, 0, NaN, 0, Float64[],
-                    ImportWarning[], 0, 0, 0)
+                    0, "", nothing, 0, 0, nothing, falses(0), FidTracker(),
+                    WarningLog(), 0, 0)
 end
 
-function warn!(st::XyzState, file_line::Int, msg::String)
-    if length(st.warnings) < MAX_WARNINGS
-        push!(st.warnings, ImportWarning(file_line, msg))
-    else
-        st.dropped_warnings += 1
-    end
-    return nothing
-end
+warn!(st::XyzState, file_line::Int, msg::String) = warn!(st.log, file_line, msg)
 
 # ---- one line of the file --------------------------------------------------
 
-@inline is_blank(b::UInt8) = b == 0x20 || b == 0x09
 @inline is_ascii_letter(b::UInt8) = (0x41 <= b <= 0x5a) || (0x61 <= b <= 0x7a)
 
 function xyz_line!(st::XyzState, lineno::Int, line::SubString{String}, bytes_read::Int)
-    if bytes_read != st.last_bytes      # a new chunk
-        st.last_bytes = bytes_read
-        is_cancelled(st.progress) && throw(ImportCancelled())
-        report(st.progress, st.file_bytes == 0 ? 1.0 : min(bytes_read / st.file_bytes, 1.0))
-    end
+    tick!(st.ticker, bytes_read)
     s = line.string
     i, j = line_range(line)
     while i <= j && is_blank(codeunit(s, i))
@@ -190,27 +151,10 @@ Read a line header such as `Line 1001`, `Tie 5.1`, `L1001`, `t 7.2` or `Line 10:
 a header. A flight number in the header is stored in `st.pending_flight`.
 """
 function parse_line_header(st::XyzState, s::String, i::Int, j::Int)::Union{Nothing,LineId}
-    words = field_strings(s, i, min(j, i + 200))
-    isempty(words) && return nothing
-    w = words[1]
-    k = something(findfirst(c -> !('A' <= c <= 'Z' || 'a' <= c <= 'z'), w), lastindex(w) + 1)
-    word = lowercase(w[1:prevind(w, k)])
-    rest = w[k:end]
-    numtext = isempty(rest) ? (length(words) >= 2 ? words[2] : "") : rest
-    t = get(LINE_KEYWORDS, word, nothing)
-    if t === nothing
-        (length(word) == 1 && uppercase(word[1]) in LINE_LETTERS) || return nothing
-        t = line_type(word[1])
-    end
-    m = match(r"^(\d+)(?:\.(\d+))?(?::(\d+))?$", numtext)
-    m === nothing && return nothing
-    num, ver, fl = m[1], m[2], m[3]
-    number = num === nothing ? nothing : tryparse(Int, num)
-    version = ver === nothing ? 0 : tryparse(Int, ver)
-    (number === nothing || version === nothing) && return nothing
-    flight = fl === nothing ? nothing : tryparse(Int, fl)
-    st.pending_flight = flight === nothing ? -1 : flight
-    return LineId(t, number, version)
+    r = parse_line_name(field_strings(s, i, min(j, i + 200)))
+    r === nothing && return nothing
+    st.pending_flight = r[2]
+    return r[1]
 end
 
 function header_line!(st::XyzState, lineno::Int, id::LineId)
@@ -228,16 +172,6 @@ function warn_empty_pending!(st::XyzState)
     return nothing
 end
 
-"The id itself when it is free, else the same type and number with the next free version."
-function free_line_id(db::LineDatabase, id::LineId)::LineId
-    line_position(db, id) == 0 && return id
-    v = id.version
-    for l in db.lines
-        (l.id.type == id.type && l.id.number == id.number) && (v = max(v, l.id.version))
-    end
-    return LineId(id.type, id.number, v + 1)
-end
-
 # ---- data rows -------------------------------------------------------------
 
 function data_row!(st::XyzState, lineno::Int, s::String, i::Int, j::Int)
@@ -252,7 +186,7 @@ function data_row!(st::XyzState, lineno::Int, s::String, i::Int, j::Int)
     end
     n = scan_fields!(st.starts, st.stops, s, i, j)
     if n != st.ncols
-        warn!(st, lineno, "expected $(st.ncols) values, found $n; row skipped")
+        warn!(st, lineno, row_length_message(st.ncols, n))
         return nothing
     end
     l = current_line!(st)
@@ -271,7 +205,7 @@ function data_row!(st::XyzState, lineno::Int, s::String, i::Int, j::Int)
             end
         end
         append_value!(apps[c], v)
-        c == st.fid_col && track_fiducial!(st, v, row)
+        c == st.fid_col && track_fiducial!(st.fid, v, row)
     end
     l.nrows = row
     st.rows += 1
@@ -293,12 +227,10 @@ function has_number(st::XyzState, s::String, i::Int, j::Int)::Bool
     return false
 end
 
-@noinline function bad_value!(st::XyzState, lineno::Int, l::LineInfo, c::Int, s::String, a::Int, b::Int)
+function bad_value!(st::XyzState, lineno::Int, l::LineInfo, c::Int, s::String, a::Int, b::Int)
     st.warned[c] && return nothing
     st.warned[c] = true
-    warn!(st, lineno, "column $(st.colnames[c]) on line $(line_name(l.id)) has a value that is not " *
-                      "a number: \"$(field_text(s, a, min(b, a + 39)))\"; read as missing. " *
-                      "Later bad values in this column on this line are not listed.")
+    warn_bad_value!(st.log, lineno, st.colnames[c], l, s, a, b)
     return nothing
 end
 
@@ -306,50 +238,23 @@ end
 function current_line!(st::XyzState)::LineInfo
     cur = st.cur
     st.pending === nothing && cur !== nothing && return cur
-    id = something(st.pending, LineId(RANDOM, 0, 0))
+    id = something(st.pending, DEFAULT_LINE_ID)
     flight = st.pending_flight >= 0 && st.pending !== nothing ? st.pending_flight : st.flight
     st.pending = nothing
     finish_line!(st)
-    l = LineInfo(free_line_id(st.db, id), flight, st.date, 0.0, 1.0, 0, 0, true)
-    add_line!(st.db, l)       # ends the line before it (see `add_line!`)
+    l = start_line!(st.db, id, flight, st.date)
     st.cur = l
     st.lines += 1
     fill!(st.warned, false)
-    st.fid_first, st.fid_first_row = NaN, 0
-    st.fid_prev, st.fid_prev_row = NaN, 0
-    empty!(st.fid_steps)
+    reset!(st.fid)
     return l
-end
-
-function track_fiducial!(st::XyzState, v::Float64, row::Int)
-    isnan(v) && return nothing
-    if st.fid_first_row == 0
-        st.fid_first, st.fid_first_row = v, row
-    elseif length(st.fid_steps) < MAX_FID_STEPS
-        push!(st.fid_steps, (v - st.fid_prev) / (row - st.fid_prev_row))
-    end
-    st.fid_prev, st.fid_prev_row = v, row
-    return nothing
 end
 
 "Set the fiducial start and step of the current line from its FIDUCIAL column."
 function finish_line!(st::XyzState)
     l = st.cur
-    (l === nothing || st.fid_col == 0 || st.fid_first_row == 0) && return nothing
-    step = 1.0
-    n = length(st.fid_steps)
-    if n > 0
-        v = st.fid_steps
-        # Median. `partialsort!` with one index selects in place; a range would allocate.
-        m = isodd(n) ? partialsort!(v, (n + 1) ÷ 2) : (partialsort!(v, n ÷ 2) + partialsort!(v, n ÷ 2 + 1)) / 2
-        if isfinite(m) && m > 0
-            step = m
-        else
-            warn!(st, 0, "line $(line_name(l.id)): the fiducial step is $m, not above 0; step set to 1")
-        end
-    end
-    l.fid_step = step
-    l.fid_start = st.fid_first - (st.fid_first_row - 1) * step
+    (l === nothing || st.fid_col == 0) && return nothing
+    finish_fiducials!(st.fid, l, st.log)
     return nothing
 end
 
@@ -368,73 +273,27 @@ function setup_columns!(st::XyzState, lineno::Int, s::String, i::Int, j::Int)
     empty!(st.names_by_count)
     db = st.db
     taken = Set{String}()
-    roles = Dict{ChannelRole,String}()
+    labels = String[]
     for (k, r) in enumerate(raw)
         label = String(strip(r, ('"', '\'')))
         name = channel_name(label, k, taken)
         push!(taken, lowercase(name))
-        old = channel_position_ci(db, name)
-        if old > 0
-            # Append mode: the column goes to the channel that is already there.
-            c = db.channels[old]
-            (c.eltype === Float64 && c.arraylen == 1) || throw(DatabaseError(
-                "channel $(c.name) of database $(db.name) holds $(c.eltype) values; XYZ import writes Float64"))
-            name = c.name
-        end
+        push!(labels, label)
         push!(st.colnames, name)
-        uppercase(name) == "FIDUCIAL" && st.fid_col == 0 && (st.fid_col = k)
-        role = name_role(name)
-        (role == ROLE_NONE || haskey(roles, role)) && (role = ROLE_NONE)
-        role == ROLE_NONE || (roles[role] = name)
-        old == 0 && add_channel!(db, ChannelInfo(name, label, Float64, "", role, :normal, 10, -1, true, 1))
     end
-    add_pair!(db, get(roles, ROLE_X, ""), get(roles, ROLE_Y, ""), st.crs)
-    add_pair!(db, get(roles, ROLE_LON, ""), get(roles, ROLE_LAT, ""), "EPSG:4326")
-    db.current_pair == 0 && !isempty(db.pairs) && (db.current_pair = 1)
+    roles = position_roles(st.colnames)
+    for k in 1:n
+        # Append mode: the column goes to the channel that is already there.
+        st.colnames[k] = import_channel!(db, st.colnames[k], labels[k], Float64, "", roles[k], 1, "XYZ")
+        uppercase(st.colnames[k]) == "FIDUCIAL" && st.fid_col == 0 && (st.fid_col = k)
+    end
+    add_position_pairs!(db, st.colnames, roles, st.crs)
     st.ncols = n
     st.warned = falses(n)
     d = open_appenders(db, st.colnames)
     st.appdict = d
     st.apps = XAppender[d[c]::XAppender for c in st.colnames]
     return nothing
-end
-
-"Index of the channel whose name equals `name`, ignoring case, or 0."
-channel_position_ci(db::LineDatabase, name::AbstractString) =
-    something(findfirst(c -> lowercase(c.name) == lowercase(name), db.channels), 0)
-
-function add_pair!(db::LineDatabase, x::String, y::String, crs::String)
-    (isempty(x) || isempty(y)) && return nothing
-    any(p -> p.x == x && p.y == y, db.pairs) && return nothing
-    push!(db.pairs, PositionPair(x, y, crs))
-    return nothing
-end
-
-function name_role(name::AbstractString)::ChannelRole
-    u = uppercase(name)
-    u in ("X", "EASTING") && return ROLE_X
-    u in ("Y", "NORTHING") && return ROLE_Y
-    u in ("LON", "LONG", "LONGITUDE") && return ROLE_LON
-    u in ("LAT", "LATITUDE") && return ROLE_LAT
-    return ROLE_NONE
-end
-
-"""
-A channel name made from a name in the file that is safe as a file name
-(see `check_channel_info`) and not in `taken` (lower case names).
-"""
-function channel_name(raw::AbstractString, k::Int, taken::Set{String})::String
-    t = map(c -> (!isvalid(c) || c in BAD_NAME_CHARS || iscntrl(c)) ? '_' : c, String(raw))
-    t = String(rstrip(t, (' ', '.')))
-    isempty(t) && (t = "C$k")
-    uppercase(t) in RESERVED_NAMES && (t *= "_")
-    name = t
-    n = 2
-    while lowercase(name) in taken
-        name = "$(t)_$n"
-        n += 1
-    end
-    return name
 end
 
 # ---- the whole file --------------------------------------------------------
@@ -445,58 +304,14 @@ function read_xyz!(st::XyzState)
         xyz_line!(st, lineno, line, bytes_read)
     end
     st.ncols == 0 && throw(ArgumentError("$(st.path) has no rows of numbers to import"))
-    # A last check, so a cancel during the last chunk stops the import too.
-    is_cancelled(st.progress) && throw(ImportCancelled())
+    check_cancel(st.ticker)
     finish_line!(st)
     warn_empty_pending!(st)
     d = st.appdict
     st.appdict = nothing
     d === nothing || close_appenders!(d)
-    st.dropped_warnings > 0 &&
-        push!(st.warnings, ImportWarning(0, "$(st.dropped_warnings) more warnings were not listed"))
-    report(st.progress, 1.0)
+    report(st.ticker.progress, 1.0)
     return nothing
-end
-
-"Close the appenders after a failure. Errors here are dropped; the first error counts."
-function abort_appenders!(st::XyzState)
-    d = st.appdict
-    st.appdict = nothing
-    d === nothing && return nothing
-    try
-        close_appenders!(d)
-    catch
-    end
-    return nothing
-end
-
-release_maps!(db::LineDatabase) = foreach(c -> release_map!(db, c.name), db.channels)
-
-"A folder name made from a database name: lower case letters, digits, `-` and `_`."
-function folder_slug(name::AbstractString)::String
-    io = IOBuffer()
-    dash = false
-    for c in lowercase(name)
-        if isascii(c) && (isletter(c) || isdigit(c) || c == '_')
-            write(io, c)
-            dash = false
-        elseif !dash && position(io) > 0
-            write(io, '-')
-            dash = true
-        end
-    end
-    t = rstrip(String(take!(io)), '-')
-    return isempty(t) ? "database" : String(t)
-end
-
-"`slug`, or `slug-2`, `slug-3`, ... : the first one not taken in `folder`."
-function free_folder(folder::String, slug::String)::String
-    ispath(joinpath(folder, slug)) || return slug
-    n = 2
-    while ispath(joinpath(folder, "$slug-$n"))
-        n += 1
-    end
-    return "$slug-$n"
 end
 
 """
@@ -522,150 +337,17 @@ The import is recorded in the history as `"import.geosoft_xyz"`.
 function import_xyz(s::Session, path::String; name::AbstractString = splitext(basename(path))[1],
                     crs::AbstractString = "", mode::Symbol = :new, target::AbstractString = "",
                     progress::Progress = NO_PROGRESS, record::Bool = true)::ImportResult
-    mode in (:new, :append) || throw(ArgumentError("mode must be :new or :append, not $(repr(mode))"))
-    mode == :append && isempty(target) && throw(ArgumentError("mode :append needs a target database id"))
-    isfile(path) || throw(ArgumentError("no file at $path"))
+    check_import_args(path, mode, target)
     args = Dict{String,Any}("path" => path, "name" => String(name), "crs" => String(crs),
                             "mode" => String(mode), "target" => String(target))
     report(progress, 0.0)
-    r = mode == :new ? import_xyz_new(s, path, String(name), String(crs), progress) :
-                       import_xyz_append(s, path, String(target), String(crs), progress)
+    r = import_lines(s, mode, String(name), String(target)) do db
+        st = XyzState(path, db, String(crs), progress)
+        read_xyz!(st)
+        return (final_warnings(st.log), st.rows, st.lines)
+    end
     record && record!(s, "import.geosoft_xyz", args)
     return r
-end
-
-function import_xyz_new(s::Session, path::String, name::String, crs::String, progress::Progress)
-    p = s.project
-    id = lock(() -> reserve_item_id!(p, ITEM_DATABASE), s.lock)
-    dbs = joinpath(p.folder, "databases")
-    mkpath(dbs)
-    tmp = joinpath(dbs, ".importing-$id")
-    note_job_folder!(tmp)
-    st = nothing
-    local result::Tuple{Vector{ImportWarning},Int,Int}
-    try
-        rm(tmp; recursive = true, force = true)
-        db = create_database(tmp, name)
-        st = XyzState(path, db, crs, progress)
-        read_xyz!(st)
-        release_maps!(db)
-        save_meta(db)
-        result = (st.warnings, st.rows, st.lines)
-    catch
-        st === nothing || abort_appenders!(st)
-        rm(tmp; recursive = true, force = true)
-        rethrow()
-    end
-    new_item = lock(s.lock) do
-        folder = free_folder(dbs, folder_slug(name))
-        final = joinpath(dbs, folder)
-        try
-            mv(tmp, final)
-        catch
-            rm(tmp; recursive = true, force = true)
-            rethrow()
-        end
-        it = ProjectItem(id, ITEM_DATABASE, name, "databases/$folder", "", "")
-        try
-            add_item!(p, it)
-            save_project(p)
-        catch
-            any(i -> i === it, p.items) && remove_item!(p, id)
-            rm(final; recursive = true, force = true)
-            rethrow()
-        end
-        it
-    end
-    return ImportResult(new_item, result...)
-end
-
-function import_xyz_append(s::Session, path::String, target::String, crs::String, progress::Progress)
-    p = s.project
-    # Take the lock only to find the target and mark it busy. While the file is
-    # read, other changes to the target throw `ItemBusyError`; the rest of the
-    # session is free. Readers see the committed rows (see `open_database`).
-    it, db, before = lock(s.lock) do
-        it = item(p, target)
-        mark_busy!(s, target)
-        try
-            db = database(p, target)
-            return it, db, committed_state(db)
-        catch
-            unmark_busy!(s, target)
-            rethrow()
-        end
-    end
-    local result::Tuple{Vector{ImportWarning},Int,Int}
-    local committed::String
-    try
-        rows_before = db.rows_written
-        nchannels = length(db.channels)
-        st = nothing
-        try
-            st = XyzState(path, db, crs, progress)
-            read_xyz!(st)
-            release_maps!(db)
-            committed = lock(s.lock) do
-                save_meta(db)                    # the commit point
-                read(meta_path(db), String)
-            end
-            result = (st.warnings, st.rows, st.lines)
-        catch
-            st === nothing || abort_appenders!(st)
-            undo_append!(db, nchannels, rows_before)
-            rethrow()
-        end
-    finally
-        unmark_busy!(s, target)
-    end
-    note_append_undo!(s, target, before, committed)
-    return ImportResult(it, result...)
-end
-
-"""
-Inside a job: note how to undo and redo the append to item `target`.
-Undo keeps the appended rows in a side folder of the database until redo,
-or until the redo is no longer possible.
-"""
-function note_append_undo!(s::Session, target::String, before::CommittedState, committed::String)
-    side = Ref("")
-    folder() = item_path(s.project, item(s.project, target))
-    undo = () -> begin
-        check_not_busy(s, target)
-        side[] = roll_back!(folder(), before, committed)
-        nothing
-    end
-    redo = () -> begin
-        check_not_busy(s, target)
-        roll_forward!(folder(), before, side[])
-        side[] = ""
-        nothing
-    end
-    drop = () -> begin
-        isempty(side[]) || rm(side[]; recursive = true, force = true)
-        side[] = ""
-        nothing
-    end
-    note_job_undo!(undo, redo, drop; items = [target])
-    return nothing
-end
-
-"After a failed append: cut the old channel files back and remove new ones."
-function undo_append!(db::LineDatabase, nchannels::Int, rows::Int)
-    for (k, c) in enumerate(db.channels)
-        try
-            if k <= nchannels
-                cut_channel!(db, c, rows)
-            else
-                release_map!(db, c.name)
-                foreach(f -> rm(f; force = true), channel_files(db, c))
-            end
-        catch e
-            e isa InterruptException && rethrow()
-            # `open_database` cuts uncommitted rows too; go on with the other channels.
-        end
-    end
-    return nothing
 end
 
 # ---- registration ----------------------------------------------------------
@@ -687,12 +369,7 @@ with the problems, so the job fails with a message the user can read.
 Not recorded: the job that runs it records it (see `ImporterSpec`).
 """
 function run_xyz_importer(s::Session, path::String, settings::AbstractDict, progress::Progress)::ImportResult
-    problems = validate_settings(XYZ_SETTINGS, settings, "Geosoft XYZ")
-    isempty(problems) || throw(ToolError(join(problems, " ")))
-    v = default_settings(XYZ_SETTINGS)
-    for st in XYZ_SETTINGS
-        haskey(settings, st.key) && (v[st.key] = setting_value(st, settings[st.key]))
-    end
+    v = importer_values(XYZ_SETTINGS, settings, "Geosoft XYZ")
     name = v["name"]::String
     return import_xyz(s, path; name = isempty(name) ? splitext(basename(path))[1] : name,
                       crs = v["crs"]::String, mode = Symbol(v["mode"]::String),
