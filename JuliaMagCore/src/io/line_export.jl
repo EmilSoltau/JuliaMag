@@ -3,10 +3,15 @@
 # - An export reads the committed view of the database (see `open_database`), so
 #   a database that an import is appending to exports what is committed. It
 #   never changes the database.
+# - While it runs, an export marks its item busy for reading (`mark_reading!`,
+#   ruling R12). Edits, undo, redo and appends of the item then throw
+#   `ItemBusyError` ("an export is running"), so the files are not cut, renamed
+#   or changed under the export. Other exports of the item may run at the same time.
 # - Rows are read in blocks with plain file reads (see `block_reader`), so memory
 #   stays flat however large the database is.
-# - The file is written to `path * ".tmp"` and renamed at the end. On an error
-#   or a cancel the temp file is removed and `path` is not touched.
+# - The file is written to a temp file next to `path` (`path.tmp-<random>`) and
+#   renamed at the end. On an error or a cancel the temp file is removed and
+#   `path` is not touched. Two exports to the same path do not share a temp file.
 # - Progress is the fraction of rows written. Cancel is checked once per block
 #   and throws `ExportCancelled`.
 # - Numbers: a channel with `decimals` set (0 or more) is written with that many
@@ -18,6 +23,15 @@
 # - Array channels become one column per value: `SPEC[0]`, `SPEC[1]`, ...
 # - Whole numbers are written as they are. Missing values are `*` in XYZ and
 #   empty fields in CSV.
+# - XYZ and CSV keep the sampling of each line: when no FIDUCIAL channel is
+#   exported and a line has a fiducial start other than 0 or a step other than 1,
+#   a column `FIDUCIAL` (or `FIDUCIAL_` when the database has a FIDUCIAL channel
+#   that is not exported) is added with `start + (row - 1) * step`. The importers
+#   read the start and step back from it.
+# - What does not read back the same, because of the formats and the importers:
+#   text `*` reads back as missing; empty CSV text is the same as missing; whole
+#   numbers come back as Float64; XYZ text blanks become `_`, and the XYZ importer
+#   reads only numbers; CSV import does not keep flight and date.
 
 using Printf
 
@@ -40,22 +54,29 @@ const CSV_DELIMITER_LABELS = ["Comma", "Semicolon", "Tab", "Bar"]
 
 # ---- what to export --------------------------------------------------------
 
-"The committed view of a database, and the lines and channels to export."
+"""
+The committed view of a database, and the lines and channels to export.
+`fiducial` is the name of the fiducial column to add, or `""` for none.
+"""
 struct ExportPlan
     item::String
     db::LineDatabase
     lines::Vector{LineInfo}
     channels::Vector{ChannelInfo}
+    fiducial::String
 end
 
 """
 Open the committed view of database `item_id` and pick the lines and channels.
 `lines` is `"all"`, `"selected"` or `"current"` (the line of the cursor).
 Empty `channels` means all channels. Lines with no rows are left out.
+`line_column = true` refuses a channel named LINE, since the file gets a LINE
+column. `fiducial = true` adds a fiducial column when one is needed to keep the
+sampling of the lines (see the top of this file).
 Bad settings throw a `ToolError`.
 """
-function export_plan(s::Session, item_id::AbstractString, lines::AbstractString,
-                     channels::AbstractVector)::ExportPlan
+function export_plan(s::Session, item_id::AbstractString, lines::AbstractString, channels::AbstractVector;
+                     line_column::Bool = false, fiducial::Bool = false)::ExportPlan
     lines in LINES_CHOICES || throw(ToolError("Lines must be all, selected or current, not \"$lines\"."))
     db, cursor = lock(() -> (database(s.project, item_id), s.cursor), s.lock)
     names = unique(String[String(n) for n in channels])
@@ -64,6 +85,10 @@ function export_plan(s::Session, item_id::AbstractString, lines::AbstractString,
                                         join(repr.(unknown), ", ", " or ") * "."))
     chans = isempty(names) ? copy(db.channels) : ChannelInfo[channel(db, n) for n in names]
     isempty(chans) && throw(ToolError("Database $item_id has no channels to export."))
+    if line_column && any(c -> uppercase(c.name) == "LINE", chans)
+        throw(ToolError("Database $item_id has a channel named LINE. This export adds a LINE column with " *
+                        "the line names, so leave that channel out (set the channels to export)."))
+    end
     ls = if lines == "all"
         copy(db.lines)
     elseif lines == "selected"
@@ -75,17 +100,42 @@ function export_plan(s::Session, item_id::AbstractString, lines::AbstractString,
     end
     filter!(l -> l.nrows > 0, ls)
     isempty(ls) && throw(ToolError("Database $item_id has no $(lines == "all" ? "" : lines * " ")lines with rows to export."))
-    return ExportPlan(String(item_id), db, ls, chans)
+    return ExportPlan(String(item_id), db, ls, chans, fiducial ? fiducial_column(db, chans, ls) : "")
 end
+
+"""
+The name of the fiducial column to add, or `""` when none is needed: a FIDUCIAL
+channel is exported, or every line has start 0 and step 1. The name is
+`FIDUCIAL`, or `FIDUCIAL_` when the database has a FIDUCIAL channel that is not
+exported. When both names are taken, `""`.
+"""
+function fiducial_column(db::LineDatabase, chans::Vector{ChannelInfo}, ls::Vector{LineInfo})::String
+    any(c -> uppercase(c.name) == "FIDUCIAL", chans) && return ""
+    all(l -> l.fid_start == 0 && l.fid_step == 1, ls) && return ""
+    for name in ("FIDUCIAL", "FIDUCIAL_")
+        channel_position_ci(db, name) == 0 && return name
+    end
+    return ""
+end
+
+"The fiducial of row `row` (from 1) of a line."
+fiducial_value(l::LineInfo, row::Int)::Float64 = l.fid_start + (row - 1) * l.fid_step
+
+"The format of the added fiducial column: the shortest exact form."
+fiducial_format(decimal::Char) = ValueFormat(nothing, UInt8(decimal))
 
 export_rows(p::ExportPlan)::Int = sum(l.nrows for l in p.lines; init = 0)
 
-"The output column names: the channel names, with arrays as `NAME[0]`, `NAME[1]`, ..."
-function column_names(chans::Vector{ChannelInfo})::Vector{String}
+"""
+The output column names: the channel names, with arrays as `NAME[0]`, `NAME[1]`, ...,
+then the added fiducial column, if any.
+"""
+function column_names(p::ExportPlan)::Vector{String}
     out = String[]
-    for c in chans
+    for c in p.channels
         c.arraylen == 1 ? push!(out, c.name) : append!(out, ("$(c.name)[$k]" for k in 0:(c.arraylen - 1)))
     end
+    isempty(p.fiducial) || push!(out, p.fiducial)
     return out
 end
 
@@ -153,12 +203,13 @@ end
 # ---- the temp file ---------------------------------------------------------
 
 """
-Call `f(io)` to write `path * ".tmp"`, then move it to `path`.
+Call `f(io)` to write a temp file next to `path`, then move it to `path`.
+The temp file is `path.tmp-<random>`, so two exports to the same path do not clash.
 On any error the temp file is removed and the error is thrown again.
 """
 function write_via_temp(f::F, path::String) where {F}
     isdir(path) && throw(ToolError("$path is a folder. Give the name of a file to export to."))
-    tmp = path * ".tmp"
+    tmp = path * ".tmp-" * string(rand(UInt64); base = 36)
     try
         open(f, tmp, "w")
         mv(tmp, path; force = true)
@@ -308,6 +359,8 @@ function xyz_widths(p::ExportPlan, readers::Vector{BlockReader}, fmts::Vector{Va
         each_cell(p.channels, vals, i) do col, x
             w[col] = max(w[col], textwidth(xyz_cell(buf, x, fmts[kfor[col]], blanks)))
         end
+        isempty(p.fiducial) ||
+            (w[end] = max(w[end], textwidth(xyz_cell(buf, fiducial_value(l, i), fiducial_format('.'), blanks))))
     end
     return w
 end
@@ -325,7 +378,8 @@ function write_padded(io::IO, t::String, width::Int)
 end
 
 function write_xyz(io::IO, p::ExportPlan, t::RowProgress)::Vector{String}
-    names = column_names(p.channels)
+    names = column_names(p)
+    ffmt = fiducial_format('.')
     fmts = ValueFormat[ValueFormat(c, '.') for c in p.channels]
     kfor = channel_of_column(p.channels)
     blanks = Ref(0)
@@ -357,6 +411,10 @@ function write_xyz(io::IO, p::ExportPlan, t::RowProgress)::Vector{String}
                 each_cell(p.channels, vals, i) do col, x
                     col > 1 && write(io, ' ')
                     write_padded(io, xyz_cell(buf, x, fmts[kfor[col]], blanks), widths[col])
+                end
+                if !isempty(p.fiducial)
+                    write(io, ' ')
+                    write_padded(io, xyz_cell(buf, fiducial_value(l, rows[i]), ffmt, blanks), widths[end])
                 end
                 write(io, '\n')
             end
@@ -397,8 +455,9 @@ function write_csv(io::IO, p::ExportPlan, t::RowProgress, delimiter::Char, decim
     d = UInt8(delimiter)
     fmts = ValueFormat[ValueFormat(c, decimal) for c in p.channels]
     kfor = channel_of_column(p.channels)
+    ffmt = fiducial_format(decimal)
     write(io, "LINE")
-    for n in column_names(p.channels)
+    for n in column_names(p)
         write(io, d)
         write_csv_field(io, Vector{UInt8}(n), d)
     end
@@ -420,6 +479,10 @@ function write_csv(io::IO, p::ExportPlan, t::RowProgress, delimiter::Char, decim
                     b = cell_bytes(buf, x, fmts[kfor[col]])
                     b === nothing || write_csv_field(io, b, d)
                 end
+                if !isempty(p.fiducial)
+                    write(io, d)
+                    write(io, something(cell_bytes(buf, fiducial_value(l, rows[i]), ffmt)))
+                end
                 write(io, '\n')
             end
         end
@@ -437,15 +500,23 @@ file, and record it in the history unless `record` is false.
 `write_body(io, plan, ticker)` writes the file and returns notes for the report.
 """
 function run_export(write_body::F, s::Session, command::String, item_id::AbstractString, path::AbstractString,
-                    lines::AbstractString, channels::AbstractVector, progress::Progress, record::Bool,
-                    extra::Dict{String,Any} = Dict{String,Any}())::ExportResult where {F}
+                    lines::AbstractString, channels::AbstractVector, progress::Progress, record::Bool;
+                    extra::Dict{String,Any} = Dict{String,Any}(), line_column::Bool = false,
+                    fiducial::Bool = false)::ExportResult where {F}
     report(progress, 0.0)
-    p = export_plan(s, item_id, lines, channels)
-    t = RowProgress(progress, export_rows(p))
-    check_export_cancel(t)
     notes = String[]
-    write_via_temp(String(path)) do io
-        append!(notes, write_body(io, p, t))
+    # The item is busy for reading until the file is written (ruling R12).
+    mark_reading!(s, item_id)
+    local p::ExportPlan, t::RowProgress
+    try
+        p = export_plan(s, item_id, lines, channels; line_column, fiducial)
+        t = RowProgress(progress, export_rows(p))
+        check_export_cancel(t)
+        write_via_temp(String(path)) do io
+            append!(notes, write_body(io, p, t))
+        end
+    finally
+        unmark_reading!(s, item_id)
     end
     report(progress, 1.0)
     if record
@@ -470,7 +541,15 @@ Write database `item_id` to a Geosoft XYZ file (spec 6.3, 7):
 
 `lines` is `"all"`, `"selected"` or `"current"`; empty `channels` means all.
 Array channels become `NAME[0] NAME[1] ...` columns. Text is written as it is,
-except that blanks become `_`, since a blank splits XYZ fields.
+except that blanks become `_`, since a blank splits XYZ fields. When no
+FIDUCIAL channel is exported and a line has start != 0 or step != 1, a FIDUCIAL
+(or FIDUCIAL_) column keeps the sampling.
+
+Limits: text `*` reads back as missing; the XYZ importer reads only numbers, so
+text and whole numbers come back as Float64.
+
+The item is busy for reading while the export runs (ruling R12).
+Progress is by rows; cancel is checked once per block of rows.
 Recorded as `"export.geosoft_xyz"`; `record = false` skips that (see `export_file`).
 Bad settings throw a `ToolError`; a cancel throws `ExportCancelled`. Either way
 `path` is not touched.
@@ -478,7 +557,8 @@ Bad settings throw a `ToolError`; a cancel throws `ExportCancelled`. Either way
 function export_xyz(s::Session, item_id::AbstractString, path::AbstractString; lines::AbstractString = "all",
                     channels::AbstractVector = String[], progress::Progress = NO_PROGRESS,
                     record::Bool = true)::ExportResult
-    return run_export(write_xyz, s, "export.geosoft_xyz", item_id, path, lines, channels, progress, record)
+    return run_export(write_xyz, s, "export.geosoft_xyz", item_id, path, lines, channels, progress, record;
+                      fiducial = true)
 end
 
 "Check the delimiter and the decimal mark of a CSV export. Throws a `ToolError`."
@@ -505,6 +585,12 @@ a quote, a line end or blanks at an end are quoted, with `"` written as `""`.
 - `decimal`: the decimal mark, `'.'` or `','` (ruling R10). A comma cannot be
   both the delimiter and the decimal mark.
 
+A channel named LINE is refused. A FIDUCIAL (or FIDUCIAL_) column keeps the
+sampling, as for `export_xyz`.
+
+Limits: empty text is the same as missing and text `*` reads back as missing;
+whole numbers come back as Float64; CSV import does not keep flight and date.
+
 The other settings, the history and errors are as for `export_xyz`.
 Recorded as `"export.csv"`.
 """
@@ -513,7 +599,8 @@ function export_csv(s::Session, item_id::AbstractString, path::AbstractString; l
                     progress::Progress = NO_PROGRESS, record::Bool = true)::ExportResult
     check_csv_marks(delimiter, decimal)
     extra = Dict{String,Any}("delimiter" => string(delimiter), "decimal" => string(decimal))
-    return run_export(s, "export.csv", item_id, path, lines, channels, progress, record, extra) do io, p, t
+    return run_export(s, "export.csv", item_id, path, lines, channels, progress, record; extra, line_column = true,
+                      fiducial = true) do io, p, t
         write_csv(io, p, t, delimiter, decimal)
     end
 end
@@ -540,7 +627,7 @@ the user can read. Not recorded: the job that runs it records it.
 """
 function run_xyz_exporter(s::Session, item_id::String, path::String, settings::AbstractDict,
                           progress::Progress)::ExportResult
-    v = importer_values(LINE_EXPORT_SETTINGS, settings, "Geosoft XYZ export")
+    v = spec_values(LINE_EXPORT_SETTINGS, settings, "Geosoft XYZ export")
     return export_xyz(s, item_id, path; lines = v["lines"]::String, channels = v["channels"]::Vector{String},
                       progress, record = false)
 end
@@ -548,7 +635,7 @@ end
 "Run the CSV exporter from settings: `lines`, `channels`, `delimiter`, `decimal`. As `run_xyz_exporter`."
 function run_csv_exporter(s::Session, item_id::String, path::String, settings::AbstractDict,
                           progress::Progress)::ExportResult
-    v = importer_values(CSV_EXPORT_SETTINGS, settings, "CSV export")
+    v = spec_values(CSV_EXPORT_SETTINGS, settings, "CSV export")
     return export_csv(s, item_id, path; lines = v["lines"]::String, channels = v["channels"]::Vector{String},
                       delimiter = only(v["delimiter"]::String), decimal = only(v["decimal"]::String),
                       progress, record = false)

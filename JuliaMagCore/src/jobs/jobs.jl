@@ -132,12 +132,13 @@ function finish_job!(s::Session, job::Job, items::Vector{ProjectItem}, before::S
         old = ProjectItem[]
         if replaces !== nothing
             old = ProjectItem[it for it in p.items if it.id in replaces.outputs]
-            # An import is writing to a busy item: keep it, and say so.
-            for it in filter(it -> it.id in s.busy, old)
-                println(job.report, "not replaced: ", it.id, " is busy: an import is running")
-                session_warning!(s, "$(job.id) did not replace $(it.id): it is busy: an import is running")
+            # An import or an export uses a busy item: keep it, and say so.
+            for it in filter(it -> is_busy(s, it.id), old)
+                why = busy_reason(s.busy[it.id])
+                println(job.report, "not replaced: ", it.id, " is busy: ", why)
+                session_warning!(s, "$(job.id) did not replace $(it.id): it is busy: $why")
             end
-            filter!(it -> !(it.id in s.busy), old)
+            filter!(it -> !is_busy(s, it.id), old)
         end
         merge!(job.args, ctx.args)
         try

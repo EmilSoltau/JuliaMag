@@ -13,7 +13,7 @@ One step that can be undone. `undo`, `redo` and `drop` take no arguments.
 `drop` runs when an undone step leaves the redo stack for good, to free
 what `undo` kept for `redo` (such as a copy of removed rows).
 `items` are the ids of the project items the step changes. `undo!` and `redo!`
-refuse the step with `ItemBusyError` while an import writes to one of them.
+refuse the step with `ItemBusyError` while an import or an export uses one of them.
 """
 struct UndoStep
     label::String
@@ -49,13 +49,29 @@ end
 Base.showerror(io::IO, e::ProtectedError) =
     print(io, "ProtectedError: channel ", e.channel, " is protected and cannot be edited")
 
-"Refused change of an item that an import is writing to."
+"""
+Refused change of an item that an import writes to or an export reads.
+`reason` says which, such as `"an import is running"`.
+"""
 struct ItemBusyError <: Exception
     item::String
+    reason::String
 end
 
-Base.showerror(io::IO, e::ItemBusyError) =
-    print(io, "ItemBusyError: ", e.item, " is busy: an import is running")
+ItemBusyError(item::AbstractString) = ItemBusyError(String(item), "an import is running")
+
+Base.showerror(io::IO, e::ItemBusyError) = print(io, "ItemBusyError: ", e.item, " is busy: ", e.reason)
+
+"""
+Who uses a busy item: an import that writes to it (`writing`), and the number
+of exports that read it (`reading`). See `mark_busy!` and `mark_reading!`.
+"""
+mutable struct BusyMark
+    writing::Bool
+    reading::Int
+end
+
+busy_reason(m::BusyMark) = m.writing ? "an import is running" : "an export is running"
 
 """
     Session(project)
@@ -82,8 +98,8 @@ mutable struct Session
     "Number of the next job id. Saved, so a job id is never used twice."
     next_job::Int
     jobs_lock::ReentrantLock
-    "Ids of items an import is writing to. Guarded by `lock`."
-    busy::Set{String}
+    "Items an import writes to or an export reads, by id. Guarded by `lock`."
+    busy::Dict{String,BusyMark}
 end
 
 const HISTORY_FILE = "history.jsonl"
@@ -95,7 +111,7 @@ function Session(p::Project)
     history = load_history(p, warnings)
     s = Session(p, UndoStep[], UndoStep[], history, nothing, nothing,
                 load_remembered(p, warnings), ReentrantLock(), warnings, Job[], 1,
-                ReentrantLock(), Set{String}())
+                ReentrantLock(), Dict{String,BusyMark}())
     load_jobs!(s)
     return s
 end
@@ -183,19 +199,52 @@ session_warning!(s::Session, msg::String) = (lock(() -> push!(s.warnings, msg), 
 
 # ---- busy items ------------------------------------------------------------
 
-"Throw `ItemBusyError` when an import is writing to the item. Call it under `s.lock`."
-check_not_busy(s::Session, id::AbstractString) = (id in s.busy && throw(ItemBusyError(String(id))); nothing)
+# An import that writes to an item marks it with `mark_busy!`. An export that
+# reads it marks it with `mark_reading!`. While an item is marked, changes to it
+# (edits, undo, redo, appends) throw `ItemBusyError`. Exports may share an item
+# with each other and with an import, since they read only the committed rows.
 
-"Mark an item busy, or throw `ItemBusyError` when it already is."
+"True when an import writes to the item or an export reads it. Call it under `s.lock`."
+is_busy(s::Session, id::AbstractString)::Bool = haskey(s.busy, id)
+
+"Throw `ItemBusyError` when an import writes to the item or an export reads it. Call it under `s.lock`."
+function check_not_busy(s::Session, id::AbstractString)
+    m = get(s.busy, id, nothing)
+    m === nothing || throw(ItemBusyError(String(id), busy_reason(m)))
+    return nothing
+end
+
+"Mark an item as written to by an import, or throw `ItemBusyError` when it is busy."
 function mark_busy!(s::Session, id::AbstractString)
     lock(s.lock) do
         check_not_busy(s, id)
-        push!(s.busy, String(id))
+        s.busy[String(id)] = BusyMark(true, 0)
     end
     return nothing
 end
 
-unmark_busy!(s::Session, id::AbstractString) = (lock(() -> delete!(s.busy, String(id)), s.lock); nothing)
+"End the mark of `mark_busy!`."
+unmark_busy!(s::Session, id::AbstractString) = (lock(() -> unmark!(s, String(id), true), s.lock); nothing)
+
+"Mark an item as read by an export. Never throws: reads can share the item."
+function mark_reading!(s::Session, id::AbstractString)
+    lock(s.lock) do
+        m = get!(() -> BusyMark(false, 0), s.busy, String(id))
+        m.reading += 1
+    end
+    return nothing
+end
+
+"End one mark of `mark_reading!`."
+unmark_reading!(s::Session, id::AbstractString) = (lock(() -> unmark!(s, String(id), false), s.lock); nothing)
+
+function unmark!(s::Session, id::String, writer::Bool)
+    m = get(s.busy, id, nothing)
+    m === nothing && return nothing
+    writer ? (m.writing = false) : (m.reading = max(m.reading - 1, 0))
+    (m.writing || m.reading > 0) || delete!(s.busy, id)
+    return nothing
+end
 
 # ---- edits -----------------------------------------------------------------
 

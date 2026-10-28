@@ -508,7 +508,7 @@ Bring importer settings to their stored types, with defaults for those not given
 Bad settings throw a `ToolError` with the problems, so a job fails with a
 message the user can read.
 """
-function importer_values(list::Vector{SettingSpec}, settings::AbstractDict, owner::String)::Dict{String,Any}
+function spec_values(list::Vector{SettingSpec}, settings::AbstractDict, owner::String)::Dict{String,Any}
     problems = validate_settings(list, settings, owner)
     isempty(problems) || throw(ToolError(join(problems, " ")))
     v = default_settings(list)

@@ -286,6 +286,10 @@ function setup_columns!(st::XyzState, lineno::Int, s::String, i::Int, j::Int)
         st.colnames[k] = import_channel!(db, st.colnames[k], labels[k], Float64, "", roles[k], 1, "XYZ")
         uppercase(st.colnames[k]) == "FIDUCIAL" && st.fid_col == 0 && (st.fid_col = k)
     end
+    # `FIDUCIAL_` is the fiducial column that an export adds when it leaves out a FIDUCIAL channel.
+    if st.fid_col == 0
+        st.fid_col = something(findfirst(n -> uppercase(n) == "FIDUCIAL_", st.colnames), 0)
+    end
     add_position_pairs!(db, st.colnames, roles, st.crs)
     st.ncols = n
     st.warned = falses(n)
@@ -368,7 +372,7 @@ with the problems, so the job fails with a message the user can read.
 Not recorded: the job that runs it records it (see `ImporterSpec`).
 """
 function run_xyz_importer(s::Session, path::String, settings::AbstractDict, progress::Progress)::ImportResult
-    v = importer_values(XYZ_SETTINGS, settings, "Geosoft XYZ")
+    v = spec_values(XYZ_SETTINGS, settings, "Geosoft XYZ")
     name = v["name"]::String
     return import_xyz(s, path; name = isempty(name) ? splitext(basename(path))[1] : name,
                       crs = v["crs"]::String, mode = Symbol(v["mode"]::String),

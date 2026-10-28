@@ -44,6 +44,9 @@ end
 "The folder of a project item."
 item_path_of(s::Session, id::String) = joinpath(s.project.folder, s.project.items[findfirst(i -> i.id == id, s.project.items)].path)
 
+"True when a temp file of an export to `path` is left next to it."
+left_temp(path::String) = any(f -> startswith(f, basename(path) * ".tmp"), readdir(dirname(path)))
+
 const CANCELLED = Progress(_ -> nothing, () -> true)
 
 # ---- registry --------------------------------------------------------------
@@ -70,7 +73,7 @@ end
     xyz = joinpath(dir, "out.xyz")
     r = export_xyz(s, id, xyz)
     @test r.rows == 4 * 300 + 2 * 200 && r.lines == 6 && r.path == xyz
-    @test !isfile(xyz * ".tmp")
+    @test !left_temp(xyz)
     back = database_of(s, import_xyz(s, xyz))
     @test same_data(src, back)
     @test [(l.flight, l.date) for l in back.lines] == [(l.flight, l.date) for l in src.lines]
@@ -152,7 +155,7 @@ end
     # Cancel: the temp file is removed and the target is not touched.
     @test_throws JuliaMagCore.ExportCancelled export_xyz(s, id, path; progress = CANCELLED)
     @test_throws JuliaMagCore.ExportCancelled export_parquet(s, id, path; progress = CANCELLED)
-    @test read(path, String) == "old" && !isfile(path * ".tmp")
+    @test read(path, String) == "old" && !left_temp(path)
 end
 
 @testset "shortest exact numbers" begin
@@ -253,7 +256,7 @@ end
     src = database(s.project, id)
     path = joinpath(dir, "p.parquet")
     r = export_parquet(s, id, path)
-    @test !isfile(path * ".tmp")
+    @test !left_temp(path)
     ds = Parquet2.Dataset(path)
     @test Parquet2.nrowgroups(ds) == length(src.lines)
     t = Tables.columntable(ds)
@@ -270,9 +273,11 @@ end
     ds = Parquet2.Dataset(p2)
     t = Tables.columntable(ds)
     @test keys(t) == (:LINE, Symbol("SPEC[0]"), Symbol("SPEC[1]"), Symbol("SPEC[2]"), :NOTE, :COUNT)
-    @test eltype(t.COUNT) == Int32 && eltype(t.NOTE) == String
     @test t.LINE == [fill("L10", 5); fill("T20.1", 5)]
-    @test t.NOTE[1:3] == ["a, b", "say \"hi\"", ""]
+    # Whole numbers and text use nulls for missing values; floats keep NaN.
+    @test nonmissingtype(eltype(t.COUNT)) == Int32 && nonmissingtype(eltype(t.NOTE)) == String
+    @test t.COUNT[4] === missing && t.COUNT[5] === Int32(5) && t.COUNT[9] === missing
+    @test isequal(t.NOTE[1:4], ["a, b", "say \"hi\"", missing, "plain"])
     @test isnan(t[Symbol("SPEC[1]")][2])
     close(ds)
 end
@@ -285,7 +290,7 @@ end
     path = joinpath(dir, "job.csv")
     j = wait_job(export_file(s, id, path; channels = ["MAG"], delimiter = ';'))
     @test status(j) == JOB_DONE && isempty(j.outputs) && j.progress[] == 1.0
-    @test j.command == "export.csv" && isfile(path) && !isfile(path * ".tmp")
+    @test j.command == "export.csv" && isfile(path) && !left_temp(path)
     @test startswith(read(path, String), "LINE;MAG\n")
     @test length(s.undo_stack) == undo_depth          # an export has no undo step
     e = s.history[end]
@@ -334,13 +339,8 @@ end
     @test status(j) == JOB_FAILED && occursin("no exporter", j.error)
     j = wait_job(export_file(s, id, path; exporter = "export.nothing"))
     @test status(j) == JOB_FAILED && occursin("export.nothing", j.error)
-    j = export_file(s, id, path)
-    cancel!(j)
-    wait_job(j)
-    @test status(j) in (JOB_CANCELLED, JOB_DONE)
-    status(j) == JOB_CANCELLED && @test read(path, String) == "old"
-    @test !isfile(path * ".tmp")
-    @test length(s.history) == n + (status(j) == JOB_DONE)
+    @test read(path, String) == "old" && !left_temp(path)
+    @test length(s.history) == n
 end
 
 @testset "an export job cancelled while it writes" begin
@@ -356,7 +356,7 @@ end
     n = length(s.history)
     j = wait_job(export_file(s, id, path; exporter = "export.test_cancel"))
     @test status(j) == JOB_CANCELLED && j.error == "the job was cancelled"
-    @test read(path, String) == "old" && !isfile(path * ".tmp")
+    @test read(path, String) == "old" && !left_temp(path)
     @test length(s.history) == n
 end
 
@@ -376,4 +376,110 @@ end
     finally
         close_appenders!(apps)
     end
+end
+
+# A session with one database whose lines have the sampling `start`, `step` and no FIDUCIAL channel.
+function sampled_session(; extra = String[])
+    s = fresh_session()
+    p = s.project
+    id = new_item_id(p, ITEM_DATABASE)
+    db = create_database(joinpath(p.folder, "databases", id), "sampled")
+    names = ["MAG"; extra]
+    foreach(n -> add_channel!(db, ChannelInfo(n, n, Float64, "", ROLE_NONE, :normal, 10, -1, false, 1)), names)
+    for (k, (start, step)) in enumerate([(100.0, 0.5), (0.0, 1.0), (-3.25, 2.0)])
+        add_line!(db, LineInfo(LineId(LINE, k, 0), 0, "", start, step, 4, 0, true))
+        apps = open_appenders(db, names)
+        foreach(r -> foreach(n -> append_value!(apps[n], 10.0k + r), names), 1:4)
+        close_appenders!(apps)
+    end
+    save_meta(db)
+    add_item!(p, ProjectItem(id, ITEM_DATABASE, "sampled", "databases/$id", "", ""))
+    save_project(p)
+    return s, id
+end
+
+@testset "export keeps the line sampling" begin
+    s, id = sampled_session()
+    dir = mktempdir()
+    sampling(db) = [(l.fid_start, l.fid_step) for l in db.lines]
+    want = [(100.0, 0.5), (0.0, 1.0), (-3.25, 2.0)]
+    xyz = joinpath(dir, "f.xyz")
+    export_xyz(s, id, xyz)
+    @test split(readline(xyz)) == ["/", "MAG", "FIDUCIAL"]
+    @test sampling(database_of(s, import_xyz(s, xyz))) == want
+    csv = joinpath(dir, "f.csv")
+    export_csv(s, id, csv)
+    @test readline(csv) == "LINE,MAG,FIDUCIAL"
+    @test sampling(database_of(s, import_csv(s, csv, sniff_csv(csv)))) == want
+
+    # A FIDUCIAL channel that is not exported: the added column is FIDUCIAL_.
+    s, id = sampled_session(extra = ["FIDUCIAL"])
+    export_xyz(s, id, xyz; channels = ["MAG"])
+    @test split(readline(xyz)) == ["/", "MAG", "FIDUCIAL_"]
+    @test sampling(database_of(s, import_xyz(s, xyz))) == want
+    export_csv(s, id, csv; channels = ["MAG"])
+    @test sampling(database_of(s, import_csv(s, csv, sniff_csv(csv)))) == want
+    # An exported FIDUCIAL channel is used as it is.
+    export_xyz(s, id, xyz)
+    @test split(readline(xyz)) == ["/", "MAG", "FIDUCIAL"]
+end
+
+@testset "CSV and Parquet refuse a channel named LINE" begin
+    s, id = sampled_session(extra = ["Line"])
+    dir = mktempdir()
+    for f in (export_csv, export_parquet)
+        e = try
+            f(s, id, joinpath(dir, "x"); channels = String[])
+            nothing
+        catch err
+            err
+        end
+        @test e isa ToolError && occursin("LINE", e.msg)
+    end
+    @test export_csv(s, id, joinpath(dir, "ok.csv"); channels = ["MAG"]).lines == 3
+    @test export_xyz(s, id, joinpath(dir, "ok.xyz")).lines == 3       # XYZ has no LINE column
+end
+
+@testset "an export marks its item busy (ruling R12)" begin
+    s, id, dir = synthetic_session()
+    L = LineId(LINE, 1001, 0)
+    set_line_selected!(s, id, L, false)                  # something to undo
+    started, release = Channel{Nothing}(1), Channel{Nothing}(1)
+    first_block = Ref(true)
+    gated = Progress(f -> (f > 0 && first_block[] && (first_block[] = false; put!(started, nothing); take!(release)); nothing),
+                     () -> false)
+    task = Threads.@spawn export_csv(s, id, joinpath(dir, "gate.csv"); progress = gated)
+    @test timedwait(() -> isready(started), 30) == :ok   # no hang when the export fails early
+    take!(started)
+    err = try
+        set_line_selected!(s, id, L, true); nothing
+    catch e
+        e
+    end
+    @test err isa ItemBusyError && sprint(showerror, err) == "ItemBusyError: $id is busy: an export is running"
+    @test_throws ItemBusyError set_cell!(s, id, L, "MAG", 1, 1.0)
+    @test_throws ItemBusyError undo!(s)
+    a = joinpath(dir, "more.xyz")
+    write_synthetic_xyz(a; lines = 1, ties = 0, rows_per_line = 10)
+    @test_throws ItemBusyError import_xyz(s, a; mode = :append, target = id)
+    # Another export of the same item may run at the same time.
+    @test export_xyz(s, id, joinpath(dir, "second.xyz"); channels = ["MAG"]).lines == 6
+    put!(release, nothing)
+    @test fetch(task).lines == 6
+    @test undo!(s) && line(database(s.project, id), L).selected
+    @test import_xyz(s, a; mode = :append, target = id).lines == 1
+    @test isempty(s.busy)
+
+    # An export may run while an import appends: it writes the committed lines.
+    entered, gate = Threads.Atomic{Bool}(false), Threads.Atomic{Bool}(false)
+    held = Progress(_ -> nothing, () -> (entered[] = true; while !gate[]; sleep(0.001); end; false))
+    Threads.@spawn (sleep(30); gate[] = true)          # a watchdog, so a failure does not hang
+    imp = Threads.@spawn import_xyz(s, a; mode = :append, target = id, progress = held)
+    @test timedwait(() -> entered[], 30) == :ok
+    r = export_csv(s, id, joinpath(dir, "during.csv"))
+    @test r.lines == 7
+    @test_throws ItemBusyError set_line_selected!(s, id, L, false)   # the import still holds it
+    gate[] = true
+    @test fetch(imp).lines == 1
+    @test isempty(s.busy) && length(database(s.project, id).lines) == 8
 end

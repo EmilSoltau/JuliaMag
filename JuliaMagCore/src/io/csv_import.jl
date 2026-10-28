@@ -253,7 +253,8 @@ const SNIFF_MAX_LINES = 2000
 
 const LINE_COLUMN_NAMES = Set(["LINE", "LINES", "LINE_NO", "LINENO", "LINE_NUMBER", "LINENUMBER",
                                "LINE_ID", "LINEID", "LINE_NAME", "LINENAME"])
-const FIDUCIAL_NAMES = Set(["FIDUCIAL", "FID"])
+# `FIDUCIAL_` is the fiducial column that an export adds when it leaves out a FIDUCIAL channel.
+const FIDUCIAL_NAMES = Set(["FIDUCIAL", "FID", "FIDUCIAL_"])
 
 ismissingtext(t::AbstractString) = (u = strip(t); isempty(u) || u == "*")
 
@@ -323,7 +324,7 @@ Guess the layout of a text file from its first lines:
 - the type of each column from up to `rows` data rows: a column is text (`String`)
   when it has a value that is not a number, empty or `*`;
 - roles by name: a line column (`LINE`, `LINE_NO`, ...), a fiducial column
-  (`FIDUCIAL`, `FID`), and arrays (`SPEC[0]`, `SPEC[1]`, ...);
+  (`FIDUCIAL`, `FID`, `FIDUCIAL_`), and arrays (`SPEC[0]`, `SPEC[1]`, ...);
 - the x and y columns by name (`X`/`EASTING`, `Y`/`NORTHING`, else `LON`/`LAT`
   with crs `EPSG:4326`), as the XYZ importer does.
 
@@ -721,7 +722,7 @@ job fails with a message the user can read.
 Not recorded: the job that runs it records it (see `ImporterSpec`).
 """
 function run_csv_importer(s::Session, path::String, settings::AbstractDict, progress::Progress)::ImportResult
-    v = importer_values(CSV_SETTINGS, settings, "CSV")
+    v = spec_values(CSV_SETTINGS, settings, "CSV")
     text, template = v["layout"]::String, v["template"]::String
     layout = !isempty(text) ? layout_from_json(text, "The layout setting") :
              !isempty(template) ? load_template(s, template) : sniff_csv(path)

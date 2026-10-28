@@ -216,7 +216,7 @@ tool_work(s::Session, spec::ToolSpec, inputs::Dict{String,String}, values::Dict{
 "The message the user reads for an error of a quick tool."
 function failure_message(e)::String
     e isa ToolError && return e.msg
-    e isa ItemBusyError && return "$(e.item) is busy: an import is running."
+    e isa ItemBusyError && return "$(e.item) is busy: $(e.reason)."
     e isa ProtectedError && return "Channel $(e.channel) is protected and cannot be edited."
     text = try
         sprint(showerror, e)

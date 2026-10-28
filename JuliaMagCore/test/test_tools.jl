@@ -213,10 +213,10 @@ end
         ok, msg, out = run_tool(s, "test.scale_data"; inputs = Dict("database" => id), in = "NOPE")
         @test !ok && msg == "There is no channel NOPE." && out === nothing
         @test last_settings(s, "test.scale_data")["in"] == "NOPE"     # remembered, as the dialog showed it
-        push!(s.busy, id)
+        JuliaMagCore.mark_busy!(s, id)
         ok, msg, _ = run_tool(s, "test.scale_data"; inputs = Dict("database" => id), in = "MAG")
         @test !ok && msg == "$id is busy: an import is running."
-        delete!(s.busy, id)
+        JuliaMagCore.unmark_busy!(s, id)
         @test count(h -> h.command == "test.scale_data", s.history) == 1
 
         # the script repeats the run, with its inputs
