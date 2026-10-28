@@ -63,15 +63,19 @@ ItemBusyError(item::AbstractString) = ItemBusyError(String(item), "an import is 
 Base.showerror(io::IO, e::ItemBusyError) = print(io, "ItemBusyError: ", e.item, " is busy: ", e.reason)
 
 """
-Who uses a busy item: an import that writes to it (`writing`), and the number
-of exports that read it (`reading`). See `mark_busy!` and `mark_reading!`.
+Who uses a busy item: a job that writes to it (`writing`, with `why` such as
+`"an import is running"`), and the number of exports that read it (`reading`).
+See `mark_busy!` and `mark_reading!`.
 """
 mutable struct BusyMark
     writing::Bool
     reading::Int
+    why::String
 end
 
-busy_reason(m::BusyMark) = m.writing ? "an import is running" : "an export is running"
+BusyMark(writing::Bool, reading::Int) = BusyMark(writing, reading, "an import is running")
+
+busy_reason(m::BusyMark) = m.writing ? m.why : "an export is running"
 
 """
     Session(project)
@@ -214,11 +218,16 @@ function check_not_busy(s::Session, id::AbstractString)
     return nothing
 end
 
-"Mark an item as written to by an import, or throw `ItemBusyError` when it is busy."
-function mark_busy!(s::Session, id::AbstractString)
+"""
+    mark_busy!(s, id; reason = "an import is running")
+
+Mark an item as written to by a job, such as an import, or throw `ItemBusyError`
+when it is busy. `reason` is what `ItemBusyError` says while the mark is on.
+"""
+function mark_busy!(s::Session, id::AbstractString; reason::AbstractString = "an import is running")
     lock(s.lock) do
         check_not_busy(s, id)
-        s.busy[String(id)] = BusyMark(true, 0)
+        s.busy[String(id)] = BusyMark(true, 0, String(reason))
     end
     return nothing
 end

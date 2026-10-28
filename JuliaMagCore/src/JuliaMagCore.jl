@@ -27,6 +27,8 @@ include("io/line_export.jl")
 include("io/parquet_export.jl")
 include("jobs/jobs.jl")
 include("tools/registry.jl")
+include("crs/crs.jl")
+include("builtin/coordinates.jl")
 
 export LineType, LINE, TIE, BASE, TEST, TREND, SPECIAL, RANDOM
 export line_letter, line_type, line_name
@@ -56,5 +58,6 @@ export SettingSpec, NumberSetting, TextSetting, ExprSetting, ChoiceSetting, Bool
     ChannelSetting, ChannelListSetting, LinesSetting, CRSSetting, PairSetting, ExtentSetting, PointSetting
 export Place, ToolSpec, ToolError, register_tool!, unregister_tool!, tools, tool, tabs
 export default_settings, validate, last_settings, reset_settings!, run_tool
+export valid_crs, crs_name, guess_utm, reproject_xy
 
 end # module

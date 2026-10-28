@@ -12,4 +12,5 @@ using Test
     include("test_jobs.jl")
     include("test_tools.jl")
     include("test_export.jl")
+    include("test_coordinates.jl")
 end
