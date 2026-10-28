@@ -411,3 +411,61 @@ end
         @test length(database(s.project, id).lines) == 2
     end
 end
+
+# ---- final review fixes ------------------------------------------------------
+
+@testset "a reader at the end of an append does not cut it (C1)" begin
+    mktempdir() do dir
+        s = new_session(joinpath(dir, "p"), "p")
+        a = joinpath(dir, "a.xyz"); write_synthetic_xyz(a; lines = 3, ties = 0, rows_per_line = 1000)
+        b = joinpath(dir, "b.xyz"); write_synthetic_xyz(b; lines = 3, ties = 0, rows_per_line = 1000, seed = 2)
+        id = import_xyz(s, a; record = false).item.id
+        # A reader, such as an export in another job, opens the database when the
+        # import says 100 %. The rows are in the files then, but not committed.
+        seen = Int[]
+        reader = Progress(f -> (f == 1.0 && push!(seen, total_rows(database(s.project, id)))), () -> false)
+        r = import_xyz(s, b; mode = :append, target = id, progress = reader, record = false)
+        @test r.rows == 3000 && !isempty(seen) && all(==(3000), seen)
+        db = database(s.project, id)
+        @test db.rows_written == 6000 && length(db.lines) == 6
+        ref = database_of(s, import_xyz(s, b; record = false))
+        for (l, k) in zip(db.lines[4:6], ref.lines), c in ("X", "MAG", "ALT")
+            @test isequal(collect(read_channel(db, l.id, c)), collect(read_channel(ref, k.id, c)))
+        end
+        @test isempty(JuliaMagCore.APPENDING)
+    end
+end
+
+@testset "a failed undo of an append leaves the step to try again (I4)" begin
+    mktempdir() do dir
+        s = new_session(joinpath(dir, "p"), "p")
+        a = joinpath(dir, "a.xyz"); write_synthetic_xyz(a; lines = 2, ties = 0, rows_per_line = 50)
+        b = joinpath(dir, "b.xyz")
+        write_synthetic_xyz(b; lines = 1, ties = 0, rows_per_line = 40, seed = 5,
+                            channels = ["X", "Y", "FIDUCIAL", "MAG", "ALT", "GRAD"])
+        id = only(wait_job(import_file(s, a)).outputs)
+        db0 = database(s.project, id)
+        sizes0 = channel_sizes(db0)
+        j2 = wait_job(import_file(s, b; mode = "append", target = id))
+        @test status(j2) == JOB_DONE
+        meta1 = read(joinpath(db0.folder, "database.json"), String)
+        sizes1 = channel_sizes(db0)
+        # The last old channel file cannot be cut, as on Windows while a stray map holds it.
+        alt = joinpath(db0.folder, "channels", only(f for f in keys(sizes0) if startswith(f, "ALT")))
+        chmod(alt, 0o444)
+        try
+            @test_throws Exception undo!(s)
+        finally
+            chmod(alt, 0o644)
+        end
+        @test read(joinpath(db0.folder, "database.json"), String) == meta1
+        @test channel_sizes(db0) == sizes1                  # the cut files were put back
+        @test !any(startswith(".undo-"), readdir(db0.folder))
+        @test can_undo(s) && status(j2) == JOB_DONE
+        @test length(database(s.project, id).lines) == 3
+        @test undo!(s) && status(j2) == JOB_UNDONE           # try again
+        @test channel_sizes(database(s.project, id)) == sizes0
+        @test length(database(s.project, id).lines) == 2
+        @test redo!(s) && channel_sizes(database(s.project, id)) == sizes1
+    end
+end

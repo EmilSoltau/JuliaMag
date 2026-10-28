@@ -303,8 +303,6 @@ end
 
 value_kind(T::DataType, arraylen::Int) = arraylen == 1 ? "$T values" : "arrays of $arraylen $T values"
 
-release_maps!(db::LineDatabase) = foreach(c -> release_map!(db, c.name), db.channels)
-
 # ---- names of files and folders --------------------------------------------
 
 "Lower case letters, digits, `-` and `_` made from `name`. May be empty."
@@ -435,6 +433,9 @@ function import_append(read!::F, s::Session, target::String)::ImportResult where
     end
     local result::Tuple{Vector{ImportWarning},Int,Int}
     local committed::String
+    # `read!` closes its appenders before the commit. Until the commit, the rows
+    # past `rows_written` must stay: keep `open_database` from cutting them.
+    mark_appending!(db)
     try
         rows_before = db.rows_written
         nchannels = length(db.channels)
@@ -451,6 +452,7 @@ function import_append(read!::F, s::Session, target::String)::ImportResult where
             rethrow()
         end
     finally
+        unmark_appending!(db)
         unmark_busy!(s, target)
     end
     note_append_undo!(s, target, before, committed)

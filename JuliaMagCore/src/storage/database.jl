@@ -258,6 +258,7 @@ end
 
 "On open: cut file rows that `database.json` does not cover; refuse files that are too short."
 function cut_uncommitted!(db::LineDatabase)
+    any(c -> values_in_file(db, c) > values_for(c, db.rows_written), db.channels) && free_stray_maps()
     for c in db.channels
         have = values_in_file(db, c)
         want = values_for(c, db.rows_written)
@@ -449,6 +450,24 @@ end
 function release_map!(db::LineDatabase, name::AbstractString)
     dropped = pop!(db.maps, name, nothing) !== nothing
     dropped && Sys.iswindows() && GC.gc()
+    return nothing
+end
+
+"Drop the maps of all channels of `db` (see `release_map!`)."
+release_maps!(db::LineDatabase) = foreach(c -> release_map!(db, c.name), db.channels)
+
+"""
+On Windows, run the garbage collector twice before a file is cut, grown or removed.
+Other `LineDatabase` objects of the same folder (`database(p, id)` opens a new one
+each time) may still hold maps of it until they are collected, and Windows
+refuses to change a mapped file. The second run frees what the finalizers of the
+first one let go. Elsewhere this does nothing.
+"""
+function free_stray_maps()
+    if Sys.iswindows()
+        GC.gc()
+        GC.gc()
+    end
     return nothing
 end
 
@@ -962,12 +981,17 @@ end
 # and rewrites `database.json`. So it is undone at the byte level:
 # - `committed_state` notes `database.json` and the size of each channel file.
 # - `roll_back!` copies the added bytes and files to a side folder
-#   `<database>/.undo-*`, writes the old `database.json` (the commit point),
-#   then cuts the files back and moves the added files away.
+#   `<database>/.undo-*`, cuts the files back and moves the added files away,
+#   and then writes the old `database.json` (the commit point) last.
+#   If a file cannot be cut (Windows refuses a file that is still mapped), the
+#   files done so far are put back and `database.json` is not touched, so the
+#   undo can be tried again.
 # - `roll_forward!` puts the bytes and files back, then writes the newer
-#   `database.json`, and removes the side folder.
-# A crash in the middle leaves extra bytes past the commit point, which
-# `open_database` cuts, or a channel file that no `database.json` lists.
+#   `database.json`, and removes the side folder. On a failure it cuts the
+#   files back, so the redo can be tried again.
+# A crash in the middle leaves channel files shorter than `database.json` says
+# (`open_database` then reports them as damaged; the side folder holds the
+# bytes), or extra bytes past the commit point, which `open_database` cuts.
 
 "The committed state of a database: the text of `database.json` and the byte size of each channel file."
 struct CommittedState
@@ -1011,9 +1035,11 @@ Put the database in `folder` back to `state`. Returns the side folder that
 holds what was removed; `roll_forward!` puts it back.
 `committed` is the text of `database.json` that the append wrote.
 Throws `DatabaseError`, and changes nothing, when `database.json` is no longer
-that text, or when a file is shorter than in `state`.
+that text, or when a file is shorter than in `state`. When a file cannot be
+cut, the files are put back and the error is thrown, so it can be tried again.
 """
 function roll_back!(folder::String, state::CommittedState, committed::String)::String
+    free_stray_maps()
     read(joinpath(folder, META_FILE), String) == committed || throw(DatabaseError(
         "cannot undo the append to $folder: database.json changed since the append"))
     db = open_database(folder)
@@ -1042,13 +1068,47 @@ function roll_back!(folder::String, state::CommittedState, committed::String)::S
         rm(side; recursive = true, force = true)
         rethrow()
     end
-    write_text_atomic(meta_path(db), state.meta)          # the commit point
-    for f in files
-        old = get(state.sizes, f, -1)
-        path = joinpath(dir, f)
-        old >= 0 ? open(io -> truncate(io, old), path, "r+") : rm(path; force = true)
+    done = String[]
+    try
+        for f in files
+            old = get(state.sizes, f, -1)
+            path = joinpath(dir, f)
+            old >= 0 ? open(io -> truncate(io, old), path, "r+") : rm(path; force = true)
+            push!(done, f)
+        end
+        write_text_atomic(meta_path(db), state.meta)      # the commit point, last
+    catch e
+        e isa InterruptException && rethrow()
+        put_back = try
+            restore_from_side!(dir, side, done)
+            true
+        catch
+            false
+        end
+        put_back || throw(DatabaseError(
+            "cannot undo the append to $(db.name): $(sprint(showerror, e)). The files could not be put back " *
+            "either; the bytes that were cut are kept in $side"))
+        rm(side; recursive = true, force = true)
+        rethrow()
     end
     return side
+end
+
+"Put back the channel files `names` (or all, when `names` is `nothing`) from a side folder of `roll_back!`."
+function restore_from_side!(dir::String, side::String, names::Union{Nothing,Vector{String}} = nothing)
+    for name in readdir(side)
+        f = endswith(name, ".tail") ? chopsuffix(name, ".tail") :
+            endswith(name, ".whole") ? chopsuffix(name, ".whole") : continue
+        (names === nothing || f in names) || continue
+        if endswith(name, ".tail")
+            open(joinpath(dir, f), "a") do dst
+                open(src -> copy_stream(src, dst), joinpath(side, name), "r")
+            end
+        else
+            cp(joinpath(side, name), joinpath(dir, f); force = true)
+        end
+    end
+    return nothing
 end
 
 """
@@ -1056,8 +1116,11 @@ end
 
 Redo what `roll_back!` undid, from its side folder, and remove the side folder.
 Throws `DatabaseError`, and changes nothing, when the files are no longer as in `state`.
+When a file cannot be put back, the files are cut back to `state` and the
+error is thrown, so it can be tried again.
 """
 function roll_forward!(folder::String, state::CommittedState, side::String)
+    free_stray_maps()
     dir = channels_folder(folder)
     read(joinpath(folder, META_FILE), String) == state.meta || throw(DatabaseError(
         "cannot redo the append to $folder: database.json changed since the undo"))
@@ -1065,16 +1128,39 @@ function roll_forward!(folder::String, state::CommittedState, side::String)
         filesize(joinpath(dir, f)) == n || throw(DatabaseError(
             "cannot redo the append to $folder: channel file $f changed since the undo"))
     end
-    for name in readdir(side)
-        if endswith(name, ".tail")
-            open(joinpath(dir, chopsuffix(name, ".tail")), "a") do dst
-                open(src -> copy_stream(src, dst), joinpath(side, name), "r")
+    try
+        restore_from_side!(dir, side)
+        write_text_atomic(joinpath(folder, META_FILE), read(joinpath(side, META_FILE), String))   # the commit point
+    catch
+        # Back to `state`: cut the grown files, remove the new ones.
+        for name in readdir(side)
+            if endswith(name, ".tail")
+                f = joinpath(dir, chopsuffix(name, ".tail"))
+                quietly_cut(f, state.sizes[basename(f)])
+            elseif endswith(name, ".whole")
+                quietly_rm(joinpath(dir, chopsuffix(name, ".whole")))
             end
-        elseif endswith(name, ".whole")
-            cp(joinpath(side, name), joinpath(dir, chopsuffix(name, ".whole")); force = true)
         end
+        rethrow()
     end
-    write_text_atomic(joinpath(folder, META_FILE), read(joinpath(side, META_FILE), String))   # the commit point
     rm(side; recursive = true, force = true)
+    return nothing
+end
+
+function quietly_cut(path::String, n::Int)
+    try
+        filesize(path) > n && open(io -> truncate(io, n), path, "r+")
+    catch e
+        e isa InterruptException && rethrow()
+    end
+    return nothing
+end
+
+function quietly_rm(path::String)
+    try
+        rm(path; force = true)
+    catch e
+        e isa InterruptException && rethrow()
+    end
     return nothing
 end
