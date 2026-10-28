@@ -11,7 +11,9 @@
 #
 # `database.json` is the commit point. It stores `rows_written`. When a database
 # is opened, file rows past it (from an import that stopped before `save_meta`)
-# are cut off.
+# are cut off. But not while this process has appenders open on the folder:
+# then those rows are live, and `open_database` returns the committed view
+# without touching the files (see `APPENDING`).
 
 using JSON3, StructTypes
 
@@ -140,6 +142,9 @@ Throws `DatabaseError` when `database.json` is missing or broken,
 or when a channel file is missing or shorter than `database.json` says.
 A shorter file means data was lost, so it is never hidden by padding.
 Rows past the saved `rows_written` were never committed and are cut off.
+
+While this process has appenders open on the same folder, the files are not
+touched. The result is then the committed view: the lines up to `rows_written`.
 """
 function open_database(folder::String)::LineDatabase
     path = joinpath(folder, META_FILE)
@@ -156,8 +161,51 @@ function open_database(folder::String)::LineDatabase
     db = LineDatabase(folder, rec.name, rec.description, rec.lines, channels, rec.pairs,
                       rec.current_pair, rec.made_by, rec.rows_written)
     check_meta(db)
-    cut_uncommitted!(db)
+    lock(APPENDING_LOCK) do
+        if haskey(APPENDING, folder_key(folder))
+            # Another writer in this process owns the rows past `rows_written`.
+            check_committed(db)
+            filter!(l -> l.offset + l.nrows <= db.rows_written, db.lines)
+        else
+            cut_uncommitted!(db)
+        end
+    end
     return db
+end
+
+# ---- folders with open appenders -------------------------------------------
+
+"""
+Folders of databases that have open appenders in this process, with a count of
+`LineDatabase` objects that hold them. Keys come from `folder_key`.
+`open_database` does not cut rows in these folders. Guarded by `APPENDING_LOCK`.
+"""
+const APPENDING = Dict{String,Int}()
+const APPENDING_LOCK = ReentrantLock()
+
+"""
+A folder path in one fixed form, so `a/b`, `a/./b` and `a/b/` match.
+Links are not followed: the key must not change when the folder is removed.
+"""
+function folder_key(folder::AbstractString)::String
+    p = normpath(abspath(folder))
+    p = rstrip(p, ('/', '\\'))
+    return Sys.iswindows() ? lowercase(p) : String(p)
+end
+
+function mark_appending!(db::LineDatabase)
+    k = folder_key(db.folder)
+    lock(() -> (APPENDING[k] = get(APPENDING, k, 0) + 1), APPENDING_LOCK)
+    return nothing
+end
+
+function unmark_appending!(db::LineDatabase)
+    k = folder_key(db.folder)
+    lock(APPENDING_LOCK) do
+        n = get(APPENDING, k, 0) - 1
+        n > 0 ? (APPENDING[k] = n) : delete!(APPENDING, k)
+    end
+    return nothing
 end
 
 "Check that the facts in `database.json` fit together and that the channel files exist."
@@ -213,16 +261,31 @@ function cut_uncommitted!(db::LineDatabase)
     for c in db.channels
         have = values_in_file(db, c)
         want = values_for(c, db.rows_written)
-        have < want && throw(DatabaseError(
-            "channel $(c.name) of database $(db.name) is damaged: its file holds $have values, " *
-            "but $META_FILE says $want were written"))
+        check_have(db, c, have, want)
         have > want && cut_channel!(db, c, db.rows_written)
-        if c.eltype === String
-            files = channel_files(db, c)
-            filesize(files[1]) < last_offset(files[2]) && throw(DatabaseError(
-                "channel $(c.name) of database $(db.name) is damaged: its text file is too short"))
-        end
+        check_text_file(db, c)
     end
+    return nothing
+end
+
+"Like `cut_uncommitted!`, but only checks: the files are being appended to."
+function check_committed(db::LineDatabase)
+    for c in db.channels
+        check_have(db, c, values_in_file(db, c), values_for(c, db.rows_written))
+    end
+    return nothing
+end
+
+check_have(db::LineDatabase, c::ChannelInfo, have::Int, want::Int) =
+    have < want && throw(DatabaseError(
+        "channel $(c.name) of database $(db.name) is damaged: its file holds $have values, " *
+        "but $META_FILE says $want were written"))
+
+function check_text_file(db::LineDatabase, c::ChannelInfo)
+    c.eltype === String || return nothing
+    files = channel_files(db, c)
+    filesize(files[1]) < last_offset(files[2]) && throw(DatabaseError(
+        "channel $(c.name) of database $(db.name) is damaged: its text file is too short"))
     return nothing
 end
 
@@ -603,6 +666,7 @@ function open_appenders(db::LineDatabase, names)::Dict{String,ColumnAppender}
             w = c.eltype === String ? StringWriter(files[1], files[2]) : NumericWriter{c.eltype}(files[1])
             a = ColumnAppender(db, c, w, db.rows_written, true)
             out[c.name] = a
+            isempty(db.appenders) && mark_appending!(db)
             db.appenders[c.name] = a
         end
     catch
@@ -687,6 +751,7 @@ function pad_appender!(a::ColumnAppender{NumericWriter{T}}, target::Int) where {
         writer_put!(a.writer, missing_value(T))
     end
     flush_writer!(a.writer)
+    flush(a.writer.io)        # the rows are written now, so they must be in the file
     return nothing
 end
 
@@ -695,6 +760,8 @@ function pad_appender!(a::ColumnAppender{StringWriter}, target::Int)
         writer_put!(a.writer, "")
     end
     flush_writer!(a.writer)
+    flush(a.writer.strio)     # the rows are written now, so they must be in the files
+    flush(a.writer.offio)
     return nothing
 end
 
@@ -730,6 +797,7 @@ function close_appenders!(d::AbstractDict{String,<:ColumnAppender})
         end
         a.open = false
         delete!(a.db.appenders, a.channel.name)
+        isempty(a.db.appenders) && unmark_appending!(a.db)
     end
     failure === nothing || throw(failure)
     return nothing

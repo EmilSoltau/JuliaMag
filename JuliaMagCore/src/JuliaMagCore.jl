@@ -11,12 +11,14 @@ include("storage/columns.jl")
 include("storage/atomic.jl")
 include("storage/database.jl")
 include("project/project.jl")
+include("jobs/job.jl")
 include("session/session.jl")
 include("session/undo.jl")
 include("history/script.jl")
 include("io/textscan.jl")
 include("io/registry.jl")
 include("io/xyz_import.jl")
+include("jobs/jobs.jl")
 
 export LineType, LINE, TIE, BASE, TEST, TREND, SPECIAL, RANDOM
 export line_letter, line_type, line_name
@@ -36,5 +38,7 @@ export open_session, new_session, push_undo!, undo!, redo!, can_undo, can_redo
 export record!, set_cell!, set_line_selected!, set_cursor!, script_text
 export eachfileline, ImportWarning, ImportResult, Progress, report, is_cancelled, NO_PROGRESS
 export ImporterSpec, register_importer!, importers, importer_for, import_xyz
+export JobStatus, JOB_RUNNING, JOB_DONE, JOB_FAILED, JOB_CANCELLED, JOB_UNDONE, Job
+export start_job!, cancel!, status, wait_job, jobs, rerun!, import_file
 
 end # module

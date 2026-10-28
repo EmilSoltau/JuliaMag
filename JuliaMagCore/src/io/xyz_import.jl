@@ -443,6 +443,8 @@ function read_xyz!(st::XyzState)
         xyz_line!(st, lineno, line, bytes_read)
     end
     st.ncols == 0 && throw(ArgumentError("$(st.path) has no rows of numbers to import"))
+    # A last check, so a cancel during the last chunk stops the import too.
+    is_cancelled(st.progress) && throw(ImportCancelled())
     finish_line!(st)
     warn_empty_pending!(st)
     d = st.appdict
@@ -510,10 +512,14 @@ Import a Geosoft XYZ file (spec 6.3).
 
 Problems in rows and values become warnings in the result. A failed or cancelled
 import throws, and leaves no new item and no changed database behind.
+
+The import is recorded in the history as `"import.geosoft_xyz"`.
+`record = false` skips that. The importer does this when it runs inside a job
+(see `import_file`), because the job records the import, with its job id.
 """
 function import_xyz(s::Session, path::String; name::AbstractString = splitext(basename(path))[1],
                     crs::AbstractString = "", mode::Symbol = :new, target::AbstractString = "",
-                    progress::Progress = NO_PROGRESS)::ImportResult
+                    progress::Progress = NO_PROGRESS, record::Bool = true)::ImportResult
     mode in (:new, :append) || throw(ArgumentError("mode must be :new or :append, not $(repr(mode))"))
     mode == :append && isempty(target) && throw(ArgumentError("mode :append needs a target database id"))
     isfile(path) || throw(ArgumentError("no file at $path"))
@@ -522,7 +528,7 @@ function import_xyz(s::Session, path::String; name::AbstractString = splitext(ba
     report(progress, 0.0)
     r = mode == :new ? import_xyz_new(s, path, String(name), String(crs), progress) :
                        import_xyz_append(s, path, String(target), String(crs), progress)
-    record!(s, "import.geosoft_xyz", args)
+    record && record!(s, "import.geosoft_xyz", args)
     return r
 end
 
@@ -532,6 +538,7 @@ function import_xyz_new(s::Session, path::String, name::String, crs::String, pro
     dbs = joinpath(p.folder, "databases")
     mkpath(dbs)
     tmp = joinpath(dbs, ".importing-$id")
+    note_job_folder!(tmp)
     st = nothing
     local result::Tuple{Vector{ImportWarning},Int,Int}
     try
@@ -615,13 +622,16 @@ end
 
 # ---- registration ----------------------------------------------------------
 
-"Run the XYZ importer from settings: `name`, `crs`, `mode` (\"new\" or \"append\"), `target`."
+"""
+Run the XYZ importer from settings: `name`, `crs`, `mode` (\"new\" or \"append\"), `target`.
+Not recorded: the job that runs it records it (see `ImporterSpec`).
+"""
 function run_xyz_importer(s::Session, path::String, settings::AbstractDict, progress::Progress)::ImportResult
     get_text(k, default) = String(get(settings, k, default))
     name = get_text("name", "")
     return import_xyz(s, path; name = isempty(name) ? splitext(basename(path))[1] : name,
                       crs = get_text("crs", ""), mode = Symbol(get_text("mode", "new")),
-                      target = get_text("target", ""), progress)
+                      target = get_text("target", ""), progress, record = false)
 end
 
 register_importer!(ImporterSpec("import.geosoft_xyz", "Geosoft XYZ", [".xyz"], ITEM_DATABASE,

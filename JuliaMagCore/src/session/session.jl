@@ -55,6 +55,10 @@ mutable struct Session
     lock::ReentrantLock
     "Problems found while loading, such as skipped history lines."
     warnings::Vector{String}
+    "Jobs of the project, oldest first. Use `jobs(s)` for a copy, newest first."
+    jobs::Vector{Job}
+    "Number of the next job id. Saved, so a job id is never used twice."
+    next_job::Int
 end
 
 const HISTORY_FILE = "history.jsonl"
@@ -64,8 +68,10 @@ history_path(p::Project) = joinpath(p.folder, "jobs", HISTORY_FILE)
 function Session(p::Project)
     warnings = String[]
     history = load_history(p, warnings)
-    return Session(p, UndoStep[], UndoStep[], history, nothing, nothing,
-                   Dict{String,Dict{String,Any}}(), ReentrantLock(), warnings)
+    s = Session(p, UndoStep[], UndoStep[], history, nothing, nothing,
+                Dict{String,Dict{String,Any}}(), ReentrantLock(), warnings, Job[], 1)
+    load_jobs!(s)
+    return s
 end
 
 "Open the project in `folder` and read its saved history."

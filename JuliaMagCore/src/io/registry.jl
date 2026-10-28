@@ -54,6 +54,8 @@ One importer.
 - `extensions` are lower case and start with a dot, such as `".xyz"`.
 - `kind` is the kind of item it makes.
 - `run(session, path, settings::Dict, progress)` returns an `ImportResult`.
+  It does not record the import in the history. `import_file` runs it as a
+  job, and the job records it once, with the job id.
 """
 struct ImporterSpec
     id::String
