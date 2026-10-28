@@ -136,12 +136,14 @@ end
 
 # ---- guess UTM zone --------------------------------------------------------
 
-"True when the pair holds longitude and latitude: a geographic system, or channels with those roles."
+"""
+True when the pair holds longitude and latitude. A set coordinate system
+decides: it must be geographic. When it is blank, the channel roles decide.
+"""
 function is_lonlat_pair(db::LineDatabase, p::PositionPair)::Bool
-    p.crs == "EPSG:4326" && return true
+    isempty(p.crs) || return p.crs == "EPSG:4326" || is_geographic(p.crs)
     roles(name) = (k = channel_position(db, name); k == 0 ? ROLE_NONE : db.channels[k].role)
-    roles(p.x) == ROLE_LON && roles(p.y) == ROLE_LAT && return true
-    return !isempty(p.crs) && is_geographic(p.crs)
+    return roles(p.x) == ROLE_LON && roles(p.y) == ROLE_LAT
 end
 
 "Values of a numeric channel on one line as `Float64`, with missing values as `NaN`."
@@ -160,7 +162,8 @@ end
 
 function run_guess_utm(s::Session, ins::Dict{String,String}, st::Dict{String,Any}, _, report::IO)
     id = ins["database"]
-    lock(s.lock) do
+    # Pick the pair and mark the database as read under the lock; read without it.
+    db, p = lock(s.lock) do
         db = tool_database(s, id)
         p = if isempty(strip(st["pair"]))
             k = db.current_pair
@@ -178,18 +181,24 @@ function run_guess_utm(s::Session, ins::Dict{String,String}, st::Dict{String,Any
         end
         check_position_channel(db, id, p.x)
         check_position_channel(db, id, p.y)
-        t = UtmTally()
+        mark_reading!(s, id)
+        return db, p
+    end
+    t = UtmTally()
+    try
         for l in db.lines
             l.offset + l.nrows <= db.rows_written || continue
             tally!(t, float_values(db, l, p.x), float_values(db, l, p.y))
         end
-        zones = utm_result(t)
-        isempty(zones) && throw(ToolError("Position pair $(pair_text(p)) has no valid longitude and latitude."))
-        code, share = zones[1]
-        print(report, "Most points (", percent(share), " %) are in ", crs_text(code), ".")
-        if length(zones) > 1
-            print(report, "\nOther zones: ", join(("$c ($(percent(f)) %)" for (c, f) in zones[2:end]), ", "), ".")
-        end
+    finally
+        unmark_reading!(s, id)
+    end
+    zones = utm_result(t)
+    isempty(zones) && throw(ToolError("Position pair $(pair_text(p)) has no valid longitude and latitude."))
+    code, share = zones[1]
+    print(report, "Most points (", percent(share), " %) are in ", crs_text(code), ".")
+    if length(zones) > 1
+        print(report, "\nOther zones: ", join(("$c ($(percent(f)) %)" for (c, f) in zones[2:end]), ", "), ".")
     end
     return nothing
 end
@@ -237,8 +246,10 @@ function run_reproject(s::Session, ins::Dict{String,String}, st::Dict{String,Any
         check_crs(p.crs)
         check_position_channel(db, id, p.x)
         check_position_channel(db, id, p.y)
+        # Read the state before the mark, so a failed read leaves no mark behind.
+        before = committed_state(db)
         mark_busy!(s, id; reason = "a reprojection is running")
-        return db, committed_state(db), p
+        return db, before, p
     end
     local committed::String
     local xname::String

@@ -370,7 +370,7 @@ uuid = "aacddb02-875f-59d6-b918-886e6ef4fbf8"
 version = "3.2.1+0"
 
 [[deps.JuliaMagCore]]
-deps = ["JSON3", "Mmap", "Parquet2", "Parsers", "Printf", "StructTypes", "Tables"]
+deps = ["JSON3", "Mmap", "Parquet2", "Parsers", "Printf", "Proj", "StructTypes", "Tables"]
 path = "JuliaMagCore"
 uuid = "133f1fd6-5f53-418f-9a68-c205e5f9c1d6"
 version = "0.1.0"

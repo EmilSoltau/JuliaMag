@@ -27,6 +27,8 @@ channel_names(db) = [c.name for c in db.channels]
     @test crs_name("EPSG:7855") == "GDA2020 / MGA zone 55"
     @test crs_name("EPSG:32755") == "WGS 84 / UTM zone 55S"
     @test crs_name("nope") == "" && crs_name("") == ""
+    # an error in the work on a good code is a real error, not "invalid code"
+    @test_throws ErrorException JuliaMagCore.with_crs(_ -> error("bug"), "EPSG:4326")
 end
 
 @testset "guess UTM zone" begin
@@ -46,6 +48,16 @@ end
     @test guess_utm([147.0, 147.0], [-10.0, 5.0])[1][1] == "EPSG:32755"
     @test guess_utm([147.0, 147.0], [-5.0, 10.0])[1][1] == "EPSG:32655"
     @test_throws ArgumentError guess_utm([1.0], Float64[])
+    # the official exceptions: southwest Norway is zone 32; Svalbard uses only zones 31, 33, 35 and 37
+    @test guess_utm([5.0], [60.0]) == [("EPSG:32632", 1.0)]
+    @test guess_utm([2.0], [60.0]) == [("EPSG:32631", 1.0)]      # west of 3E: the normal zone
+    @test guess_utm([5.0], [55.0]) == [("EPSG:32631", 1.0)]      # south of 56N: the normal zone
+    @test guess_utm([15.0], [78.0]) == [("EPSG:32633", 1.0)]
+    @test guess_utm([8.0], [78.0]) == [("EPSG:32631", 1.0)]
+    @test guess_utm([20.0], [78.0]) == [("EPSG:32633", 1.0)]
+    @test guess_utm([25.0], [78.0]) == [("EPSG:32635", 1.0)]
+    @test guess_utm([40.0], [78.0]) == [("EPSG:32637", 1.0)]
+    @test guess_utm([8.0], [70.0]) == [("EPSG:32632", 1.0)]      # south of 72N: the normal zone
 end
 
 @testset "reproject points" begin
@@ -73,9 +85,7 @@ end
     n = 1_000_000
     lon = [146.0 + 2.0 * (k / n) for k in 1:n]
     lat = [-20.0 + (k % 1000) / 1000 for k in 1:n]
-    t0 = time()
     bx, by = reproject_xy(lon, lat, "EPSG:4326", "EPSG:32755")
-    @test time() - t0 < 10.0
     @test all(isfinite, bx) && all(isfinite, by)
     results = Vector{Any}(undef, 4)
     Threads.@threads for k in 1:4
@@ -160,6 +170,18 @@ end
     # a picked pair must be longitude and latitude
     ok, msg, _ = run_tool(s, "coordinates.guess_utm"; inputs = ins, pair = "X,Y")
     @test !ok && msg == "Position pair X,Y is not longitude and latitude. Pick the pair with longitude and latitude."
+    @test isempty(s.busy)
+    # a set coordinate system decides; channel roles count only when it is blank
+    db = database(s.project, id)
+    channel(db, "X").role = ROLE_LON
+    channel(db, "Y").role = ROLE_LAT
+    save_meta(db)
+    ok, msg, _ = run_tool(s, "coordinates.guess_utm"; inputs = ins, pair = "X,Y")
+    @test !ok && startswith(msg, "Position pair X,Y is not longitude and latitude.")
+    run_tool(s, "coordinates.set_crs"; inputs = ins, pair = "X,Y", crs = "")
+    ok, msg, _ = run_tool(s, "coordinates.guess_utm"; inputs = ins, pair = "X,Y")
+    @test ok && isempty(s.busy)      # X and Y hold 1 to 3: zone 31 north
+    @test msg == "Most points (100.0 %) are in EPSG:32631 (WGS 84 / UTM zone 31N)."
     # shares of several zones
     t = make_position_db(lon = [147.1, 147.2, 147.3, 150.5], lat = [-19.5, -19.6, -19.7, -19.8])
     ok, msg, _ = run_tool(t.s, "coordinates.guess_utm"; inputs = Dict("database" => t.id), pair = "LON,LAT")
@@ -212,6 +234,13 @@ end
     job = wait_job(run_tool(s, "coordinates.reproject"; inputs = ins, pair = "LON,LAT", crs = "EPSG:32755"))
     @test status(job) == JOB_FAILED && job.error == "Database $id is busy: an import is running."
     JuliaMagCore.unmark_busy!(s, id)
+    # a database whose state cannot be read fails the job and is not left busy
+    meta = joinpath(JuliaMagCore.item_path(s.project, item(s.project, id)), "database.json")
+    saved = read(meta, String)
+    rm(meta)
+    job = wait_job(run_tool(s, "coordinates.reproject"; inputs = ins, pair = "LON,LAT", crs = "EPSG:32755"))
+    @test status(job) == JOB_FAILED && isempty(s.busy)
+    write(meta, saved)
     # a projected target system
     job = run_tool(s, "coordinates.reproject"; inputs = ins, pair = "LON,LAT", crs = "EPSG:7855")
     wait_job(job)

@@ -28,19 +28,23 @@ end
 
 Call `f(pj)` with the PROJ object of coordinate system `code` and return its
 result. Returns `nothing` when PROJ cannot read `code` as a coordinate system.
-Never throws for bad codes.
+Never throws for bad codes. An error in `f` is thrown as it is.
 """
 function with_crs(f::F, code::AbstractString) where {F}
     (isempty(code) || occursin('\0', code)) && return nothing
     ctx = quiet_context()
     pj = Ptr{Proj.PJ}(C_NULL)
     try
-        pj = Proj.proj_create(String(code), ctx)
+        # Only reading the code counts as "not a coordinate system"; the quiet
+        # log function means PROJ reports that with NULL, not with an error.
+        pj = try
+            Proj.proj_create(String(code), ctx)
+        catch e
+            e isa InterruptException && rethrow()
+            Ptr{Proj.PJ}(C_NULL)
+        end
         (pj == C_NULL || Proj.proj_is_crs(pj) == 0) && return nothing
         return f(pj)
-    catch e
-        e isa InterruptException && rethrow()
-        return nothing
     finally
         pj == C_NULL || Proj.proj_destroy(pj)
         Proj.proj_context_destroy(ctx)
@@ -91,6 +95,25 @@ end
 
 UtmTally() = UtmTally(zeros(Int, 60), 0, 0, -Inf, Inf)
 
+"""
+    utm_zone(lon, lat)::Int
+
+The UTM zone of a point: `floor(Int, lon / 6 + 31)`, from 1 to 60, with the
+official exceptions. Southwest Norway (56 to 64 N, 3 to 12 E) is zone 32.
+Svalbard (72 to 84 N) uses only zones 31 (0 to 9 E), 33 (9 to 21 E),
+35 (21 to 33 E) and 37 (33 to 42 E).
+"""
+function utm_zone(lon::Float64, lat::Float64)::Int
+    56 <= lat < 64 && 3 <= lon < 12 && return 32
+    if 72 <= lat < 84 && 0 <= lon < 42
+        lon < 9 && return 31
+        lon < 21 && return 33
+        lon < 33 && return 35
+        return 37
+    end
+    return clamp(floor(Int, lon / 6 + 31), 1, 60)
+end
+
 "Add points to the tally. Missing values and impossible positions are skipped."
 function tally!(t::UtmTally, lon::AbstractVector, lat::AbstractVector)
     length(lon) == length(lat) ||
@@ -98,7 +121,7 @@ function tally!(t::UtmTally, lon::AbstractVector, lat::AbstractVector)
     for k in eachindex(lon, lat)
         x, y = as_float(lon[k]), as_float(lat[k])
         (isfinite(x) && isfinite(y) && -180 <= x <= 180 && -90 <= y <= 90) || continue
-        t.zones[clamp(floor(Int, x / 6 + 31), 1, 60)] += 1
+        t.zones[utm_zone(x, y)] += 1
         if y < 0
             t.south += 1
             t.top_south = max(t.top_south, y)
@@ -132,7 +155,8 @@ end
     guess_utm(lon, lat)::Vector{Tuple{String,Float64}}
 
 The UTM zones of the points, as EPSG codes with the share of the points in each,
-largest share first. The zone is `floor(Int, lon / 6 + 31)`. All zones are
+largest share first. The zone of each point is `floor(Int, lon / 6 + 31)`,
+with the official exceptions for southwest Norway and Svalbard (see `utm_zone`). All zones are
 southern (`EPSG:327zz`) when the median latitude is below 0, else northern
 (`EPSG:326zz`). Missing values and impossible positions are skipped.
 Empty when no point is left.
