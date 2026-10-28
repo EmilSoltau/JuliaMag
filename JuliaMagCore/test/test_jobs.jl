@@ -317,3 +317,97 @@ end
     cancel!(j); wait_job(j)
     @test status(j) == JOB_CANCELLED && occursin("disk full while stopping", j.error)
 end
+
+# ---- fix round 2 -------------------------------------------------------------
+
+"""
+Start an append of `file` into item `id` as a job that waits at its first cancel
+check until `gate` opens. Returns the job once the append holds the item.
+A watchdog opens the gate after 10 s, so a blocked test fails instead of hanging.
+"""
+function gated_append(s, file, id, gate)
+    entered = Threads.Atomic{Bool}(false)
+    work = (p, r) -> begin
+        held = Progress(x -> report(p, x), () -> begin
+            entered[] = true
+            while !gate[]
+                sleep(0.001)
+            end
+            is_cancelled(p)
+        end)
+        import_xyz(s, file; mode = :append, target = id, progress = held, record = false)
+        ProjectItem[]
+    end
+    j = start_job!(s, "test.gated_append", Dict{String,Any}(), work)
+    Threads.@spawn (sleep(10); gate[] = true)
+    while !entered[]
+        sleep(0.001)
+    end
+    return j
+end
+
+@testset "undo and redo wait for a busy item" begin
+    mktempdir() do dir
+        s = new_session(joinpath(dir, "p"), "p")
+        a = joinpath(dir, "a.xyz"); write_synthetic_xyz(a; lines = 1, ties = 0, rows_per_line = 10)
+        j1 = import_file(s, a); wait_job(j1)
+        id = only(j1.outputs)
+        L = database(s.project, id).lines[1].id
+        selected() = line(database(s.project, id), L).selected
+        set_line_selected!(s, id, L, false)
+        set_line_selected!(s, id, L, true)
+        @test undo!(s) && !selected()          # one step to undo, one to redo
+        gate = Threads.Atomic{Bool}(false)
+        j2 = gated_append(s, a, id, gate)
+        @test_throws ItemBusyError undo!(s)
+        @test_throws ItemBusyError redo!(s)
+        @test !selected() && can_undo(s) && can_redo(s)
+        gate[] = true
+        wait_job(j2)
+        @test status(j2) == JOB_DONE
+        @test !selected()                      # the append's commit kept the state
+        @test !can_redo(s)                     # the finished job is a new step
+        @test undo!(s) && length(database(s.project, id).lines) == 1   # the append
+        @test undo!(s) && selected()           # the first deselect
+        @test redo!(s) && !selected()
+    end
+end
+
+@testset "undo of an append refuses a changed database" begin
+    mktempdir() do dir
+        s = new_session(joinpath(dir, "p"), "p")
+        a = joinpath(dir, "a.xyz"); write_synthetic_xyz(a; lines = 1, ties = 0, rows_per_line = 10)
+        j1 = import_file(s, a); wait_job(j1)
+        id = only(j1.outputs)
+        j2 = import_file(s, a; mode = "append", target = id); wait_job(j2)
+        db = database(s.project, id)
+        db.description = "changed outside the session"
+        save_meta(db)
+        meta = read(joinpath(db.folder, "database.json"), String)
+        @test_throws DatabaseError undo!(s)
+        @test can_undo(s) && status(j2) == JOB_DONE
+        @test read(joinpath(db.folder, "database.json"), String) == meta
+        @test length(database(s.project, id).lines) == 2
+        @test !any(startswith(".undo-"), readdir(db.folder))
+    end
+end
+
+@testset "replace keeps an old output that is busy" begin
+    mktempdir() do dir
+        s = new_session(joinpath(dir, "p"), "p")
+        a = joinpath(dir, "a.xyz"); write_synthetic_xyz(a; lines = 1, ties = 0, rows_per_line = 10)
+        j1 = import_file(s, a); wait_job(j1)
+        id = only(j1.outputs)
+        gate = Threads.Atomic{Bool}(false)
+        j2 = gated_append(s, a, id, gate)
+        j3 = rerun!(s, j1; replace = true); wait_job(j3)
+        @test status(j3) == JOB_DONE
+        @test any(i -> i.id == id, s.project.items)               # kept
+        @test occursin("$id is busy", String(take!(copy(j3.report))))
+        @test status(j1) == JOB_DONE
+        gate[] = true
+        wait_job(j2)
+        @test status(j2) == JOB_DONE
+        @test length(database(s.project, id).lines) == 2
+    end
+end

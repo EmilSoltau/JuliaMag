@@ -12,15 +12,19 @@ using JSON3
 One step that can be undone. `undo`, `redo` and `drop` take no arguments.
 `drop` runs when an undone step leaves the redo stack for good, to free
 what `undo` kept for `redo` (such as a copy of removed rows).
+`items` are the ids of the project items the step changes. `undo!` and `redo!`
+refuse the step with `ItemBusyError` while an import writes to one of them.
 """
 struct UndoStep
     label::String
     undo::Function
     redo::Function
     drop::Function
+    items::Vector{String}
 end
 
-UndoStep(label, undo, redo) = UndoStep(label, undo, redo, () -> nothing)
+UndoStep(label, undo, redo) = UndoStep(label, undo, redo, () -> nothing, String[])
+UndoStep(label, undo, redo, drop) = UndoStep(label, undo, redo, drop, String[])
 
 "One recorded action. `time` is local time as text. `job` is a job id or `\"\"`."
 struct HistoryEntry
@@ -189,7 +193,8 @@ function set_cell!(s::Session, item_id::AbstractString, id::LineId, name::Abstra
         channel(db, name).protected && throw(ProtectedError(String(name)))
         old = write_value!(db, id, String(name), Int(row), x)
         write_back(v) = () -> (write_value!(database(s.project, item_id), id, String(name), Int(row), v); nothing)
-        push_undo!(s, UndoStep("set $(name) row $row on $(line_name(id))", write_back(old), write_back(x)))
+        push_undo!(s, UndoStep("set $(name) row $row on $(line_name(id))", write_back(old), write_back(x),
+                               () -> nothing, [String(item_id)]))
         record!(s, "database.set_cell", Dict("item" => String(item_id), "line" => line_args(id),
                                             "channel" => String(name), "row" => Int(row), "value" => x))
         return nothing
@@ -212,7 +217,7 @@ function set_line_selected!(s::Session, item_id::AbstractString, id::LineId, fla
             nothing
         end
         put(flag)()
-        push_undo!(s, UndoStep("select $(line_name(id))", put(old), put(flag)))
+        push_undo!(s, UndoStep("select $(line_name(id))", put(old), put(flag), () -> nothing, [String(item_id)]))
         record!(s, "database.set_line_selected", Dict("item" => String(item_id), "line" => line_args(id),
                                                       "selected" => flag))
         return nothing

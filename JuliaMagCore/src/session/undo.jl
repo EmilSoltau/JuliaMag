@@ -24,13 +24,15 @@ can_redo(s::Session)::Bool = lock(() -> !isempty(s.redo_stack), s.lock)
     undo!(s)::Bool
 
 Undo the last step. Returns false when there is nothing to undo.
-If the step throws, it stays on the stack.
+If the step throws, it stays on the stack. So does a step whose items are busy
+(`ItemBusyError`, see `UndoStep`).
 The undo is recorded as `"session.undo"` so the script repeats it.
 """
 function undo!(s::Session)::Bool
     lock(s.lock) do
         isempty(s.undo_stack) && return false
         step = last(s.undo_stack)
+        foreach(id -> check_not_busy(s, id), step.items)
         step.undo()
         pop!(s.undo_stack)
         push!(s.redo_stack, step)
@@ -39,11 +41,12 @@ function undo!(s::Session)::Bool
     end
 end
 
-"Redo the last undone step. Returns false when there is nothing to redo."
+"Redo the last undone step. Returns false when there is nothing to redo. Like `undo!`, it refuses busy items."
 function redo!(s::Session)::Bool
     lock(s.lock) do
         isempty(s.redo_stack) && return false
         step = last(s.redo_stack)
+        foreach(id -> check_not_busy(s, id), step.items)
         step.redo()
         pop!(s.redo_stack)
         push!(s.undo_stack, step)

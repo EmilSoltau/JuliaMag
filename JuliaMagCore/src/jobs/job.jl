@@ -46,9 +46,11 @@ struct JobContext
     items::Vector{String}
     "Steps as (undo, redo, drop), in the order they were noted."
     undos::Vector{NTuple{3,Function}}
+    "Ids of existing items that the noted steps change."
+    touched::Vector{String}
 end
 
-JobContext() = JobContext(String[], String[], NTuple{3,Function}[])
+JobContext() = JobContext(String[], String[], NTuple{3,Function}[], String[])
 
 const JOB_CONTEXT_KEY = :juliamag_job_context
 
@@ -84,16 +86,20 @@ function note_job_item!(id::AbstractString)
 end
 
 """
-    note_job_undo!(undo, redo, drop)
+    note_job_undo!(undo, redo, drop; items = String[])
 
 Tell the running job how to undo a change its work made that is not a new item,
 such as rows appended to a database. The job's undo step runs `undo`, its redo
 runs `redo`, and `drop` frees what `undo` kept once redo is no longer possible.
+`items` are the ids of the items the change touches; the job's undo step is
+refused while one of them is busy.
 If the job fails after the change, `undo` and then `drop` run at once.
 Outside a job this does nothing.
 """
-function note_job_undo!(undo::Function, redo::Function, drop::Function)
+function note_job_undo!(undo::Function, redo::Function, drop::Function; items::Vector{String} = String[])
     c = job_context()
-    c === nothing || push!(c.undos, (undo, redo, drop))
+    c === nothing && return nothing
+    push!(c.undos, (undo, redo, drop))
+    append!(c.touched, items)
     return nothing
 end

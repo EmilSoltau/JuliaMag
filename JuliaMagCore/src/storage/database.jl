@@ -852,13 +852,17 @@ function write_text_atomic(path::String, text::String)
 end
 
 """
-    roll_back!(folder, state)::String
+    roll_back!(folder, state, committed)::String
 
 Put the database in `folder` back to `state`. Returns the side folder that
 holds what was removed; `roll_forward!` puts it back.
-Throws `DatabaseError` when a file is shorter than in `state`.
+`committed` is the text of `database.json` that the append wrote.
+Throws `DatabaseError`, and changes nothing, when `database.json` is no longer
+that text, or when a file is shorter than in `state`.
 """
-function roll_back!(folder::String, state::CommittedState)::String
+function roll_back!(folder::String, state::CommittedState, committed::String)::String
+    read(joinpath(folder, META_FILE), String) == committed || throw(DatabaseError(
+        "cannot undo the append to $folder: database.json changed since the append"))
     db = open_database(folder)
     dir = channels_folder(folder)
     files = String[basename(f) for c in db.channels for f in channel_files(db, c)]

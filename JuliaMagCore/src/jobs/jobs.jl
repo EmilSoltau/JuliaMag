@@ -129,6 +129,12 @@ function finish_job!(s::Session, job::Job, items::Vector{ProjectItem}, before::S
         old = ProjectItem[]
         if replaces !== nothing
             old = ProjectItem[it for it in p.items if it.id in replaces.outputs]
+            # An import is writing to a busy item: keep it, and say so.
+            for it in filter(it -> it.id in s.busy, old)
+                println(job.report, "not replaced: ", it.id, " is busy: an import is running")
+                session_warning!(s, "$(job.id) did not replace $(it.id): it is busy: an import is running")
+            end
+            filter!(it -> !(it.id in s.busy), old)
         end
         try
             foreach(it -> isempty(it.made_by) && (it.made_by = job.id), new)
@@ -148,13 +154,14 @@ function finish_job!(s::Session, job::Job, items::Vector{ProjectItem}, before::S
         job.finished = now_text()
         set_status!(job, JOB_DONE)
         save_job_quietly(s, job)
-        if replaces !== nothing && old_status == JOB_DONE
+        kept_old = replaces !== nothing && any(id -> any(i -> i.id == id, p.items), replaces.outputs)
+        if replaces !== nothing && old_status == JOB_DONE && !kept_old
             set_status!(replaces, JOB_UNDONE)
             save_job_quietly(s, replaces)
         end
         noted = copy(ctx.undos)
+        replaced_all = !kept_old
         undo = () -> begin
-            foreach(it -> check_not_busy(s, it.id), vcat(new, old))
             foreach(u -> u[1](), reverse(noted))
             swap_items!(p, new, old)
             set_job_status!(s, job, JOB_UNDONE)
@@ -162,15 +169,17 @@ function finish_job!(s::Session, job::Job, items::Vector{ProjectItem}, before::S
             nothing
         end
         redo = () -> begin
-            foreach(it -> check_not_busy(s, it.id), vcat(new, old))
             foreach(u -> u[2](), noted)
             swap_items!(p, old, new)
             set_job_status!(s, job, JOB_DONE)
-            replaces === nothing || old_status != JOB_DONE || set_job_status!(s, replaces, JOB_UNDONE)
+            (replaces === nothing || old_status != JOB_DONE || !replaced_all) ||
+                set_job_status!(s, replaces, JOB_UNDONE)
             nothing
         end
         drop = () -> (foreach(u -> u[3](), noted); nothing)
-        push_undo!(s, UndoStep("$(job.command) ($(job.id))", undo, redo, drop))
+        # `undo!` and `redo!` refuse the step while one of these items is busy.
+        touched = unique!(vcat(String[it.id for it in new], String[it.id for it in old], ctx.touched))
+        push_undo!(s, UndoStep("$(job.command) ($(job.id))", undo, redo, drop, touched))
         return nothing
     end
 end

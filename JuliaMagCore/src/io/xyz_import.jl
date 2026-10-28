@@ -596,6 +596,7 @@ function import_xyz_append(s::Session, path::String, target::String, crs::String
         end
     end
     local result::Tuple{Vector{ImportWarning},Int,Int}
+    local committed::String
     try
         rows_before = db.rows_written
         nchannels = length(db.channels)
@@ -604,7 +605,10 @@ function import_xyz_append(s::Session, path::String, target::String, crs::String
             st = XyzState(path, db, crs, progress)
             read_xyz!(st)
             release_maps!(db)
-            lock(() -> save_meta(db), s.lock)     # the commit point
+            committed = lock(s.lock) do
+                save_meta(db)                    # the commit point
+                read(meta_path(db), String)
+            end
             result = (st.warnings, st.rows, st.lines)
         catch
             st === nothing || abort_appenders!(st)
@@ -614,7 +618,7 @@ function import_xyz_append(s::Session, path::String, target::String, crs::String
     finally
         unmark_busy!(s, target)
     end
-    note_append_undo!(s, target, before)
+    note_append_undo!(s, target, before, committed)
     return ImportResult(it, result...)
 end
 
@@ -623,12 +627,12 @@ Inside a job: note how to undo and redo the append to item `target`.
 Undo keeps the appended rows in a side folder of the database until redo,
 or until the redo is no longer possible.
 """
-function note_append_undo!(s::Session, target::String, before::CommittedState)
+function note_append_undo!(s::Session, target::String, before::CommittedState, committed::String)
     side = Ref("")
     folder() = item_path(s.project, item(s.project, target))
     undo = () -> begin
         check_not_busy(s, target)
-        side[] = roll_back!(folder(), before)
+        side[] = roll_back!(folder(), before, committed)
         nothing
     end
     redo = () -> begin
@@ -642,7 +646,7 @@ function note_append_undo!(s::Session, target::String, before::CommittedState)
         side[] = ""
         nothing
     end
-    note_job_undo!(undo, redo, drop)
+    note_job_undo!(undo, redo, drop; items = [target])
     return nothing
 end
 
