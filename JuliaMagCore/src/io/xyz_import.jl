@@ -336,6 +336,9 @@ import throws, and leaves no new item and no changed database behind.
 The import is recorded in the history as `"import.geosoft_xyz"`.
 `record = false` skips that. The importer does this when it runs inside a job
 (see `import_file`), because the job records the import, with its job id.
+
+A direct call has no undo step: a new database stays, and appended rows stay
+in the target. Use `import_file` for an import that can be undone, also an append.
 """
 function import_xyz(s::Session, path::String; name::AbstractString = splitext(basename(path))[1],
                     crs::AbstractString = "", mode::Symbol = :new, target::AbstractString = "",

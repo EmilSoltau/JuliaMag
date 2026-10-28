@@ -672,6 +672,9 @@ import throws, and leaves no new item and no changed database behind.
 The import is recorded in the history as `"import.csv"`, with the layout as JSON
 text, so a script can run it again. `record = false` skips that; the importer does
 this inside a job, because the job records the import.
+
+A direct call has no undo step: a new database stays, and appended rows stay
+in the target. Use `import_file` for an import that can be undone, also an append.
 """
 function import_csv(s::Session, path::String, layout::CsvLayout; name::AbstractString = splitext(basename(path))[1],
                     mode::Symbol = :new, target::AbstractString = "", progress::Progress = NO_PROGRESS,

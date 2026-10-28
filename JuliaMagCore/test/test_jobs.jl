@@ -538,6 +538,41 @@ end
     @test isdir(keep)
 end
 
+@testset "a script waits for a direct import before the next line (I3)" begin
+    mktempdir() do dir
+        folder = joinpath(dir, "p")
+        s = new_session(folder, "p")
+        start = joinpath(dir, "start")
+        cp(folder, start)                     # the project as it was when the session started
+        a = joinpath(dir, "a.xyz"); write_synthetic_xyz(a; lines = 2, ties = 0, rows_per_line = 20_000)
+        r = import_xyz(s, a)
+        L = database_of(s, r).lines[1].id
+        set_line_selected!(s, r.item.id, L, false)
+        txt = script_text(s)
+        @test occursin("\nwait_job(import_file(s, $(repr(a)); ", txt)
+        c = open_session(start)
+        body = join(filter(l -> !startswith(l, "s = open_session"), split(txt, '\n')), "\n")
+        Core.eval(@__MODULE__, :(s = $c))
+        Core.eval(@__MODULE__, Meta.parseall(body))
+        @test [i.id for i in c.project.items] == [r.item.id]
+        @test length(database(c.project, r.item.id).lines) == 2
+        @test !line(database(c.project, r.item.id), L).selected
+    end
+end
+
+@testset "wait_job on a refused tool says why (I3)" begin
+    s = fresh_session()
+    err = try
+        wait_job(run_tool(s, "no.such.tool")); nothing
+    catch e
+        e
+    end
+    @test err isa ToolError && sprint(showerror, err) == "There is no tool \"no.such.tool\"."
+    (; s, id) = make_db_with(MAG = [1.0, 2.0])
+    r = wait_job(run_tool(s, "database.statistics"; inputs = Dict("database" => id), channel = "MAG"))
+    @test r isa Tuple && r[1]
+end
+
 @testset "a failed undo of an append leaves the step to try again (I4)" begin
     mktempdir() do dir
         s = new_session(joinpath(dir, "p"), "p")

@@ -77,7 +77,22 @@ end
 "Ask the job to stop. It stops at its next check of `is_cancelled`."
 cancel!(job::Job) = (job.cancel[] = true; nothing)
 
-"Wait until the job has ended. Never throws. Returns the job."
+"""
+    wait_job(job)::Job
+    wait_job(result::Tuple)
+
+Wait until the job has ended. Never throws. Returns the job.
+
+`run_tool` returns a tuple `(ok, message, outputs)`, not a job, for a `:quick`
+tool and for a tool it refused. `wait_job` returns such a tuple when `ok`, and
+throws a `ToolError` with the message when not. So a script line
+`wait_job(run_tool(...))` stops the script at a tool that did not run.
+"""
+function wait_job(r::Tuple{Bool,AbstractString,Any})
+    r[1] || throw(ToolError(String(r[2])))
+    return r
+end
+
 function wait_job(job::Job)::Job
     t = job.task
     t === nothing && return job

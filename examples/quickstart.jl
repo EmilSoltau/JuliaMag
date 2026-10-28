@@ -59,7 +59,9 @@ csv = joinpath(work, "result.csv")
 job = wait_job(export_file(s, id, csv))
 println("Export: ", status(job), ", ", countlines(csv), " lines in ", csv)
 
-# Save the history as a Julia script. Run it later to repeat these steps.
+# Save the history as a Julia script. It repeats these steps on a copy of the
+# project as it was at the start. It uses the item ids of this session, such as
+# db-1, so running it on this project again would make new ids.
 script = joinpath(work, "steps.jl")
 write(script, script_text(s))
 println("Script saved to ", script)

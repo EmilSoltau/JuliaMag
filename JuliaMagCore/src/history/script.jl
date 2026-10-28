@@ -27,9 +27,17 @@ is_export(c::String, a::AbstractDict) =
     get(a, "path", nothing) isa AbstractString
 
 # A job returns at once. The script waits for it, so the next line sees its result.
-# An export always runs as a job in the script, even when it was called directly.
-call_text(e::HistoryEntry)::String =
-    isempty(e.job) && !is_export(e.command, e.args) ? command_text(e) : "wait_job($(command_text(e)))"
+# Imports and exports always run as jobs in the script, even when they were called
+# directly. `run_tool` lines are wrapped too: for a quick tool or a refused one,
+# `wait_job` throws a `ToolError` when the tool did not run, so the script stops there.
+function call_text(e::HistoryEntry)::String
+    c, a = e.command, e.args
+    wrap = !isempty(e.job) || is_import(c, a) || is_export(c, a) || is_tool_call(c)
+    return wrap ? "wait_job($(command_text(e)))" : command_text(e)
+end
+
+# True when `command_text` writes the entry as a `run_tool` call.
+is_tool_call(c::String) = !(c in ("database.set_cell", "database.set_line_selected", "session.undo", "session.redo"))
 
 function command_text(e::HistoryEntry)::String
     a = e.args
@@ -66,8 +74,14 @@ Commands that have a core function become that call. Imports become
 `import_file(s, path; <settings>...)`. Exports become
 `export_file(s, item, path; exporter = "<id>", <settings>...)`. Other commands become
 `run_tool(s, "<command>"; <args>...)`, with tool inputs as `inputs = Dict(...)`.
-An entry that ran as a job, and every export, is wrapped in `wait_job(...)`,
-so the script waits for the job before the next line.
+Every import, export and tool call, and every entry that ran as a job, is
+wrapped in `wait_job(...)`. So the script waits for each job before the next
+line, and stops at a tool that did not run.
+
+The script uses the item ids of the session, such as `"db-1"`, as plain text.
+So it replays only on a copy of the project as it was when the session started.
+Run on the same project again, the imports make new items with new ids, and
+the lines after them change the old items or fail.
 """
 function script_text(s::Session)::String
     lock(s.lock) do
