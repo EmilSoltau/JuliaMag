@@ -7,8 +7,9 @@
 #
 # The quick tools change `database.json` under `s.lock` and push an undo step
 # that puts the old values back. The reproject job marks the database busy while
-# it writes, like an append import, and notes an undo that rolls the database
-# back to its committed state before the job (see `note_append_undo!`).
+# it writes (readers such as exports wait too), and notes an undo that rolls the
+# database back to its committed state before the job (see `note_append_undo!`).
+# Guess UTM zone only reads: it shares the database with exports and appends.
 
 const COORDINATES_TAB = "Coordinates"
 
@@ -17,15 +18,17 @@ const COORDINATES_TAB = "Coordinates"
 """
 The database of tool input `id`, opened. Call it under `s.lock`.
 Throws `ToolError` when the item is missing, not a database, busy or broken.
-With `allow_readers = true`, an item that exports only read is not busy:
-use it for tools that only read too.
+With `allow_readers = true`, an item that readers (such as exports) or an
+appending import use is not busy: use it for tools that only read the committed
+rows, and mark the item with `mark_reading!` under the same lock.
 """
 function tool_database(s::Session, id::AbstractString; allow_readers::Bool = false)::LineDatabase
     k = findfirst(i -> i.id == id, s.project.items)
     k === nothing && throw(ToolError("There is no item $id in the project."))
     s.project.items[k].kind == ITEM_DATABASE || throw(ToolError("Item $id is not a database."))
     m = get(s.busy, id, nothing)
-    (m === nothing || (allow_readers && !m.writing)) || throw(ToolError("Database $id is busy: $(busy_reason(m))."))
+    (m === nothing || (allow_readers && readers_allowed(m))) ||
+        throw(ToolError("Database $id is busy: $(busy_reason(m))."))
     try
         return database(s.project, id)
     catch e
@@ -166,7 +169,7 @@ function run_guess_utm(s::Session, ins::Dict{String,String}, st::Dict{String,Any
     id = ins["database"]
     # Pick the pair and mark the database as read under the lock; read without it.
     db, p = lock(s.lock) do
-        db = tool_database(s, id)
+        db = tool_database(s, id; allow_readers = true)
         p = if isempty(strip(st["pair"]))
             k = db.current_pair
             if k == 0 || !is_lonlat_pair(db, db.pairs[k])

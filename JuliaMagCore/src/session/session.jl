@@ -64,18 +64,22 @@ Base.showerror(io::IO, e::ItemBusyError) = print(io, "ItemBusyError: ", e.item, 
 
 """
 Who uses a busy item: a job that writes to it (`writing`, with `why` such as
-`"an import is running"`), and the number of exports that read it (`reading`).
-See `mark_busy!` and `mark_reading!`.
+`"an import is running"`), and the number of readers, such as exports (`reading`).
+`kind` says how the writer writes: `:append` adds rows past the commit point
+only, so readers of the committed rows may share the item; `:write` changes
+rows in place, so readers must wait. See `mark_busy!` and `mark_reading!`.
 """
 mutable struct BusyMark
     writing::Bool
     reading::Int
     why::String
+    kind::Symbol
 end
 
-BusyMark(writing::Bool, reading::Int) = BusyMark(writing, reading, "an import is running")
-
 busy_reason(m::BusyMark) = m.writing ? m.why : "an export is running"
+
+"True when readers may share the item with the mark `m`: no writer, or one that only appends."
+readers_allowed(m::BusyMark) = !m.writing || m.kind == :append
 
 """
     Session(project)
@@ -203,15 +207,22 @@ session_warning!(s::Session, msg::String) = (lock(() -> push!(s.warnings, msg), 
 
 # ---- busy items ------------------------------------------------------------
 
-# An import that writes to an item marks it with `mark_busy!`. An export that
-# reads it marks it with `mark_reading!`. While an item is marked, changes to it
-# (edits, undo, redo, appends) throw `ItemBusyError`. Exports may share an item
-# with each other and with an import, since they read only the committed rows.
+# A job that writes to an item marks it with `mark_busy!`. A reader, such as an
+# export, marks it with `mark_reading!`. While an item is marked, changes to it
+# (edits, undo, redo, other writers) throw `ItemBusyError`. Readers may share an
+# item with each other and with a writer that only appends (`kind = :append`),
+# since they read only the committed rows. A writer that changes rows in place
+# (`kind = :write`) keeps readers out.
+#
+# Inside a job, the mark of `mark_busy!` lasts until the job ends:
+# `unmark_busy!` leaves it on, and the job ends it once its undo step is in
+# place (or before it undoes its work, when it fails). So no edit can land
+# between the work and its undo step.
 
-"True when an import writes to the item or an export reads it. Call it under `s.lock`."
+"True when a writer or a reader marks the item. Call it under `s.lock`."
 is_busy(s::Session, id::AbstractString)::Bool = haskey(s.busy, id)
 
-"Throw `ItemBusyError` when an import writes to the item or an export reads it. Call it under `s.lock`."
+"Throw `ItemBusyError` when a writer or a reader marks the item. Call it under `s.lock`."
 function check_not_busy(s::Session, id::AbstractString)
     m = get(s.busy, id, nothing)
     m === nothing || throw(ItemBusyError(String(id), busy_reason(m)))
@@ -219,26 +230,60 @@ function check_not_busy(s::Session, id::AbstractString)
 end
 
 """
-    mark_busy!(s, id; reason = "an import is running")
+    mark_busy!(s, id; reason = "an import is running", kind = :write)
 
-Mark an item as written to by a job, such as an import, or throw `ItemBusyError`
-when it is busy. `reason` is what `ItemBusyError` says while the mark is on.
+Mark an item as written to by a job, or throw `ItemBusyError` when it is busy.
+`reason` is what `ItemBusyError` says while the mark is on. `kind` is `:append`
+for a writer that only adds rows past the commit point (readers may then share
+the item), or `:write` for one that changes rows in place.
+Inside a job, a mark the same job holds already is taken over.
 """
-function mark_busy!(s::Session, id::AbstractString; reason::AbstractString = "an import is running")
+function mark_busy!(s::Session, id::AbstractString; reason::AbstractString = "an import is running",
+                    kind::Symbol = :write)
+    kind in (:append, :write) || throw(ArgumentError("kind must be :append or :write, not $(repr(kind))"))
+    key = String(id)
+    ctx = job_context()
     lock(s.lock) do
-        check_not_busy(s, id)
-        s.busy[String(id)] = BusyMark(true, 0, String(reason))
+        m = get(s.busy, key, nothing)
+        if m !== nothing && m.writing && m.reading == 0 && ctx !== nothing && key in ctx.busy
+            m.why, m.kind = String(reason), kind       # this job holds the mark already
+            return nothing
+        end
+        check_not_busy(s, key)
+        s.busy[key] = BusyMark(true, 0, String(reason), kind)
+        ctx === nothing || key in ctx.busy || push!(ctx.busy, key)
+        return nothing
     end
     return nothing
 end
 
-"End the mark of `mark_busy!`."
-unmark_busy!(s::Session, id::AbstractString) = (lock(() -> unmark!(s, String(id), true), s.lock); nothing)
+"""
+End the mark of `mark_busy!`. Inside a job that holds the mark, it stays on
+until the job ends (see the notes above).
+"""
+function unmark_busy!(s::Session, id::AbstractString)
+    ctx = job_context()
+    (ctx !== nothing && String(id) in ctx.busy) && return nothing
+    lock(() -> unmark!(s, String(id), true), s.lock)
+    return nothing
+end
 
-"Mark an item as read by an export. Never throws: reads can share the item."
+"End the marks that the work of a job made with `mark_busy!`. Call it under `s.lock`."
+function end_job_marks!(s::Session, ctx::JobContext)
+    foreach(id -> unmark!(s, id, true), ctx.busy)
+    empty!(ctx.busy)
+    return nothing
+end
+
+"""
+Mark an item as read, such as by an export. Readers may share the item with each
+other and with a writer that only appends. Throws `ItemBusyError` while a writer
+changes its rows in place.
+"""
 function mark_reading!(s::Session, id::AbstractString)
     lock(s.lock) do
-        m = get!(() -> BusyMark(false, 0), s.busy, String(id))
+        m = get!(() -> BusyMark(false, 0, "", :write), s.busy, String(id))
+        readers_allowed(m) || throw(ItemBusyError(String(id), busy_reason(m)))
         m.reading += 1
     end
     return nothing

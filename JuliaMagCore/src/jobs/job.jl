@@ -50,9 +50,11 @@ struct JobContext
     touched::Vector{String}
     "Args to add to the job's record, from `note_job_args!`."
     args::Dict{String,Any}
+    "Items the work marked busy with `mark_busy!`. The job ends these marks when it ends."
+    busy::Vector{String}
 end
 
-JobContext() = JobContext(String[], String[], NTuple{3,Function}[], String[], Dict{String,Any}())
+JobContext() = JobContext(String[], String[], NTuple{3,Function}[], String[], Dict{String,Any}(), String[])
 
 const JOB_CONTEXT_KEY = :juliamag_job_context
 

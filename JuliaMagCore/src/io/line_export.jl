@@ -6,7 +6,11 @@
 # - While it runs, an export marks its item busy for reading (`mark_reading!`,
 #   ruling R12). Edits, undo, redo and appends of the item then throw
 #   `ItemBusyError` ("an export is running"), so the files are not cut, renamed
-#   or changed under the export. Other exports of the item may run at the same time.
+#   or changed under the export. Other exports of the item may run at the same
+#   time, and so may an import that appends to it. An export does not start
+#   while a job changes rows of the item in place, such as Channel Math
+#   overwriting a channel: it throws `ItemBusyError`, so it never writes a mix
+#   of old and new values.
 # - Rows are read in blocks with plain file reads (see `block_reader`), so memory
 #   stays flat however large the database is.
 # - The file is written to a temp file next to `path` (`path.tmp-<random>`) and

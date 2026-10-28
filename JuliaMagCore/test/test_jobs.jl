@@ -436,6 +436,108 @@ end
     end
 end
 
+@testset "a job keeps its items busy until its undo step is in place (I1)" begin
+    mktempdir() do dir
+        s = new_session(joinpath(dir, "p"), "p")
+        a = joinpath(dir, "a.xyz"); write_synthetic_xyz(a; lines = 1, ties = 0, rows_per_line = 10)
+        id = only(wait_job(import_file(s, a)).outputs)
+        L = database(s.project, id).lines[1].id
+        selected() = line(database(s.project, id), L).selected
+        # An edit after the append is done, but before the job has pushed its undo step.
+        in_window = Ref{Any}(nothing)
+        j = start_job!(s, "test.append_then_edit", Dict{String,Any}(), (p, r) -> begin
+            import_xyz(s, a; mode = :append, target = id, record = false)
+            in_window[] = try
+                set_line_selected!(s, id, L, false); nothing
+            catch e
+                e
+            end
+            ProjectItem[]
+        end)
+        wait_job(j)
+        @test status(j) == JOB_DONE && isempty(s.busy)
+        @test in_window[] isa ItemBusyError && selected()
+        set_line_selected!(s, id, L, false)
+        @test undo!(s) && selected()                                     # the edit
+        @test undo!(s) && length(database(s.project, id).lines) == 1     # the append
+        @test redo!(s) && redo!(s) && !selected() && length(database(s.project, id).lines) == 2
+    end
+
+    # Channel Math overwrites a channel in place. An edit in the same window
+    # would land below the job's undo step.
+    (; s, id, L) = make_db_with(MAG = [1.0, 2.0, 3.0], B = [10.0, 20.0, 30.0])
+    spec = JuliaMagCore.tool("database.channel_math")
+    st = merge(default_settings(spec), Dict{String,Any}("expr" => "MAG = MAG * 2"))
+    in_window = Ref{Any}(nothing)
+    j = start_job!(s, "test.channel_math_then_edit", Dict{String,Any}(), (p, r) -> begin
+        spec.run(s, Dict("database" => id), copy(st), p, r)
+        in_window[] = try
+            set_cell!(s, id, L, "MAG", 1, 100.0); nothing
+        catch e
+            e
+        end
+        ProjectItem[]
+    end)
+    wait_job(j)
+    mag() = collect(read_channel(database(s.project, id), L, "MAG"))
+    @test status(j) == JOB_DONE && isempty(s.busy)
+    @test in_window[] isa ItemBusyError && mag() == [2.0, 4.0, 6.0]
+    set_cell!(s, id, L, "MAG", 1, 100.0)
+    @test mag() == [100.0, 4.0, 6.0]
+    @test undo!(s) && mag() == [2.0, 4.0, 6.0]
+    @test undo!(s) && mag() == [1.0, 2.0, 3.0]
+end
+
+@testset "a failed job ends its busy marks too (I1)" begin
+    (; s, id) = make_db_with(MAG = [1.0, 2.0, 3.0])
+    spec = JuliaMagCore.tool("database.channel_math")
+    st = merge(default_settings(spec), Dict{String,Any}("expr" => "MAG = MAG + 1"))
+    j = start_job!(s, "test.fail_after_tool", Dict{String,Any}(), (p, r) -> begin
+        spec.run(s, Dict("database" => id), copy(st), p, r)
+        error("stopped after the tool")
+    end)
+    wait_job(j)
+    @test status(j) == JOB_FAILED && isempty(s.busy)
+    @test collect(read_channel(database(s.project, id), LineId(LINE, 1001, 0), "MAG")) == [1.0, 2.0, 3.0]
+end
+
+@testset "an undone import that cannot be redone leaves no folder (I5)" begin
+    mktempdir() do dir
+        s = new_session(joinpath(dir, "p"), "p")
+        a = joinpath(dir, "a.xyz"); write_synthetic_xyz(a; lines = 2, ties = 0, rows_per_line = 100)
+        dbs = joinpath(s.project.folder, "databases")
+        id = only(wait_job(import_file(s, a)).outputs)
+        @test undo!(s) && readdir(dbs) == ["a"]          # redo still needs the folder
+        j2 = wait_job(import_file(s, a))                 # clears the redo stack
+        @test !can_redo(s) && [i.id for i in s.project.items] == j2.outputs
+        @test readdir(dbs) == ["a-2"]
+        # A replaced output that comes back with undo keeps its folder; the new one goes.
+        j3 = wait_job(rerun!(s, j2; replace = true))
+        @test status(j3) == JOB_DONE && sort(readdir(dbs)) == ["a", "a-2"]
+        @test undo!(s) && [i.id for i in s.project.items] == j2.outputs
+        set_line_selected!(s, only(j2.outputs), LineId(LINE, 1001, 0), false)   # drops the redo
+        @test readdir(dbs) == ["a-2"]
+        @test id != only(j2.outputs)
+    end
+end
+
+@testset "a dropped step keeps a folder that an item still uses (I5)" begin
+    s = fresh_session()
+    keep = joinpath(s.project.folder, "grids", "shared")
+    mkpath(keep)
+    shared = ProjectItem(new_item_id(s.project, ITEM_GRID), ITEM_GRID, "shared", "grids/shared", "", "")
+    j = wait_job(start_job!(s, "test.add", Dict{String,Any}(), (p, r) -> begin
+        it = ProjectItem(new_item_id(s.project, ITEM_GRID), ITEM_GRID, "twin", "grids/shared", "", "")
+        add_item!(s.project, it)
+        ProjectItem[it]
+    end))
+    @test status(j) == JOB_DONE
+    @test undo!(s)
+    add_item!(s.project, shared); save_project(s.project)
+    wait_job(start_job!(s, "test.ok", Dict{String,Any}(), (p, r) -> ProjectItem[]))   # drops the redo
+    @test isdir(keep)
+end
+
 @testset "a failed undo of an append leaves the step to try again (I4)" begin
     mktempdir() do dir
         s = new_session(joinpath(dir, "p"), "p")

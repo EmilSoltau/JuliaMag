@@ -9,7 +9,10 @@
 #   runs the undo actions it noted with `note_job_undo!`.
 # - A finished job is recorded in the history once, with its id, and gets an
 #   undo step. Undo takes its outputs out of the project but keeps their files,
-#   so redo can put them back.
+#   so redo can put them back. When redo is no longer possible, the files of
+#   outputs that are out of the project are deleted.
+# - Items the work marked busy with `mark_busy!` stay busy until the job ends:
+#   after its undo step is in place, or before a failed job undoes its work.
 # - Each job is saved in `jobs/<id>.json` with its report text.
 #   `jobs/counter.json` holds the next job number, so an id is never used twice.
 # - Status and progress are atomics. Project changes happen under `s.lock`, held
@@ -111,83 +114,122 @@ function run_job!(s::Session, job::Job, work::Function, before::Set{String}, rep
     return nothing
 end
 
-"The items a work function returned, checked."
+"The items that the work of a job or a tool returned: `nothing` or a vector of `ProjectItem`, checked."
 function job_outputs(result)::Vector{ProjectItem}
     result === nothing && return ProjectItem[]
     (result isa AbstractVector && all(x -> x isa ProjectItem, result)) || throw(ArgumentError(
-        "the work of a job must return a vector of ProjectItem, not a $(typeof(result))"))
+        "the work returned a $(typeof(result)), not nothing or a vector of ProjectItem"))
     return ProjectItem[x for x in result]
 end
 
-"Add the outputs, record the job and push its undo step (when `undoable`). Undoes its own changes on error."
+"""
+Add the outputs, record the job and push its undo step (when `undoable`).
+Undoes its own changes on error. Ends the busy marks of the work last, so no
+edit can land between the work and its undo step.
+"""
 function finish_job!(s::Session, job::Job, items::Vector{ProjectItem}, before::Set{String},
                      replaces::Union{Nothing,Job}, ctx::JobContext, undoable::Bool)
     lock(s.lock) do
-        p = s.project
-        new = ProjectItem[it for it in items if !(it.id in before)]
-        # Items the work added but did not return are outputs too.
-        for it in p.items
-            it.id in ctx.items && !any(n -> n.id == it.id, new) && push!(new, it)
-        end
-        old = ProjectItem[]
-        if replaces !== nothing
-            old = ProjectItem[it for it in p.items if it.id in replaces.outputs]
-            # An import or an export uses a busy item: keep it, and say so.
-            for it in filter(it -> is_busy(s, it.id), old)
-                why = busy_reason(s.busy[it.id])
-                println(job.report, "not replaced: ", it.id, " is busy: ", why)
-                session_warning!(s, "$(job.id) did not replace $(it.id): it is busy: $why")
-            end
-            filter!(it -> !is_busy(s, it.id), old)
-        end
-        merge!(job.args, ctx.args)
         try
-            foreach(it -> isempty(it.made_by) && (it.made_by = job.id), new)
-            swap_items!(p, old, new)
-            record!(s, job.command, job.args; job = job.id)
-        catch
-            # Leave no half-made item: take the new ones out, delete their files,
-            # and undo the other changes the work noted.
-            quietly(() -> swap_items!(p, new, old))
-            foreach(it -> quietly(() -> rm(item_path(p, it); recursive = true, force = true)), new)
-            undo_noted!(ctx)
-            rethrow()
+            finish_locked!(s, job, items, before, replaces, ctx, undoable)
+        finally
+            end_job_marks!(s, ctx)
         end
-        old_status = replaces === nothing ? JOB_DONE : status(replaces)
-        job.outputs = String[it.id for it in new]
-        job.progress[] = 1.0
-        job.finished = now_text()
-        set_status!(job, JOB_DONE)
-        save_job_quietly(s, job)
-        kept_old = replaces !== nothing && any(id -> any(i -> i.id == id, p.items), replaces.outputs)
-        if replaces !== nothing && old_status == JOB_DONE && !kept_old
-            set_status!(replaces, JOB_UNDONE)
-            save_job_quietly(s, replaces)
-        end
-        undoable || return nothing
-        noted = copy(ctx.undos)
-        replaced_all = !kept_old
-        undo = () -> begin
-            foreach(u -> u[1](), reverse(noted))
-            swap_items!(p, new, old)
-            set_job_status!(s, job, JOB_UNDONE)
-            replaces === nothing || set_job_status!(s, replaces, old_status)
-            nothing
-        end
-        redo = () -> begin
-            foreach(u -> u[2](), noted)
-            swap_items!(p, old, new)
-            set_job_status!(s, job, JOB_DONE)
-            (replaces === nothing || old_status != JOB_DONE || !replaced_all) ||
-                set_job_status!(s, replaces, JOB_UNDONE)
-            nothing
-        end
-        drop = () -> (foreach(u -> u[3](), noted); nothing)
-        # `undo!` and `redo!` refuse the step while one of these items is busy.
-        touched = unique!(vcat(String[it.id for it in new], String[it.id for it in old], ctx.touched))
-        push_undo!(s, UndoStep("$(job.command) ($(job.id))", undo, redo, drop, touched))
-        return nothing
     end
+    return nothing
+end
+
+function finish_locked!(s::Session, job::Job, items::Vector{ProjectItem}, before::Set{String},
+                        replaces::Union{Nothing,Job}, ctx::JobContext, undoable::Bool)
+    p = s.project
+    new = ProjectItem[it for it in items if !(it.id in before)]
+    # Items the work added but did not return are outputs too.
+    for it in p.items
+        it.id in ctx.items && !any(n -> n.id == it.id, new) && push!(new, it)
+    end
+    old = ProjectItem[]
+    if replaces !== nothing
+        old = ProjectItem[it for it in p.items if it.id in replaces.outputs]
+        # An import or an export uses a busy item: keep it, and say so.
+        for it in filter(it -> is_busy(s, it.id), old)
+            why = busy_reason(s.busy[it.id])
+            println(job.report, "not replaced: ", it.id, " is busy: ", why)
+            session_warning!(s, "$(job.id) did not replace $(it.id): it is busy: $why")
+        end
+        filter!(it -> !is_busy(s, it.id), old)
+    end
+    merge!(job.args, ctx.args)
+    try
+        foreach(it -> isempty(it.made_by) && (it.made_by = job.id), new)
+        swap_items!(p, old, new)
+        record!(s, job.command, job.args; job = job.id)
+    catch
+        # Leave no half-made item: take the new ones out, delete their files,
+        # and undo the other changes the work noted.
+        quietly(() -> swap_items!(p, new, old))
+        foreach(it -> quietly(() -> rm(item_path(p, it); recursive = true, force = true)), new)
+        end_job_marks!(s, ctx)          # the noted undos refuse busy items
+        undo_noted!(ctx)
+        rethrow()
+    end
+    old_status = replaces === nothing ? JOB_DONE : status(replaces)
+    job.outputs = String[it.id for it in new]
+    job.progress[] = 1.0
+    job.finished = now_text()
+    set_status!(job, JOB_DONE)
+    save_job_quietly(s, job)
+    kept_old = replaces !== nothing && any(id -> any(i -> i.id == id, p.items), replaces.outputs)
+    if replaces !== nothing && old_status == JOB_DONE && !kept_old
+        set_status!(replaces, JOB_UNDONE)
+        save_job_quietly(s, replaces)
+    end
+    undoable || return nothing
+    noted = copy(ctx.undos)
+    replaced_all = !kept_old
+    undo = () -> begin
+        foreach(u -> u[1](), reverse(noted))
+        swap_items!(p, new, old)
+        set_job_status!(s, job, JOB_UNDONE)
+        replaces === nothing || set_job_status!(s, replaces, old_status)
+        nothing
+    end
+    redo = () -> begin
+        foreach(u -> u[2](), noted)
+        swap_items!(p, old, new)
+        set_job_status!(s, job, JOB_DONE)
+        (replaces === nothing || old_status != JOB_DONE || !replaced_all) ||
+            set_job_status!(s, replaces, JOB_UNDONE)
+        nothing
+    end
+    # Redo is no longer possible: free what the noted steps kept, and delete the
+    # files of outputs that undo took out of the project.
+    drop = () -> begin
+        foreach(u -> u[3](), noted)
+        remove_unused_folders!(p, vcat(new, old))
+        nothing
+    end
+    # `undo!` and `redo!` refuse the step while one of these items is busy.
+    touched = unique!(vcat(String[it.id for it in new], String[it.id for it in old], ctx.touched))
+    push_undo!(s, UndoStep("$(job.command) ($(job.id))", undo, redo, drop, touched))
+    return nothing
+end
+
+"""
+Delete the folders of the items in `items` that are out of the project, unless
+an item of the project still uses the same folder.
+"""
+function remove_unused_folders!(p::Project, items::Vector{ProjectItem})
+    used = Set{String}(normpath(item_path(p, i)) for i in p.items)
+    gone = String[]
+    for it in items
+        any(i -> i.id == it.id, p.items) && continue
+        path = normpath(item_path(p, it))
+        path in used || !ispath(path) || push!(gone, path)
+    end
+    isempty(gone) && return nothing
+    free_stray_maps()          # Windows does not delete a mapped file
+    foreach(path -> rm(path; recursive = true, force = true), gone)
+    return nothing
 end
 
 "Run `f`; drop any error. For clean-up after a failure, where the first error counts."
@@ -242,6 +284,7 @@ function fail_job!(s::Session, job::Job, e, ctx::JobContext)
     cancelled = job.cancel[] || cancel_error
     try
         lock(s.lock) do
+            end_job_marks!(s, ctx)      # the noted undos refuse busy items
             undo_noted!(ctx)
             # Take out the items the work added, and delete their files.
             p = s.project

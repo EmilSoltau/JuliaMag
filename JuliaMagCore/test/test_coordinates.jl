@@ -285,3 +285,32 @@ end
     @test read_channel(a, L, "X_32755") == read_channel(b, L, "X_32755")
     @test read_channel(a, L, "Y_32755") == read_channel(b, L, "Y_32755")
 end
+
+@testset "readers share an item only with exports and appends (I2)" begin
+    (; s, id) = make_position_db()
+    ins = Dict("database" => id)
+    stats() = run_tool(s, "database.statistics"; inputs = ins, channel = "LON")
+    utm() = run_tool(s, "coordinates.guess_utm"; inputs = ins, pair = "LON,LAT")
+    # An export reads the item: other readers may read it too.
+    JuliaMagCore.mark_reading!(s, id)
+    @test stats()[1] && utm()[1]
+    @test_throws ItemBusyError JuliaMagCore.mark_busy!(s, id)
+    JuliaMagCore.unmark_reading!(s, id)
+    @test isempty(s.busy)
+    # An append only adds rows past the commit point: readers may read the committed rows.
+    JuliaMagCore.mark_busy!(s, id; kind = :append)
+    @test stats()[1] && utm()[1]
+    JuliaMagCore.mark_reading!(s, id)
+    JuliaMagCore.unmark_reading!(s, id)
+    JuliaMagCore.unmark_busy!(s, id)
+    @test isempty(s.busy)
+    # Any other writer changes rows in place: readers are refused.
+    JuliaMagCore.mark_busy!(s, id; reason = "Channel Math is running")
+    @test_throws ItemBusyError JuliaMagCore.mark_reading!(s, id)
+    ok, msg, _ = stats()
+    @test !ok && msg == "Database $id is busy: Channel Math is running."
+    ok, msg, _ = utm()
+    @test !ok && msg == "Database $id is busy: Channel Math is running."
+    JuliaMagCore.unmark_busy!(s, id)
+    @test isempty(s.busy)
+end

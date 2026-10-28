@@ -13,8 +13,10 @@
 #   - In append mode the target database is written in place. `database.json` is
 #     saved only at the end, so it is the commit point. On error the channel files
 #     are cut back and new channel files are removed, so the target is as it was.
-#     The target is marked busy while the file is read. Inside a job, the append
-#     notes an undo that puts the target back (see `roll_back!`).
+#     The target is marked busy while the file is read (inside a job, until the
+#     job ends), and marked as appending until the commit, so `open_database`
+#     does not cut the new rows. Inside a job, the append notes an undo that
+#     puts the target back (see `roll_back!`).
 
 "Most warnings kept in a result. Later ones are counted, not kept."
 const MAX_WARNINGS = 1000
@@ -422,7 +424,7 @@ function import_append(read!::F, s::Session, target::String)::ImportResult where
     # session is free. Readers see the committed rows (see `open_database`).
     it, db, before = lock(s.lock) do
         it = item(p, target)
-        mark_busy!(s, target)
+        mark_busy!(s, target; kind = :append)
         try
             db = database(p, target)
             return it, db, committed_state(db)

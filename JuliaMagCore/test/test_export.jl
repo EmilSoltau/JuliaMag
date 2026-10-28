@@ -483,3 +483,31 @@ end
     @test fetch(imp).lines == 1
     @test isempty(s.busy) && length(database(s.project, id).lines) == 8
 end
+
+@testset "an export refuses a channel that is overwritten in place (I2)" begin
+    (; s, id) = make_db_with(MAG = collect(1.0:100.0))
+    dir = mktempdir()
+    spec = JuliaMagCore.tool("database.channel_math")
+    st = merge(default_settings(spec), Dict{String,Any}("expr" => "MAG = MAG * 2"))
+    # Channel Math stops after it has written the line, until the gate opens.
+    entered, gate = Threads.Atomic{Bool}(false), Threads.Atomic{Bool}(false)
+    held = Progress(f -> (f > 0 && (entered[] = true; while !gate[]; sleep(0.001); end); nothing), () -> false)
+    Threads.@spawn (sleep(30); gate[] = true)          # a watchdog, so a failure does not hang
+    t = Threads.@spawn spec.run(s, Dict("database" => id), copy(st), held, IOBuffer())
+    @test timedwait(() -> entered[], 30) == :ok
+    err = try
+        export_csv(s, id, joinpath(dir, "mix.csv")); nothing
+    catch e
+        e
+    end
+    @test err isa ItemBusyError && sprint(showerror, err) == "ItemBusyError: $id is busy: Channel Math is running"
+    @test !isfile(joinpath(dir, "mix.csv")) && !left_temp(joinpath(dir, "mix.csv"))
+    j = wait_job(export_file(s, id, joinpath(dir, "job.csv")))
+    @test status(j) == JOB_FAILED && occursin("Channel Math is running", j.error)
+    gate[] = true
+    fetch(t)
+    @test isempty(s.busy)
+    r = export_csv(s, id, joinpath(dir, "after.csv"))
+    @test r.rows == 100
+    @test collect(read_channel(database(s.project, id), LineId(LINE, 1001, 0), "MAG")) == 2 .* (1.0:100.0)
+end

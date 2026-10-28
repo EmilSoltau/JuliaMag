@@ -201,17 +201,9 @@ function tool_args(values::Dict{String,Any}, inputs::Dict{String,String})::Dict{
     return a
 end
 
-"Check what a tool returned: `nothing` or a vector of `ProjectItem`."
-function tool_outputs(result)::Vector{ProjectItem}
-    result === nothing && return ProjectItem[]
-    (result isa AbstractVector && all(x -> x isa ProjectItem, result)) ||
-        throw(ArgumentError("the tool returned a $(typeof(result)), not a vector of ProjectItem"))
-    return ProjectItem[x for x in result]
-end
-
 "The work function of a job tool, for `start_job!`."
 tool_work(s::Session, spec::ToolSpec, inputs::Dict{String,String}, values::Dict{String,Any}) =
-    (progress::Progress, io::IO) -> tool_outputs(spec.run(s, copy(inputs), copy(values), progress, io))
+    (progress::Progress, io::IO) -> job_outputs(spec.run(s, copy(inputs), copy(values), progress, io))
 
 "The message the user reads for an error of a quick tool."
 function failure_message(e)::String
@@ -263,7 +255,7 @@ function run_quick(s::Session, spec::ToolSpec, ins::Dict{String,String}, values:
                    args::Dict{String,Any})
     report = IOBuffer()
     outputs = try
-        tool_outputs(spec.run(s, copy(ins), copy(values), NO_PROGRESS, report))
+        job_outputs(spec.run(s, copy(ins), copy(values), NO_PROGRESS, report))
     catch e
         e isa InterruptException && rethrow()
         return (false, failure_message(e), nothing)
