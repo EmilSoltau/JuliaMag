@@ -37,7 +37,11 @@ mutable struct Project
     name::String
     items::Vector{ProjectItem}
     settings::Dict{String,Any}
+    "Next number to hand out per item kind. Never goes down, so an id is never used twice."
+    next_ids::Dict{ItemKind,Int}
 end
+
+Project(folder, name, items, settings) = Project(folder, name, items, settings, Dict{ItemKind,Int}())
 
 # ---- file records ----------------------------------------------------------
 
@@ -56,6 +60,8 @@ struct ProjectRecord
     name::String
     items::Vector{ItemRecord}
     settings::Dict{String,Any}
+    "Counter per kind name. Missing in older files."
+    next_ids::Union{Nothing,Dict{String,Int}}
 end
 StructTypes.StructType(::Type{ProjectRecord}) = StructTypes.Struct()
 
@@ -108,12 +114,20 @@ function open_project(folder::String)::Project
         throw(ProjectError("$path has version $(rec.version); this program reads version $PROJECT_VERSION"))
     items = ProjectItem[ProjectItem(r.id, kind_from_name(r.kind, path), r.name, r.path,
                                     r.description, r.made_by) for r in rec.items]
-    return Project(folder, rec.name, items, plain(rec.settings))
+    p = Project(folder, rec.name, items, plain(rec.settings))
+    # Older files have no counters. `new_item_id` then starts from the highest number in use.
+    if rec.next_ids !== nothing
+        for (k, n) in rec.next_ids
+            p.next_ids[kind_from_name(k, path)] = n
+        end
+    end
+    return p
 end
 
 "Write `project.jmag.json` atomically (see `write_json_atomic`)."
 function save_project(p::Project)
-    rec = ProjectRecord(PROJECT_VERSION, p.name, ItemRecord[ItemRecord(i) for i in p.items], p.settings)
+    ids = Dict{String,Int}(KIND_NAMES[k] => n for (k, n) in p.next_ids)
+    rec = ProjectRecord(PROJECT_VERSION, p.name, ItemRecord[ItemRecord(i) for i in p.items], p.settings, ids)
     mkpath(p.folder)
     write_json_atomic(project_path(p.folder), rec)
     return nothing
@@ -126,6 +140,8 @@ function add_item!(p::Project, it::ProjectItem)
     any(i -> i.id == it.id, p.items) &&
         throw(ProjectError("the project already has an item with id \"$(it.id)\""))
     push!(p.items, it)
+    n = id_number(it.id, it.kind)
+    n === nothing || (p.next_ids[it.kind] = max(get(p.next_ids, it.kind, 1), n + 1))
     return it
 end
 
@@ -152,15 +168,28 @@ item_path(p::Project, it::ProjectItem) = joinpath(p.folder, split(it.path, '/').
 "True when the item's data folder or file does not exist."
 item_missing(p::Project, it::ProjectItem)::Bool = !ispath(item_path(p, it))
 
-"A new id like `\"db-3\"`: the kind's prefix and the next unused number."
+# The number in an id like "db-12", or nothing when `id` is not of that form for `kind`.
+function id_number(id::AbstractString, kind::ItemKind)::Union{Nothing,Int}
+    prefix = KIND_PREFIXES[kind]
+    startswith(id, prefix) || return nothing
+    return tryparse(Int, SubString(id, ncodeunits(prefix) + 1))
+end
+
+"""
+    new_item_id(p, kind)::String
+
+A new id like `"db-3"`: the kind's prefix and the next number.
+An id is never used twice, also not after `remove_item!`.
+The project keeps a counter per kind and saves it with `save_project`.
+For a project file without counters, the number is one above the highest in use.
+"""
 function new_item_id(p::Project, kind::ItemKind)::String
-    prefix::String = KIND_PREFIXES[kind]
-    used = Set{String}(i.id for i in p.items)
-    n = 1
-    while (prefix * string(n)) in used
-        n += 1
+    n = get(p.next_ids, kind, 1)
+    for i in p.items
+        m = id_number(i.id, kind)
+        m === nothing || (n = max(n, m + 1))
     end
-    return prefix * string(n)
+    return KIND_PREFIXES[kind] * string(n)
 end
 
 "Open the line database of item `id`. Throws `ProjectError` if it cannot."

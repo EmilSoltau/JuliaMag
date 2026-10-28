@@ -45,7 +45,18 @@ using JuliaMagCore
             r = remove_item!(q, "db-1")
             @test r.id == "db-1" && length(q.items) == 1
             @test_throws ProjectError remove_item!(q, "db-1")
-            @test new_item_id(q, ITEM_DATABASE) == "db-1"
+            @test new_item_id(q, ITEM_DATABASE) == "db-2"   # an id is never used again
+            save_project(q)
+            @test new_item_id(open_project(p.folder), ITEM_DATABASE) == "db-2"
+            # older file without counters: highest number in use plus one
+            q2 = open_project(p.folder)
+            add_item!(q2, ProjectItem("db-7", ITEM_DATABASE, "z", "databases/z", "", ""))
+            save_project(q2)
+            raw = JuliaMagCore.JSON3.read(read(joinpath(p.folder, "project.jmag.json"), String), Dict{String,Any})
+            delete!(raw, "next_ids")
+            write(joinpath(p.folder, "project.jmag.json"), JuliaMagCore.JSON3.write(raw))
+            @test new_item_id(open_project(p.folder), ITEM_DATABASE) == "db-8"
+            @test new_item_id(open_project(p.folder), ITEM_GRID) == "grid-2"
             # errors
             @test_throws ProjectError open_project(joinpath(tmp, "none"))
             write(joinpath(p.folder, "project.jmag.json"), "{ not json")

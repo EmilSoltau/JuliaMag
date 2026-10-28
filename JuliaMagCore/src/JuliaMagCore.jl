@@ -11,6 +11,9 @@ include("storage/columns.jl")
 include("storage/atomic.jl")
 include("storage/database.jl")
 include("project/project.jl")
+include("session/session.jl")
+include("session/undo.jl")
+include("history/script.jl")
 
 export LineType, LINE, TIE, BASE, TEST, TREND, SPECIAL, RANDOM
 export line_letter, line_type, line_name
@@ -25,5 +28,8 @@ export ItemKind, ITEM_DATABASE, ITEM_GRID, ITEM_MAP, ProjectItem, Project, Proje
 export create_project, open_project, save_project, add_item!, remove_item!, item, item_missing
 export new_item_id, database
 export read_channel, write_value!, write_channel!
+export UndoStep, HistoryEntry, Cursor, Session, ProtectedError
+export open_session, new_session, push_undo!, undo!, redo!, can_undo, can_redo
+export record!, set_cell!, set_line_selected!, set_cursor!, script_text
 
 end # module
