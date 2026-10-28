@@ -192,7 +192,7 @@ end
 
 "The id itself when it is free, else the same type and number with the next free version."
 function free_line_id(db::LineDatabase, id::LineId)::LineId
-    line_position(db, id) == 0 && return id
+    line_is_new(db, id) && return id
     v = id.version
     for l in db.lines
         (l.id.type == id.type && l.id.number == id.number) && (v = max(v, l.id.version))

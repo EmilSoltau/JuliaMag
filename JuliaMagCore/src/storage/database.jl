@@ -308,8 +308,12 @@ end
 
 # ---- lookups ---------------------------------------------------------------
 
-"Total number of rows of all lines, including lines whose rows are still being appended."
-total_rows(db::LineDatabase)::Int = sum(l -> l.nrows, db.lines; init = 0)
+"""
+Total number of rows of all lines, including lines whose rows are still being appended.
+Lines follow each other (`add_line!` sets each offset, and opening a database checks it),
+so this is the end of the last line. That keeps an import of many lines fast.
+"""
+total_rows(db::LineDatabase)::Int = isempty(db.lines) ? 0 : db.lines[end].offset + db.lines[end].nrows
 
 # The indexes are caches. A lookup checks the hit and rebuilds the index on a miss,
 # so code that edits `db.lines` or `db.channels` directly never gets a wrong answer.
@@ -321,6 +325,22 @@ function line_position(db::LineDatabase, id::LineId)::Int
         db.line_index[l.id] = k
     end
     return get(db.line_index, id, 0)
+end
+
+"""
+True when no line has the id `id`. Fast for imports that add thousands of lines:
+a miss does not rebuild the index when the index plainly matches `db.lines`
+(same size, and the last line is where the index says). Otherwise it does the full check.
+"""
+function line_is_new(db::LineDatabase, id::LineId)::Bool
+    n = length(db.lines)
+    if haskey(db.line_index, id)
+        return line_position(db, id) == 0
+    end
+    if length(db.line_index) == n && (n == 0 || get(db.line_index, db.lines[n].id, 0) == n)
+        return true
+    end
+    return line_position(db, id) == 0
 end
 
 function channel_position(db::LineDatabase, name::AbstractString)::Int
@@ -406,12 +426,13 @@ While appenders are open, the line before it is ended first (see `end_line!`),
 so a channel that got too few rows can not spill into the new line.
 """
 function add_line!(db::LineDatabase, info::LineInfo)
-    line_position(db, info.id) == 0 ||
+    line_is_new(db, info.id) ||
         throw(DatabaseError("line $(line_name(info.id)) is already in database $(db.name)"))
     info.nrows >= 0 || throw(DatabaseError("line $(line_name(info.id)) cannot have $(info.nrows) rows"))
     isempty(db.appenders) || end_line!(db)
     info.offset = total_rows(db)
     push!(db.lines, info)
+    db.line_index[info.id] = length(db.lines)
     return info
 end
 

@@ -373,3 +373,24 @@ end
         @test collect(read_channel(db, L(1), "MAG")) == [4.0, 5.0]
     end
 end
+
+@testset "database: many lines keep a right index and row count" begin
+    mktempdir() do dir
+        db = create_database(joinpath(dir, "d"), "d")
+        add_channel!(db, ChannelInfo("MAG", "MAG", Float64, "nT", ROLE_NONE, :normal, 10, -1, false, 1))
+        apps = open_appenders(db, ["MAG"])
+        for k in 1:300
+            add_line!(db, LineInfo(LineId(LINE, 1000 + k, 0), 1, "2024-05-01", 0.0, 0.1, 0, 0, true))
+            db.lines[end].nrows = 2
+            foreach(x -> append_value!(apps["MAG"], x), (Float64(k), Float64(-k)))
+        end
+        close_appenders!(apps)
+        @test total_rows(db) == 600
+        @test length(db.lines) == 300
+        @test all(l -> JuliaMagCore.line_position(db, l.id) == findfirst(x -> x.id == l.id, db.lines), db.lines)
+        @test collect(read_channel(db, LineId(LINE, 1150, 0), "MAG")) == [150.0, -150.0]
+        @test_throws DatabaseError add_line!(db, LineInfo(LineId(LINE, 1150, 0), 1, "2024-05-01", 0.0, 0.1, 0, 0, true))
+        @test JuliaMagCore.line_is_new(db, LineId(LINE, 2000, 0))
+        @test !JuliaMagCore.line_is_new(db, LineId(LINE, 1001, 0))
+    end
+end
