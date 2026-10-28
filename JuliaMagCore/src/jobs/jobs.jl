@@ -4,14 +4,17 @@
 # Rules:
 # - Nothing a job does throws to the caller. An error becomes `JOB_FAILED` with
 #   its message. An error after `cancel!` becomes `JOB_CANCELLED`.
-# - A failed or cancelled job leaves no new item and removes the temp folders
-#   its work noted with `note_job_folder!`.
+# - A failed or cancelled job leaves no new item: it takes out the items its
+#   work added, removes the temp folders it noted with `note_job_folder!`, and
+#   runs the undo actions it noted with `note_job_undo!`.
 # - A finished job is recorded in the history once, with its id, and gets an
 #   undo step. Undo takes its outputs out of the project but keeps their files,
 #   so redo can put them back.
 # - Each job is saved in `jobs/<id>.json` with its report text.
 #   `jobs/counter.json` holds the next job number, so an id is never used twice.
-# - Status and progress are atomics. Project changes and saves happen under `s.lock`.
+# - Status and progress are atomics. Project changes happen under `s.lock`, held
+#   only for short times. The job list, the counter and the job records are
+#   guarded by `s.jobs_lock`, so they never wait for project work.
 
 using JSON3
 
@@ -53,12 +56,12 @@ start_job!(s::Session, command::AbstractString, args::AbstractDict, work::Functi
 function start_job!(s::Session, command::AbstractString, args::AbstractDict, work::Function,
                     replaces::Union{Nothing,Job})::Job
     a = Dict{String,Any}(String(k) => v for (k, v) in args)
+    before = lock(() -> Set{String}(i.id for i in s.project.items), s.lock)
     # The lock makes `job.task` set before any other thread can see the job.
-    lock(s.lock) do
+    lock(s.jobs_lock) do
         job = Job(reserve_job_id!(s), String(command), a, Threads.Atomic{Int}(Int(JOB_RUNNING)),
                   Threads.Atomic{Float64}(0.0), Threads.Atomic{Bool}(false), now_text(), "",
                   IOBuffer(), String[], "", nothing)
-        before = Set{String}(i.id for i in s.project.items)
         push!(s.jobs, job)
         save_job_quietly(s, job)
         job.task = Threads.@spawn run_job!(s, job, work, before, replaces)
@@ -83,7 +86,7 @@ end
 
 "The jobs of the session, newest first."
 function jobs(s::Session)::Vector{Job}
-    lock(s.lock) do
+    lock(s.jobs_lock) do
         return sort(s.jobs; by = j -> something(job_number(j.id), 0), rev = true)
     end
 end
@@ -91,16 +94,16 @@ end
 # ---- running ---------------------------------------------------------------
 
 function run_job!(s::Session, job::Job, work::Function, before::Set{String}, replaces::Union{Nothing,Job})
-    folders = String[]
+    ctx = JobContext()
     try
         progress = Progress(f -> (job.progress[] = clamp(Float64(f), 0.0, 1.0); nothing), () -> job.cancel[])
-        result = task_local_storage(JOB_FOLDERS_KEY, folders) do
+        result = task_local_storage(JOB_CONTEXT_KEY, ctx) do
             job.cancel[] && throw(JobCancelled())
             return work(progress, job.report)
         end
-        finish_job!(s, job, job_outputs(result), before, replaces)
+        finish_job!(s, job, job_outputs(result), before, replaces, ctx)
     catch e
-        fail_job!(s, job, e, folders)
+        fail_job!(s, job, e, ctx)
     end
     return nothing
 end
@@ -115,10 +118,14 @@ end
 
 "Add the outputs, record the job and push its undo step. Undoes its own changes on error."
 function finish_job!(s::Session, job::Job, items::Vector{ProjectItem}, before::Set{String},
-                     replaces::Union{Nothing,Job})
+                     replaces::Union{Nothing,Job}, ctx::JobContext)
     lock(s.lock) do
         p = s.project
         new = ProjectItem[it for it in items if !(it.id in before)]
+        # Items the work added but did not return are outputs too.
+        for it in p.items
+            it.id in ctx.items && !any(n -> n.id == it.id, new) && push!(new, it)
+        end
         old = ProjectItem[]
         if replaces !== nothing
             old = ProjectItem[it for it in p.items if it.id in replaces.outputs]
@@ -128,17 +135,11 @@ function finish_job!(s::Session, job::Job, items::Vector{ProjectItem}, before::S
             swap_items!(p, old, new)
             record!(s, job.command, job.args; job = job.id)
         catch
-            # Leave no half-made item: take the new ones out, delete their files.
-            try
-                swap_items!(p, new, old)
-            catch
-            end
-            for it in new
-                try
-                    rm(item_path(p, it); recursive = true, force = true)
-                catch
-                end
-            end
+            # Leave no half-made item: take the new ones out, delete their files,
+            # and undo the other changes the work noted.
+            quietly(() -> swap_items!(p, new, old))
+            foreach(it -> quietly(() -> rm(item_path(p, it); recursive = true, force = true)), new)
+            undo_noted!(ctx)
             rethrow()
         end
         old_status = replaces === nothing ? JOB_DONE : status(replaces)
@@ -151,21 +152,47 @@ function finish_job!(s::Session, job::Job, items::Vector{ProjectItem}, before::S
             set_status!(replaces, JOB_UNDONE)
             save_job_quietly(s, replaces)
         end
+        noted = copy(ctx.undos)
         undo = () -> begin
+            foreach(it -> check_not_busy(s, it.id), vcat(new, old))
+            foreach(u -> u[1](), reverse(noted))
             swap_items!(p, new, old)
             set_job_status!(s, job, JOB_UNDONE)
             replaces === nothing || set_job_status!(s, replaces, old_status)
             nothing
         end
         redo = () -> begin
+            foreach(it -> check_not_busy(s, it.id), vcat(new, old))
+            foreach(u -> u[2](), noted)
             swap_items!(p, old, new)
             set_job_status!(s, job, JOB_DONE)
             replaces === nothing || old_status != JOB_DONE || set_job_status!(s, replaces, JOB_UNDONE)
             nothing
         end
-        push_undo!(s, UndoStep("$(job.command) ($(job.id))", undo, redo))
+        drop = () -> (foreach(u -> u[3](), noted); nothing)
+        push_undo!(s, UndoStep("$(job.command) ($(job.id))", undo, redo, drop))
         return nothing
     end
+end
+
+"Run `f`; drop any error. For clean-up after a failure, where the first error counts."
+function quietly(f::Function)
+    try
+        f()
+    catch e
+        e isa InterruptException && rethrow()
+    end
+    return nothing
+end
+
+"Undo, then drop, the changes the work noted with `note_job_undo!`, newest first."
+function undo_noted!(ctx::JobContext)
+    for u in reverse(ctx.undos)
+        quietly(u[1])
+        quietly(u[3])
+    end
+    empty!(ctx.undos)
+    return nothing
 end
 
 """
@@ -195,26 +222,34 @@ function set_job_status!(s::Session, job::Job, st::JobStatus)
 end
 
 "End a job that threw. Never throws."
-function fail_job!(s::Session, job::Job, e, folders::Vector{String})
-    cancelled = job.cancel[] || e isa ImportCancelled || e isa JobCancelled
-    for f in folders
-        try
-            rm(f; recursive = true, force = true)
-        catch
+function fail_job!(s::Session, job::Job, e, ctx::JobContext)
+    cancel_error = e isa ImportCancelled || e isa JobCancelled
+    cancelled = job.cancel[] || cancel_error
+    try
+        lock(s.lock) do
+            undo_noted!(ctx)
+            # Take out the items the work added, and delete their files.
+            p = s.project
+            gone = filter(it -> it.id in ctx.items, p.items)
+            if !isempty(gone)
+                filter!(it -> !(it.id in ctx.items), p.items)
+                quietly(() -> save_project(p))
+                foreach(it -> quietly(() -> rm(item_path(p, it); recursive = true, force = true)), gone)
+            end
         end
+    catch
     end
+    foreach(f -> quietly(() -> rm(f; recursive = true, force = true)), ctx.folders)
     msg = try
         sprint(showerror, e)
     catch
         string(typeof(e))
     end
-    job.error = cancelled ? "the job was cancelled" : first(msg, 10_000)
+    job.error = cancel_error ? "the job was cancelled" :
+                cancelled ? "the job was cancelled: " * first(msg, 10_000) : first(msg, 10_000)
     job.finished = now_text()
     set_status!(job, cancelled ? JOB_CANCELLED : JOB_FAILED)
-    try
-        lock(() -> save_job_quietly(s, job), s.lock)
-    catch
-    end
+    quietly(() -> save_job_quietly(s, job))
     return nothing
 end
 
@@ -244,16 +279,18 @@ end
 
 "Save the job record. A failure is kept in `s.warnings`; it does not stop the job."
 function save_job_quietly(s::Session, job::Job)
-    try
-        save_job(s, job)
-    catch e
-        e isa InterruptException && rethrow()
-        push!(s.warnings, "the record of $(job.id) could not be saved: $(sprint(showerror, e))")
+    lock(s.jobs_lock) do
+        try
+            save_job(s, job)
+        catch e
+            e isa InterruptException && rethrow()
+            session_warning!(s, "the record of $(job.id) could not be saved: $(sprint(showerror, e))")
+        end
     end
     return nothing
 end
 
-"A new job id. The counter is saved first, so the id is never used again."
+"A new job id. The counter is saved first, so the id is never used again. Call it under `s.jobs_lock`."
 function reserve_job_id!(s::Session)::String
     n = s.next_job
     s.next_job = n + 1
@@ -262,7 +299,7 @@ function reserve_job_id!(s::Session)::String
         write_json_atomic(joinpath(jobs_folder(s), JOB_COUNTER_FILE), Dict("next_job" => s.next_job))
     catch e
         e isa InterruptException && rethrow()
-        push!(s.warnings, "the job counter could not be saved: $(sprint(showerror, e))")
+        session_warning!(s, "the job counter could not be saved: $(sprint(showerror, e))")
     end
     return "job-$n"
 end

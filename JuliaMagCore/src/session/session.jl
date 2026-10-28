@@ -8,12 +8,19 @@
 
 using JSON3
 
-"One step that can be undone. `undo` and `redo` take no arguments."
+"""
+One step that can be undone. `undo`, `redo` and `drop` take no arguments.
+`drop` runs when an undone step leaves the redo stack for good, to free
+what `undo` kept for `redo` (such as a copy of removed rows).
+"""
 struct UndoStep
     label::String
     undo::Function
     redo::Function
+    drop::Function
 end
+
+UndoStep(label, undo, redo) = UndoStep(label, undo, redo, () -> nothing)
 
 "One recorded action. `time` is local time as text. `job` is a job id or `\"\"`."
 struct HistoryEntry
@@ -38,11 +45,21 @@ end
 Base.showerror(io::IO, e::ProtectedError) =
     print(io, "ProtectedError: channel ", e.channel, " is protected and cannot be edited")
 
+"Refused change of an item that an import is writing to."
+struct ItemBusyError <: Exception
+    item::String
+end
+
+Base.showerror(io::IO, e::ItemBusyError) =
+    print(io, "ItemBusyError: ", e.item, " is busy: an import is running")
+
 """
     Session(project)
 
 The state of one working session. Use `open_session` or `new_session`.
-Take `lock` for every change.
+Take `lock` for every change, but only for a short time.
+`jobs_lock` guards `jobs` and `next_job`. It may be taken while `lock` is held,
+never the other way round.
 """
 mutable struct Session
     project::Project
@@ -59,6 +76,9 @@ mutable struct Session
     jobs::Vector{Job}
     "Number of the next job id. Saved, so a job id is never used twice."
     next_job::Int
+    jobs_lock::ReentrantLock
+    "Ids of items an import is writing to. Guarded by `lock`."
+    busy::Set{String}
 end
 
 const HISTORY_FILE = "history.jsonl"
@@ -69,7 +89,8 @@ function Session(p::Project)
     warnings = String[]
     history = load_history(p, warnings)
     s = Session(p, UndoStep[], UndoStep[], history, nothing, nothing,
-                Dict{String,Dict{String,Any}}(), ReentrantLock(), warnings, Job[], 1)
+                Dict{String,Dict{String,Any}}(), ReentrantLock(), warnings, Job[], 1,
+                ReentrantLock(), Set{String}())
     load_jobs!(s)
     return s
 end
@@ -132,6 +153,25 @@ function record!(s::Session, command::String, args::AbstractDict; job::String = 
     end
 end
 
+"Add a line to `s.warnings`. Safe from any thread."
+session_warning!(s::Session, msg::String) = (lock(() -> push!(s.warnings, msg), s.jobs_lock); nothing)
+
+# ---- busy items ------------------------------------------------------------
+
+"Throw `ItemBusyError` when an import is writing to the item. Call it under `s.lock`."
+check_not_busy(s::Session, id::AbstractString) = (id in s.busy && throw(ItemBusyError(String(id))); nothing)
+
+"Mark an item busy, or throw `ItemBusyError` when it already is."
+function mark_busy!(s::Session, id::AbstractString)
+    lock(s.lock) do
+        check_not_busy(s, id)
+        push!(s.busy, String(id))
+    end
+    return nothing
+end
+
+unmark_busy!(s::Session, id::AbstractString) = (lock(() -> delete!(s.busy, String(id)), s.lock); nothing)
+
 # ---- edits -----------------------------------------------------------------
 
 line_args(id::LineId) = Dict{String,Any}("type" => string(id.type), "number" => id.number, "version" => id.version)
@@ -144,6 +184,7 @@ Throws `ProtectedError` before anything is written if the channel is protected.
 """
 function set_cell!(s::Session, item_id::AbstractString, id::LineId, name::AbstractString, row::Integer, x)
     lock(s.lock) do
+        check_not_busy(s, item_id)
         db = database(s.project, item_id)
         channel(db, name).protected && throw(ProtectedError(String(name)))
         old = write_value!(db, id, String(name), Int(row), x)
@@ -162,6 +203,7 @@ Select or deselect a line and save `database.json`. Undoable and recorded.
 """
 function set_line_selected!(s::Session, item_id::AbstractString, id::LineId, flag::Bool)
     lock(s.lock) do
+        check_not_busy(s, item_id)
         old = line(database(s.project, item_id), id).selected
         put(v::Bool) = () -> begin
             db = database(s.project, item_id)

@@ -802,3 +802,122 @@ function close_appenders!(d::AbstractDict{String,<:ColumnAppender})
     failure === nothing || throw(failure)
     return nothing
 end
+
+# ---- undo of an append -----------------------------------------------------
+#
+# An append only adds bytes at the end of channel files, adds channel files,
+# and rewrites `database.json`. So it is undone at the byte level:
+# - `committed_state` notes `database.json` and the size of each channel file.
+# - `roll_back!` copies the added bytes and files to a side folder
+#   `<database>/.undo-*`, writes the old `database.json` (the commit point),
+#   then cuts the files back and moves the added files away.
+# - `roll_forward!` puts the bytes and files back, then writes the newer
+#   `database.json`, and removes the side folder.
+# A crash in the middle leaves extra bytes past the commit point, which
+# `open_database` cuts, or a channel file that no `database.json` lists.
+
+"The committed state of a database: the text of `database.json` and the byte size of each channel file."
+struct CommittedState
+    meta::String
+    sizes::Dict{String,Int}
+end
+
+"Note the committed state of an open database. Call it before appending."
+function committed_state(db::LineDatabase)::CommittedState
+    sizes = Dict{String,Int}()
+    for c in db.channels, f in channel_files(db, c)
+        sizes[basename(f)] = filesize(f)
+    end
+    return CommittedState(read(meta_path(db), String), sizes)
+end
+
+const COPY_CHUNK = 4 << 20
+
+"Copy what is left of `src` to `dst`, 4 MiB at a time."
+function copy_stream(src::IO, dst::IO)
+    buf = Vector{UInt8}(undef, COPY_CHUNK)
+    while !eof(src)
+        n = readbytes!(src, buf, COPY_CHUNK)
+        write(dst, view(buf, 1:n))
+    end
+    return nothing
+end
+
+"Write text to a file through `<path>.tmp`, so a crash never leaves half a file."
+function write_text_atomic(path::String, text::String)
+    tmp = path * ".tmp"
+    write(tmp, text)
+    mv(tmp, path; force = true)
+    return nothing
+end
+
+"""
+    roll_back!(folder, state)::String
+
+Put the database in `folder` back to `state`. Returns the side folder that
+holds what was removed; `roll_forward!` puts it back.
+Throws `DatabaseError` when a file is shorter than in `state`.
+"""
+function roll_back!(folder::String, state::CommittedState)::String
+    db = open_database(folder)
+    dir = channels_folder(folder)
+    files = String[basename(f) for c in db.channels for f in channel_files(db, c)]
+    for f in files
+        old = get(state.sizes, f, -1)
+        old >= 0 && filesize(joinpath(dir, f)) < old && throw(DatabaseError(
+            "cannot undo the append to $(db.name): channel file $f is shorter than before it"))
+    end
+    side = mktempdir(folder; prefix = ".undo-", cleanup = false)
+    try
+        for f in files
+            old = get(state.sizes, f, -1)
+            if old >= 0
+                open(joinpath(dir, f), "r") do src
+                    seek(src, old)
+                    open(dst -> copy_stream(src, dst), joinpath(side, f * ".tail"), "w")
+                end
+            else
+                cp(joinpath(dir, f), joinpath(side, f * ".whole"))
+            end
+        end
+        write(joinpath(side, META_FILE), read(meta_path(db), String))
+    catch
+        rm(side; recursive = true, force = true)
+        rethrow()
+    end
+    write_text_atomic(meta_path(db), state.meta)          # the commit point
+    for f in files
+        old = get(state.sizes, f, -1)
+        path = joinpath(dir, f)
+        old >= 0 ? open(io -> truncate(io, old), path, "r+") : rm(path; force = true)
+    end
+    return side
+end
+
+"""
+    roll_forward!(folder, state, side)
+
+Redo what `roll_back!` undid, from its side folder, and remove the side folder.
+Throws `DatabaseError`, and changes nothing, when the files are no longer as in `state`.
+"""
+function roll_forward!(folder::String, state::CommittedState, side::String)
+    dir = channels_folder(folder)
+    read(joinpath(folder, META_FILE), String) == state.meta || throw(DatabaseError(
+        "cannot redo the append to $folder: database.json changed since the undo"))
+    for (f, n) in state.sizes
+        filesize(joinpath(dir, f)) == n || throw(DatabaseError(
+            "cannot redo the append to $folder: channel file $f changed since the undo"))
+    end
+    for name in readdir(side)
+        if endswith(name, ".tail")
+            open(joinpath(dir, chopsuffix(name, ".tail")), "a") do dst
+                open(src -> copy_stream(src, dst), joinpath(side, name), "r")
+            end
+        elseif endswith(name, ".whole")
+            cp(joinpath(side, name), joinpath(dir, chopsuffix(name, ".whole")); force = true)
+        end
+    end
+    write_text_atomic(joinpath(folder, META_FILE), read(joinpath(side, META_FILE), String))   # the commit point
+    rm(side; recursive = true, force = true)
+    return nothing
+end

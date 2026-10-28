@@ -12,6 +12,8 @@
 # - In append mode the target database is written in place. `database.json` is
 #   saved only at the end, so it is the commit point. On error the channel files
 #   are cut back and new channel files are removed, so the target is as it was.
+#   The target is marked busy while the file is read. Inside a job, the append
+#   notes an undo that puts the target back (see `roll_back!`).
 
 "Most warnings kept in a result. Later ones are counted, not kept."
 const MAX_WARNINGS = 1000
@@ -579,27 +581,69 @@ end
 
 function import_xyz_append(s::Session, path::String, target::String, crs::String, progress::Progress)
     p = s.project
-    # Hold the session lock: no other change may touch the target while it grows.
-    lock(s.lock) do
+    # Take the lock only to find the target and mark it busy. While the file is
+    # read, other changes to the target throw `ItemBusyError`; the rest of the
+    # session is free. Readers see the committed rows (see `open_database`).
+    it, db, before = lock(s.lock) do
         it = item(p, target)
-        db = database(p, target)
+        mark_busy!(s, target)
+        try
+            db = database(p, target)
+            return it, db, committed_state(db)
+        catch
+            unmark_busy!(s, target)
+            rethrow()
+        end
+    end
+    local result::Tuple{Vector{ImportWarning},Int,Int}
+    try
         rows_before = db.rows_written
         nchannels = length(db.channels)
         st = nothing
-        local result::Tuple{Vector{ImportWarning},Int,Int}
         try
             st = XyzState(path, db, crs, progress)
             read_xyz!(st)
             release_maps!(db)
-            save_meta(db)     # the commit point
+            lock(() -> save_meta(db), s.lock)     # the commit point
             result = (st.warnings, st.rows, st.lines)
         catch
             st === nothing || abort_appenders!(st)
             undo_append!(db, nchannels, rows_before)
             rethrow()
         end
-        return ImportResult(it, result...)
+    finally
+        unmark_busy!(s, target)
     end
+    note_append_undo!(s, target, before)
+    return ImportResult(it, result...)
+end
+
+"""
+Inside a job: note how to undo and redo the append to item `target`.
+Undo keeps the appended rows in a side folder of the database until redo,
+or until the redo is no longer possible.
+"""
+function note_append_undo!(s::Session, target::String, before::CommittedState)
+    side = Ref("")
+    folder() = item_path(s.project, item(s.project, target))
+    undo = () -> begin
+        check_not_busy(s, target)
+        side[] = roll_back!(folder(), before)
+        nothing
+    end
+    redo = () -> begin
+        check_not_busy(s, target)
+        roll_forward!(folder(), before, side[])
+        side[] = ""
+        nothing
+    end
+    drop = () -> begin
+        isempty(side[]) || rm(side[]; recursive = true, force = true)
+        side[] = ""
+        nothing
+    end
+    note_job_undo!(undo, redo, drop)
+    return nothing
 end
 
 "After a failed append: cut the old channel files back and remove new ones."

@@ -172,3 +172,148 @@ end
     @test JuliaMagCore.values_in_file(db3, channel(db3, "MAG")) == 5
     @test isempty(JuliaMagCore.APPENDING)
 end
+
+# ---- fix round 1 -------------------------------------------------------------
+
+"Byte size of each file in the channels folder of a database."
+channel_sizes(db) = Dict(f => filesize(joinpath(db.folder, "channels", f)) for f in readdir(joinpath(db.folder, "channels")))
+
+@testset "undo and redo of an append job" begin
+    mktempdir() do dir
+        s = new_session(joinpath(dir, "p"), "p")
+        a = joinpath(dir, "a.xyz"); write_synthetic_xyz(a; lines = 2, ties = 0, rows_per_line = 50)
+        b = joinpath(dir, "b.xyz")
+        write_synthetic_xyz(b; lines = 3, ties = 1, rows_per_line = 40, seed = 5,
+                            channels = ["X", "Y", "FIDUCIAL", "MAG", "ALT", "GRAD"])
+        j1 = import_file(s, a); wait_job(j1)
+        id = only(j1.outputs)
+        db0 = database(s.project, id)
+        meta0 = read(joinpath(db0.folder, "database.json"), String)
+        sizes0 = channel_sizes(db0)
+        j2 = import_file(s, b; mode = "append", target = id); wait_job(j2)
+        @test status(j2) == JOB_DONE && isempty(j2.outputs)
+        db1 = database(s.project, id)
+        @test length(db1.lines) == 6 && any(c -> c.name == "GRAD", db1.channels)
+        meta1 = read(joinpath(db1.folder, "database.json"), String)
+        sizes1 = channel_sizes(db1)
+        mag1 = collect(read_channel(db1, db1.lines[end].id, "MAG"))
+        # Undo puts the database back exactly.
+        @test undo!(s) && status(j2) == JOB_UNDONE
+        @test read(joinpath(db0.folder, "database.json"), String) == meta0
+        @test channel_sizes(database(s.project, id)) == sizes0
+        @test length(database(s.project, id).lines) == 2
+        # Redo brings the appended lines back.
+        @test redo!(s) && status(j2) == JOB_DONE
+        @test read(joinpath(db0.folder, "database.json"), String) == meta1
+        db2 = database(s.project, id)
+        @test channel_sizes(db2) == sizes1
+        @test collect(read_channel(db2, db2.lines[end].id, "MAG")) == mag1
+        @test !any(startswith(".undo-"), readdir(db0.folder))
+        # Undo again, then a new action drops the redo: the side copy is removed.
+        @test undo!(s)
+        @test any(startswith(".undo-"), readdir(db0.folder))
+        set_line_selected!(s, id, db0.lines[1].id, false)
+        @test !any(startswith(".undo-"), readdir(db0.folder))
+        @test channel_sizes(database(s.project, id)) == sizes0
+    end
+end
+
+@testset "a running append does not block the session" begin
+    mktempdir() do dir
+        s = new_session(joinpath(dir, "p"), "p")
+        a = joinpath(dir, "a.xyz"); write_synthetic_xyz(a; lines = 1, ties = 0, rows_per_line = 10)
+        j1 = import_file(s, a); wait_job(j1)
+        id = only(j1.outputs)
+        L = database(s.project, id).lines[1].id
+        entered = Threads.Atomic{Bool}(false)
+        gate = Threads.Atomic{Bool}(false)
+        # The import stops at its first cancel check until the gate opens.
+        slow = (p, r) -> begin
+            held = Progress(x -> report(p, x), () -> begin
+                entered[] = true
+                while !gate[]
+                    sleep(0.001)
+                end
+                is_cancelled(p)
+            end)
+            import_xyz(s, a; mode = :append, target = id, progress = held, record = false)
+            ProjectItem[]
+        end
+        j2 = start_job!(s, "test.slow_append", Dict{String,Any}(), slow)
+        # A watchdog, so a blocking session makes the test fail instead of hang.
+        Threads.@spawn (sleep(10); gate[] = true)
+        while !entered[]
+            sleep(0.001)
+        end
+        t = @elapsed begin
+            @test length(jobs(s)) == 2
+            j3 = start_job!(s, "test.ok", Dict{String,Any}(), (p, r) -> ProjectItem[]); wait_job(j3)
+            @test status(j3) == JOB_DONE
+            @test can_undo(s)
+            @test length(database(s.project, id).lines) == 1      # the committed view
+        end
+        @test t < 5
+        @test status(j2) == JOB_RUNNING
+        err = try
+            set_cell!(s, id, L, "MAG", 1, 1.0); nothing
+        catch e
+            e
+        end
+        @test err isa ItemBusyError && occursin("$id is busy: an import is running", sprint(showerror, err))
+        @test_throws ItemBusyError set_line_selected!(s, id, L, false)
+        @test_throws ItemBusyError import_xyz(s, a; mode = :append, target = id)
+        gate[] = true
+        wait_job(j2)
+        @test status(j2) == JOB_DONE
+        @test length(database(s.project, id).lines) == 2
+        set_line_selected!(s, id, L, false)                       # free again
+        @test !line(database(s.project, id), L).selected
+        @test_throws ProtectedError set_cell!(s, id, L, "MAG", 1, 1.0)   # imported channels are protected
+    end
+end
+
+@testset "cancel in the middle of an import" begin
+    mktempdir() do dir
+        s = new_session(joinpath(dir, "p"), "p")
+        f = joinpath(dir, "big.xyz"); write_synthetic_xyz(f; lines = 12, ties = 0, rows_per_line = 50_000)
+        j = import_file(s, f)
+        while j.progress[] == 0 && status(j) == JOB_RUNNING
+            Base.yield()
+        end
+        cancel!(j); wait_job(j)
+        @test status(j) == JOB_CANCELLED
+        @test isempty(s.project.items)
+        @test !any(startswith(".importing-"), readdir(joinpath(s.project.folder, "databases")))
+    end
+end
+
+@testset "a failed job removes the items its work added" begin
+    s = fresh_session()
+    j = start_job!(s, "test.half", Dict{String,Any}(), (p, r) -> begin
+        add_item!(s.project, ProjectItem(new_item_id(s.project, ITEM_GRID), ITEM_GRID, "half", "grids/half", "", ""))
+        mkpath(joinpath(s.project.folder, "grids", "half"))
+        error("stopped after adding an item")
+    end)
+    wait_job(j)
+    @test status(j) == JOB_FAILED
+    @test isempty(s.project.items)
+    @test isempty(open_project(s.project.folder).items)
+    @test !isdir(joinpath(s.project.folder, "grids", "half"))
+end
+
+@testset "a cancelled job keeps the real error" begin
+    s = fresh_session()
+    started = Threads.Atomic{Bool}(false)
+    j = start_job!(s, "test.cancel", Dict{String,Any}(), (p, r) -> begin
+        started[] = true
+        while !is_cancelled(p)
+            Base.yield()
+        end
+        error("disk full while stopping")
+    end)
+    while !started[]
+        Base.yield()
+    end
+    cancel!(j); wait_job(j)
+    @test status(j) == JOB_CANCELLED && occursin("disk full while stopping", j.error)
+end

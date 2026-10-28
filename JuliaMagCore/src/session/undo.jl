@@ -1,9 +1,17 @@
 # Undo and redo stacks of a session. They are in memory only and are not saved.
 
-"Add a step to the undo stack and clear the redo stack."
+"Add a step to the undo stack and clear the redo stack (running each step's `drop`)."
 function push_undo!(s::Session, step::UndoStep)
     lock(s.lock) do
         push!(s.undo_stack, step)
+        for old in s.redo_stack
+            try
+                old.drop()
+            catch e
+                e isa InterruptException && rethrow()
+                session_warning!(s, "undo step \"$(old.label)\" could not free its data: $(sprint(showerror, e))")
+            end
+        end
         empty!(s.redo_stack)
         return step
     end

@@ -33,7 +33,7 @@ export ItemKind, ITEM_DATABASE, ITEM_GRID, ITEM_MAP, ProjectItem, Project, Proje
 export create_project, open_project, save_project, add_item!, remove_item!, item, item_missing
 export new_item_id, database
 export read_channel, write_value!, write_channel!
-export UndoStep, HistoryEntry, Cursor, Session, ProtectedError
+export UndoStep, HistoryEntry, Cursor, Session, ProtectedError, ItemBusyError
 export open_session, new_session, push_undo!, undo!, redo!, can_undo, can_redo
 export record!, set_cell!, set_line_selected!, set_cursor!, script_text
 export eachfileline, ImportWarning, ImportResult, Progress, report, is_cancelled, NO_PROGRESS

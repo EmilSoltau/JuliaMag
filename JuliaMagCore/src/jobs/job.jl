@@ -36,7 +36,26 @@ status(job::Job)::JobStatus = JobStatus(job.status[])
 
 set_status!(job::Job, st::JobStatus) = (job.status[] = Int(st); nothing)
 
-const JOB_FOLDERS_KEY = :juliamag_job_folders
+"""
+What the work of a running job noted with `note_job_folder!`, `note_job_item!`
+and `note_job_undo!`. It lives in the task-local storage of the job's task.
+Tasks that the work starts itself do not see it.
+"""
+struct JobContext
+    folders::Vector{String}
+    items::Vector{String}
+    "Steps as (undo, redo, drop), in the order they were noted."
+    undos::Vector{NTuple{3,Function}}
+end
+
+JobContext() = JobContext(String[], String[], NTuple{3,Function}[])
+
+const JOB_CONTEXT_KEY = :juliamag_job_context
+
+function job_context()::Union{Nothing,JobContext}
+    c = get(task_local_storage(), JOB_CONTEXT_KEY, nothing)
+    return c isa JobContext ? c : nothing
+end
 
 """
     note_job_folder!(path)
@@ -46,7 +65,35 @@ Tell the running job about a temp folder its work made, such as
 removed. Outside a job this does nothing.
 """
 function note_job_folder!(path::AbstractString)
-    folders = get(task_local_storage(), JOB_FOLDERS_KEY, nothing)
-    folders isa Vector{String} && push!(folders, String(path))
+    c = job_context()
+    c === nothing || push!(c.folders, String(path))
+    return nothing
+end
+
+"""
+    note_job_item!(id)
+
+Tell the running job that its work added item `id` to the project.
+If the job fails, the item is taken out and its files are deleted.
+`add_item!` calls this. Outside a job this does nothing.
+"""
+function note_job_item!(id::AbstractString)
+    c = job_context()
+    c === nothing || push!(c.items, String(id))
+    return nothing
+end
+
+"""
+    note_job_undo!(undo, redo, drop)
+
+Tell the running job how to undo a change its work made that is not a new item,
+such as rows appended to a database. The job's undo step runs `undo`, its redo
+runs `redo`, and `drop` frees what `undo` kept once redo is no longer possible.
+If the job fails after the change, `undo` and then `drop` run at once.
+Outside a job this does nothing.
+"""
+function note_job_undo!(undo::Function, redo::Function, drop::Function)
+    c = job_context()
+    c === nothing || push!(c.undos, (undo, redo, drop))
     return nothing
 end

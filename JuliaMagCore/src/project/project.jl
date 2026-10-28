@@ -140,6 +140,7 @@ function add_item!(p::Project, it::ProjectItem)
     any(i -> i.id == it.id, p.items) &&
         throw(ProjectError("the project already has an item with id \"$(it.id)\""))
     push!(p.items, it)
+    note_job_item!(it.id)      # inside a job: the job takes it out again if it fails
     n = id_number(it.id, it.kind)
     n === nothing || (p.next_ids[it.kind] = max(get(p.next_ids, it.kind, 1), n + 1))
     return it
