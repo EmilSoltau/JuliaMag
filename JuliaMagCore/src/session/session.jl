@@ -53,6 +53,8 @@ mutable struct Session
     marked::Union{Nothing,Tuple{Int,Int}}
     remembered::Dict{String,Dict{String,Any}}
     lock::ReentrantLock
+    "Problems found while loading, such as skipped history lines."
+    warnings::Vector{String}
 end
 
 const HISTORY_FILE = "history.jsonl"
@@ -60,8 +62,10 @@ const HISTORY_FILE = "history.jsonl"
 history_path(p::Project) = joinpath(p.folder, "jobs", HISTORY_FILE)
 
 function Session(p::Project)
-    return Session(p, UndoStep[], UndoStep[], load_history(p), nothing, nothing,
-                   Dict{String,Dict{String,Any}}(), ReentrantLock())
+    warnings = String[]
+    history = load_history(p, warnings)
+    return Session(p, UndoStep[], UndoStep[], history, nothing, nothing,
+                   Dict{String,Dict{String,Any}}(), ReentrantLock(), warnings)
 end
 
 "Open the project in `folder` and read its saved history."
@@ -73,23 +77,28 @@ new_session(folder::AbstractString, name::AbstractString) =
 
 # ---- history ---------------------------------------------------------------
 
-function load_history(p::Project)::Vector{HistoryEntry}
+# Read the history. A bad line is skipped and reported in `warnings`.
+# A line cut by a crash (no newline at the end of the file) is cut off the file,
+# so the next `record!` starts on a fresh line.
+function load_history(p::Project, warnings::Vector{String})::Vector{HistoryEntry}
     path = history_path(p)
     isfile(path) || return HistoryEntry[]
-    text = read(path, String)
-    lines = split(text, '\n')
-    # A crash can cut the last line. Skip it when the file does not end with a newline.
-    torn = !isempty(text) && !endswith(text, '\n')
+    bytes = read(path)
+    if !isempty(bytes) && last(bytes) != UInt8('\n')
+        keep = something(findlast(==(UInt8('\n')), bytes), 0)
+        push!(warnings, "$path ended in a cut line; it was removed")
+        bytes = bytes[1:keep]
+        write(path, bytes)
+    end
     out = HistoryEntry[]
-    for (n, ln) in enumerate(lines)
+    for (n, ln) in enumerate(split(String(bytes), '\n'))
         isempty(strip(ln)) && continue
         try
             d = plain(JSON3.read(ln; allow_inf = true))::Dict{String,Any}
             push!(out, HistoryEntry(d["time"], d["command"], d["args"], d["job"]))
         catch e
             e isa InterruptException && rethrow()
-            torn && n == length(lines) && continue
-            throw(ProjectError("$path is broken at line $n: $(sprint(showerror, e))"))
+            push!(warnings, "$path line $n skipped: $(sprint(showerror, e))")
         end
     end
     return out
