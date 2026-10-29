@@ -50,7 +50,15 @@ end
         f = joinpath(tmp, "h.grd")
         @test occursin("colour grid holds colours, not values", header_error(write_grd(f; sf = 3)))
         @test occursin("KX = 2", header_error(write_grd(f; kx = 2)))
-        @test occursin("element size of 3 bytes", header_error(write_grd(f; es = 3)))
+        @test occursin("element size of ES = 3", header_error(write_grd(f; es = 3)))
+        @test occursin("element size of ES = 2052", header_error(write_grd(f; es = 2052)))
+        @test occursin("element size of ES = 3076", header_error(write_grd(f; es = 3076)))
+        @test occursin("not a finite number", header_error(write_grd(f; de = Inf)))
+        @test occursin("not a finite number", header_error(write_grd(f; dv = Inf)))
+        @test occursin("not a finite number", header_error(write_grd(f; x0 = NaN)))
+        big = 2^31 - 1
+        @test occursin("$big by $big cells, more than any file can hold",
+                       header_error(write_grd(f; ne = big, nv = big)))
         @test occursin("not a Geosoft grid type", header_error(write_grd(f; es = 8, sf = 0)))
         @test occursin("not a Geosoft grid type", header_error(write_grd(f; es = 1, sf = 2)))
         @test occursin("NE = 0", header_error(write_grd(f; ne = 0)))
@@ -157,6 +165,17 @@ end
             f = write_grd(joinpath(tmp, "kx.grd"); kx = 3, data = Float32[1, 2, 3, 4, 5, 6])
             job = wait_job(run_grd(s, f))
             @test status(job) == JOB_FAILED && occursin("KX = 3", job.error) && isempty(importing(s))
+        end
+
+        @testset "a huge header fails before any folder is made" begin
+            n = length(s.project.items)
+            for es in (4, 8)
+                f = write_grd(joinpath(tmp, "huge$es.grd"); es, ne = 2^31 - 1, nv = 2^31 - 1, data = zeros(UInt8, 64))
+                job = wait_job(run_grd(s, f))
+                @test status(job) == JOB_FAILED && occursin("more than any file can hold", job.error)
+                @test startswith(job.error, "GridError: ")
+            end
+            @test length(s.project.items) == n && isempty(importing(s))
         end
 
         @testset "a compressed grid is not read yet" begin

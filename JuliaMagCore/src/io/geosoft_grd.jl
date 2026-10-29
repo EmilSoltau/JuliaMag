@@ -9,7 +9,7 @@
 # Real value = stored / ZMULT + ZBASE. A dummy is masked before the scaling.
 # Compressed grids (ES > 1024) are read by `read_geosoft_grd_compressed`.
 
-"The 512-byte header of a Geosoft grid. `es` keeps the compression flag (1024)."
+"The 512-byte header of a Geosoft grid. `es` keeps the compression flag (1024, bit 0x400)."
 struct GrdHeader
     es::Int
     sf::Int
@@ -39,7 +39,7 @@ function grd_type(es::Int, sf::Int)::Union{Nothing,DataType}
 end
 
 "The stored element type of a grid, from `ES` and `SF`."
-grd_eltype(h::GrdHeader)::DataType = grd_type(h.es % GRD_COMPRESSED, h.sf)::DataType
+grd_eltype(h::GrdHeader)::DataType = grd_type(h.es & ~GRD_COMPRESSED, h.sf)::DataType
 
 """
     grd_dummy(T)
@@ -90,9 +90,10 @@ function read_grd_header(io::IO)::GrdHeader
     f64(off) = grd_field(Float64, b, off)
     es, sf, ne, nv, kx = i32(0), i32(4), i32(8), i32(12), i32(16)
     de, dv, x0, y0, rot, zbase, zmult = f64(20), f64(28), f64(36), f64(44), f64(52), f64(60), f64(68)
-    bytes = es % GRD_COMPRESSED
-    (es > 0 && bytes in (1, 2, 4, 8)) ||
-        throw(GridError("the header gives an element size of $bytes bytes (ES = $es); a Geosoft grid uses 1, 2, 4 or 8"))
+    compressed = es & GRD_COMPRESSED != 0
+    bytes = es & ~GRD_COMPRESSED
+    es in (1, 2, 4, 8, 1025, 1026, 1028, 1032) ||
+        throw(GridError("the header gives an element size of ES = $es; a Geosoft grid uses 1, 2, 4 or 8 (plus 1024 when compressed)"))
     sf == 3 && throw(GridError("this Geosoft grid is a colour grid (SF = 3). A colour grid holds colours, not values."))
     grd_type(bytes, sf) === nothing &&
         throw(GridError("$bytes-byte values with sign flag SF = $sf are not a Geosoft grid type"))
@@ -102,11 +103,15 @@ function read_grd_header(io::IO)::GrdHeader
     nv >= 1 || throw(GridError("the header gives NV = $nv vectors; it must be at least 1"))
     de > 0 || throw(GridError("the header gives a spacing DE = $de; it must be above 0"))
     dv > 0 || throw(GridError("the header gives a spacing DV = $dv; it must be above 0"))
+    # The values, and the grid JuliaMag stores (up to 8 bytes a cell), must fit
+    # a file size. Computed in Int128, so a huge header cannot wrap around.
+    Int128(ne) * nv * max(bytes, 8) + GRD_HEADER_BYTES <= typemax(Int) ||
+        throw(GridError("the header gives $ne by $nv cells, more than any file can hold"))
     zmult == 0 && throw(GridError("the header gives ZMULT = 0, so the values cannot be scaled"))
-    isfinite(x0) && isfinite(y0) && isfinite(rot) && isfinite(zbase) && isfinite(zmult) ||
-        throw(GridError("the header gives a position, rotation or scaling that is not a number"))
+    all(isfinite, (de, dv, x0, y0, rot, zbase, zmult)) ||
+        throw(GridError("the header gives a spacing, position, rotation or scaling that is not a finite number"))
     label = grd_text(view(b, 77:124))
-    return GrdHeader(es, sf, ne, nv, kx, de, dv, x0, y0, rot, zbase, zmult, label, es > GRD_COMPRESSED)
+    return GrdHeader(es, sf, ne, nv, kx, de, dv, x0, y0, rot, zbase, zmult, label, compressed)
 end
 
 """
