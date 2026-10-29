@@ -504,10 +504,55 @@ new_log() = (String[], ReentrantLock())
         rename_item!(s, id2, "Other")
         @test isdir(folder) && item_ids(s) == [id, id2]
         @test_throws ProjectError remove_item!(s, "db-99")
-        # The drop of a step whose item is out deletes the item's files.
+        # Closed with the item back in the project: the files stay.
+        project = s.project.folder
+        close_session!(s)
+        @test isdir(folder)
+        with_session(s2 -> (@test item_ids(s2) == [id, id2]), project)
+    end
+
+    @testset "closing the session deletes the files of a removed item" begin
+        (; s, id) = make_db_with(MAG = [1.0, 2.0])
+        id2 = add_test_database!(s, ["A" => [1.0]])
+        folder = JuliaMagCore.item_path(s.project, item(s.project, id))
+        folder2 = JuliaMagCore.item_path(s.project, item(s.project, id2))
         remove_item!(s, id)
-        s.undo_stack[end].drop()
-        @test !isdir(folder)
+        undo!(s)
+        redo!(s)                                              # out again, on the undo stack
+        remove_item!(s, id2)
+        undo!(s)                                              # back in, on the redo stack
+        project = s.project.folder
+        close_session!(s)
+        @test !isdir(folder) && isdir(folder2)
+        @test isempty(s.warnings)
+        with_session(project) do s2
+            @test item_ids(s2) == [id2]
+            @test isempty(s2.warnings)
+        end
+        close_session!(s)                                     # a second close does nothing
+    end
+
+    @testset "remove_item! clears the cursor on the item, and undo puts it back" begin
+        (; s, id, L) = make_db_with(MAG = [1.0, 2.0])
+        id2 = add_test_database!(s, ["A" => [1.0]])
+        set_cursor!(s, Cursor(id, L, 2))
+        set_marked!(s, (1, 2))
+        remove_item!(s, id2)                                  # another item: the cursor stays
+        @test s.cursor.item == id && s.marked == (1, 2)
+        undo!(s)
+        remove_item!(s, id)
+        @test s.cursor === nothing && s.marked === nothing
+        undo!(s)
+        @test s.cursor.item == id && s.cursor.row == 2 && s.marked == (1, 2)
+        redo!(s)
+        @test s.cursor === nothing && s.marked === nothing
+        undo!(s)
+        @test s.cursor.item == id
+        # A cursor the user set meanwhile is not replaced.
+        remove_item!(s, id)
+        set_cursor!(s, Cursor(id2, L, 1))
+        undo!(s)
+        @test s.cursor.item == id2 && s.marked === nothing
         close_session!(s)
     end
 
@@ -545,6 +590,16 @@ new_log() = (String[], ReentrantLock())
         redo!(s)
         @test !channel(database(s.project, id), "MAGP").protected
         @test_throws DatabaseError set_channel_protected!(s, id, "NOPE", true)
+        # A save that fails changes nothing: no undo step, no history entry.
+        meta = joinpath(JuliaMagCore.item_path(s.project, item(s.project, id)), "database.json")
+        n, u = length(s.history), length(s.undo_stack)
+        mkpath(meta * ".tmp")                                 # a folder: the file cannot be written
+        @test_throws Exception set_channel_protected!(s, id, "MAGP", true)
+        @test_throws Exception set_channel_info!(s, id, "MAG"; units = "pT")
+        rm(meta * ".tmp"; recursive = true)
+        @test !channel(database(s.project, id), "MAGP").protected
+        @test channel(database(s.project, id), "MAG").units == "nT"
+        @test length(s.history) == n && length(s.undo_stack) == u
         close_session!(s)
     end
 
@@ -616,6 +671,21 @@ new_log() = (String[], ReentrantLock())
         @test !any(startswith(".undo-"), readdir(dbfolder))
         @test isequal(read_channel(database(s.project, id), L, "MAG"), [7.0, NaN])
         close_session!(s)
+    end
+
+    @testset "a deleted channel leaves no side folder after close" begin
+        (; s, id, L) = make_db_with(X = [1.0, 2.0], MAG = [5.0, 6.0])
+        dbfolder = JuliaMagCore.item_path(s.project, item(s.project, id))
+        delete_channel!(s, id, "MAG")
+        @test count(startswith(".undo-"), readdir(dbfolder)) == 1
+        project = s.project.folder
+        close_session!(s)
+        @test !any(startswith(".undo-"), readdir(dbfolder))
+        @test !isfile(joinpath(dbfolder, "channels", "MAG.f64"))
+        with_session(project) do s2
+            @test isempty(s2.warnings)                        # not reported as a crash
+            @test channel_names(database(s2.project, id)) == ["X"]
+        end
     end
 
     @testset "set_channel_info! is undoable" begin

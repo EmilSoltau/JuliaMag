@@ -9,9 +9,12 @@
 using JSON3
 
 """
-One step that can be undone. `undo`, `redo` and `drop` take no arguments.
+One step that can be undone. `undo`, `redo`, `drop` and `commit` take no arguments.
 `drop` runs when an undone step leaves the redo stack for good, to free
 what `undo` kept for `redo` (such as a copy of removed rows).
+`commit` runs when a done step leaves the undo stack for good, which is when
+the session closes (see `close_session!`), to free what the step kept for
+`undo` (such as the files of a removed item). It defaults to doing nothing.
 `items` are the ids of the project items the step changes. `undo!` and `redo!`
 refuse the step with `ItemBusyError` while an import or an export uses one of them.
 
@@ -32,11 +35,15 @@ struct UndoStep
     drop::Function
     items::Vector{String}
     recorded::Bool
+    commit::Function
 end
 
 UndoStep(label, undo, redo) = UndoStep(label, undo, redo, () -> nothing, String[])
 UndoStep(label, undo, redo, drop) = UndoStep(label, undo, redo, drop, String[])
-UndoStep(label, undo, redo, drop, items) = UndoStep(label, undo, redo, drop, items, true)
+UndoStep(label, undo, redo, drop, items; commit::Function = () -> nothing) =
+    UndoStep(label, undo, redo, drop, items, true; commit)
+UndoStep(label, undo, redo, drop, items, recorded::Bool; commit::Function = () -> nothing) =
+    UndoStep(String(label), undo, redo, drop, collect(String, items), recorded, commit)
 
 "One recorded action. `time` is local time as text. `job` is a job id or `\"\"`."
 struct HistoryEntry
@@ -288,19 +295,53 @@ end
 """
     close_session!(s)
 
-Cancel the running jobs of the session, wait for them to end, then remove the
-project lock. A second call does nothing.
+Cancel the running jobs of the session, wait for them to end, end the undo and
+redo stacks, then remove the project lock. A second call does nothing.
+
+Ending the stacks frees what their steps kept: `commit` runs for each step on
+the undo stack, oldest first, and `drop` for each step on the redo stack. Such
+as the folder of a removed item, or the files of a deleted channel. An error
+there becomes a warning in `s.warnings`; the close goes on.
+A session that is never closed (a crash, or an exit without close) keeps
+those files.
 """
 function close_session!(s::Session)
     running = filter(j -> status(j) == JOB_RUNNING, jobs(s))
     foreach(cancel!, running)
     foreach(wait_job, running)
+    end_stacks!(s)
     held = lock(s.jobs_lock) do
         old = s.held_lock
         s.held_lock = nothing
         return old
     end
     held === nothing || release_lock!(held)
+    return nothing
+end
+
+"""
+Empty the undo and redo stacks for good: run `commit` of each undo step, oldest
+first, and `drop` of each redo step. Errors become session warnings.
+Waits for a running `undo!` or `redo!` first.
+"""
+function end_stacks!(s::Session)
+    done, undone = lock(s.undo_lock) do
+        lock(s.lock) do
+            stacks = (copy(s.undo_stack), copy(s.redo_stack))
+            empty!(s.undo_stack)
+            empty!(s.redo_stack)
+            return stacks
+        end
+    end
+    run_quietly(f, what, step) =
+        try
+            f()
+        catch e
+            e isa InterruptException && rethrow()
+            session_warning!(s, "undo step \"$(step.label)\" could not $what at close: $(sprint(showerror, e))")
+        end
+    foreach(step -> run_quietly(step.commit, "free its files", step), done)
+    foreach(step -> run_quietly(step.drop, "free its data", step), undone)
     return nothing
 end
 
@@ -590,8 +631,13 @@ end
 
 Take item `id` out of the project. Undoable: undo puts it back in its place,
 and redo takes it out again. Recorded as `"project.remove_item"`.
-The item's files stay, so undo works. They are deleted when the step leaves
-the redo stack while the item is out, as for an undone import.
+When the cursor is on the item, the cursor and the marked range are cleared;
+undo puts them back if they are still clear.
+The item's files stay while the session can undo the remove. When the session
+closes with the item still out, the step's `commit` deletes them (see
+`close_session!`). A session that is never closed (a crash, or an exit without
+close) keeps them, and no later sweep removes them: a folder the project file
+does not list is never deleted on open.
 Throws `ItemBusyError` while a job or an export uses the item, and
 `ProjectError` when there is no such item.
 """
@@ -602,8 +648,16 @@ function remove_item!(s::Session, id::AbstractString)
         check_not_busy(s, key)
         it = item(p, key)
         k = something(findfirst(i -> i === it, p.items))
+        # The cursor and marked range that pointed at the item, for undo.
+        kept = Ref{Union{Nothing,Tuple{Cursor,Union{Nothing,Tuple{Int,Int}}}}}(nothing)
         take_out() = lock(s.lock) do                # `undo!` runs the steps without the lock
             set_items!(p, filter(i -> i.id != key, p.items))
+            c = s.cursor
+            if c !== nothing && c.item == key
+                kept[] = (c, s.marked)
+                s.cursor = nothing
+                s.marked = nothing
+            end
             nothing
         end
         put_back() = lock(s.lock) do
@@ -611,12 +665,17 @@ function remove_item!(s::Session, id::AbstractString)
             items = copy(p.items)
             insert!(items, clamp(k, 1, length(items) + 1), it)
             set_items!(p, items)
+            saved = kept[]
+            if saved !== nothing && s.cursor === nothing && s.marked === nothing
+                s.cursor, s.marked = saved
+            end
+            kept[] = nothing
             nothing
         end
-        # Redo is no longer possible: delete the files if the item is out.
-        drop() = lock(() -> remove_unused_folders!(p, [it]), s.lock)
+        # Undo is no longer possible: delete the files if the item is out.
+        commit() = lock(() -> remove_unused_folders!(p, [it]), s.lock)
         take_out()
-        push_undo!(s, UndoStep("remove $(it.name)", put_back, take_out, drop, [key]))
+        push_undo!(s, UndoStep("remove $(it.name)", put_back, take_out, () -> nothing, [key]; commit))
         record!(s, "project.remove_item", Dict{String,Any}("item" => key))
         return nothing
     end
@@ -675,8 +734,15 @@ function edit_channel_meta!(getter::Function, setter!::Function, s::Session, id:
     old = getter(channel(database(s.project, id), name))
     put(v) = () -> lock(s.lock) do               # `undo!` runs it without the lock
         db = database(s.project, id)
-        setter!(channel(db, name), v)
-        save_meta(db)
+        c = channel(db, name)
+        before = getter(c)
+        setter!(c, v)
+        try
+            save_meta(db)
+        catch
+            setter!(c, before)
+            rethrow()
+        end
         nothing
     end
     step = UndoStep(label, put(old), put(new), () -> nothing, [id])
@@ -793,8 +859,11 @@ end
 
 Delete a channel of database `id`. Undoable: its files move to a side folder
 `<database>/.undo-*`, and undo moves them back, so the values come back as
-they were. The side folder is removed by undo, and else by the sweep when the
-project opens next time. Recorded as `"database.delete_channel"`.
+they were. Recorded as `"database.delete_channel"`.
+The side folder goes when undo moves the files back, or when the session
+closes with the channel still deleted (the step's `commit`, see
+`close_session!`). A session that is never closed (a crash, or an exit without
+close) leaves it; the next `open_session` sweeps it with a warning.
 Throws `ProtectedError` for a protected channel, `ArgumentError` for a channel
 that a position pair uses, `ItemBusyError` while a job or an export uses the
 database, and `DatabaseError` when there is no such channel.
@@ -829,9 +898,16 @@ function delete_channel!(s::Session, id::AbstractString, name::AbstractString)
             side[] = ""
             nothing
         end
-        drop() = (isempty(side[]) || rm(side[]; recursive = true, force = true); nothing)
+        # Neither undo nor redo is possible any more: remove the side folder, if any.
+        free() = lock(s.lock) do
+            isempty(side[]) && return nothing
+            free_stray_maps()                  # Windows does not delete a mapped file
+            rm(side[]; recursive = true, force = true)
+            side[] = ""
+            nothing
+        end
         take_out()
-        push_undo!(s, UndoStep("delete channel $ch", put_back, take_out, drop, [key]))
+        push_undo!(s, UndoStep("delete channel $ch", put_back, take_out, free, [key]; commit = free))
         record!(s, "database.delete_channel", Dict{String,Any}("item" => key, "channel" => ch))
         return nothing
     end
