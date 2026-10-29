@@ -191,6 +191,7 @@ function read_grd_block_table(io::IO, h::GrdHeader, fsize::Int)::Tuple{Vector{Tu
     nb * vpb >= h.nv ||
         throw(GridError("the $nb blocks of $vpb vectors hold $(nb * vpb) vectors, fewer than the $(h.nv) of the grid"))
     t = read(io, 12nb)
+    es = sizeof(grd_eltype(h))
     blocks = Tuple{Int,Int}[]
     for k in 1:cld(h.nv, vpb)              # blocks past the last vector are not read
         o = Int(grd_field(Int64, t, 8(k - 1)))
@@ -201,6 +202,11 @@ function read_grd_block_table(io::IO, h::GrdHeader, fsize::Int)::Tuple{Vector{Tu
             throw(GridError("block $k is $c bytes, less than its $GRD_BLOCK_HEADER_BYTES-byte header"))
         c <= fsize - o ||
             throw(GridError("block $k starts at byte $o and is $c bytes long, past the end of the file ($fsize bytes)"))
+        # zlib expands data at most about 1032 times, so a small block cannot
+        # hold a big grid. This keeps a tiny damaged file from making a huge grid.
+        n = min(vpb, h.nv - (k - 1) * vpb)
+        n * h.ne * es <= 1032 * (c - GRD_BLOCK_HEADER_BYTES) ||
+            throw(GridError("block $k is too small to hold $n vectors of $(h.ne) values; the file is damaged"))
         push!(blocks, (o, c))
     end
     return blocks, vpb

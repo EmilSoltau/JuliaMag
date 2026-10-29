@@ -268,6 +268,17 @@ end
             # A block that holds more than VPB vectors.
             vpb!(b, v) = (b[525:528] .= reinterpret(UInt8, [htol(Int32(v))]))
             @test fails(b -> (nv!(b, 300); vpb!(b, 27)), "block 1 inflates to more than its 27 vectors of 300 values")
+            # A tiny file that claims a huge grid fails before any grid is made.
+            f = joinpath(tmp, "tiny.grd")
+            payload = transcode(ZlibCompressor, zeros(UInt8, 100))
+            open(f, "w") do io
+                write(io, grd_header_bytes(; es = 1028, ne = 2^31 - 1, nv = 1))
+                write(io, htol(0xF8E7D8C7), htol(Int32(2)), htol(Int32(1)), htol(Int32(1)))
+                write(io, htol(Int64(540)), htol(Int32(16 + length(payload))), GRD_BLOCK_HEADER, payload)
+            end
+            job = wait_job(run_grd(s, f))
+            @test status(job) == JOB_FAILED
+            @test occursin("block 1 is too small to hold 1 vectors of 2147483647 values; the file is damaged", job.error)
             @test length(s.project.items) == n && isempty(importing(s))
             # Dummy padding at the end of the last block is fine.
             f = joinpath(tmp, "pad.grd")
