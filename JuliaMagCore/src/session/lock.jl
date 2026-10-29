@@ -24,18 +24,23 @@ const LOCK_FILE = "project.lock"
 """
 The project in `folder` is open in another session: by `user` on the computer
 `host`, since `started`. `open_session(folder; force = true)` opens it anyway.
+`note` says more when a take-over of the lock went wrong, else it is `""`.
 """
 struct ProjectLockedError <: Exception
     folder::String
     host::String
     user::String
     started::String
+    note::String
 end
+
+ProjectLockedError(folder, host, user, started) = ProjectLockedError(folder, host, user, started, "")
 
 function Base.showerror(io::IO, e::ProjectLockedError)
     who = isempty(e.user) ? "another user" : e.user
     print(io, "ProjectLockedError: the project in ", e.folder, " is open by ", who, " on ", e.host,
           " since ", e.started, ". Close it there first, or use force = true to open it anyway.")
+    isempty(e.note) || print(io, " ", e.note)
 end
 
 "What a lock file holds."
@@ -177,7 +182,8 @@ function lock_alive(r::LockRecord, key::String)::Bool
 end
 
 "The error for a lock that another program is making at this moment."
-lock_in_making(folder::String) = ProjectLockedError(folder, "a computer not known yet", "another program", now_text())
+lock_in_making(folder::String, note::String = "") =
+    ProjectLockedError(folder, "a computer not known yet", "another program", now_text(), note)
 
 "The error for the lock file `path`, from what it holds."
 function locked_error(folder::String, path::String)::ProjectLockedError
@@ -191,17 +197,21 @@ function locked_error(folder::String, path::String)::ProjectLockedError
 end
 
 """
-    take_over!(path, raw, folder)
+    take_over!(path, raw, folder; link = hardlink)
 
 Clear the lock file `path` for a take-over, but only while it still holds the
 bytes `raw` that were checked. It is never removed in place: it is renamed
 aside first, so a lock that another program made after the check is not lost.
 - The file is gone: another program took it over; nothing to do here.
 - The moved file holds `raw`: it is removed.
-- It holds something else: it is a new lock, so it is linked back and
-  `ProjectLockedError` is thrown.
+- It holds something else: it is a new lock. It is put back and
+  `ProjectLockedError` is thrown. On a file system without hard links it is
+  renamed back when the path is still free. When it cannot be put back, the
+  moved file is kept and the error names it, since it may be the only copy of
+  a live lock.
+`link` is `hardlink`; tests pass another function.
 """
-function take_over!(path::String, raw::Vector{UInt8}, folder::String)
+function take_over!(path::String, raw::Vector{UInt8}, folder::String; link::Function = hardlink)
     aside = side_name(path, "old")
     try
         Base.rename(path, aside)
@@ -209,25 +219,34 @@ function take_over!(path::String, raw::Vector{UInt8}, folder::String)
         e isa Base.IOError && e.code == Base.UV_ENOENT && return nothing
         rethrow()
     end
-    try
-        moved = read(aside)
-        moved == raw && return nothing
-        try
-            hardlink(aside, path)
-        catch e
-            # A lock made in the meantime stays; the moved one is dropped.
-            e isa Base.IOError && e.code == Base.UV_EEXIST || rethrow()
-        end
-        r = try
-            parse_lock(moved)
-        catch e
-            e isa InterruptException && rethrow()
-            nothing
-        end
-        throw(r === nothing ? lock_in_making(folder) : ProjectLockedError(folder, r.host, r.user, r.started))
-    finally
+    moved = read(aside)
+    if moved == raw
         rm(aside; force = true)
+        return nothing
     end
+    note = ""
+    try
+        link(aside, path)
+        rm(aside; force = true)
+    catch e
+        e isa InterruptException && rethrow()
+        if links_unsupported(e) && !isfile(path)
+            Base.rename(aside, path)                  # no hard links: the same weak way as the plain create
+        elseif (e isa Base.IOError && e.code == Base.UV_EEXIST) || links_unsupported(e)
+            note = "Another program made a lock while this one was moved aside. " *
+                   "The moved lock was kept as $aside."
+        else
+            note = "The lock could not be put back ($(sprint(showerror, e))). It was kept as $aside."
+        end
+    end
+    r = try
+        parse_lock(moved)
+    catch e
+        e isa InterruptException && rethrow()
+        nothing
+    end
+    r === nothing && throw(lock_in_making(folder, note))
+    throw(ProjectLockedError(folder, r.host, r.user, r.started, note))
 end
 
 """
@@ -241,7 +260,10 @@ failed open can put it back (see `restore_lock!`), else `nothing`.
 A lock that is there is checked. When it may be taken (stale, broken, or
 `force`), `take_over!` clears it and the create runs once more. Of two
 programs that take over the same lock at once, one gets it and the other gets
-`ProjectLockedError`.
+`ProjectLockedError`. One window is left: while the second program has the
+first one's new lock moved aside, a third program finds no lock and makes its
+own. Then the first and the third both run, and the second one's error names
+the side file that keeps the first one's lock.
 """
 function take_lock!(folder::String, force::Bool, warnings::Vector{String})
     path = joinpath(folder, LOCK_FILE)

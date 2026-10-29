@@ -241,6 +241,46 @@ end
         end
     end
 
+    @testset "putting a moved lock back without hard links, or when it cannot be" begin
+        mktempdir() do dir
+            folder = joinpath(dir, "p")
+            close_session!(new_session(folder, "P"))
+            path = lock_path(folder)
+            write_lock(folder; pid = ended_pid())
+            raw = read(path)                                    # both takers checked this lock
+            a = JuliaMagCore.LockRecord(111, gethostname(), "a", "t1")
+            JuliaMagCore.take_over!(path, raw, folder)          # A takes it over
+            @test JuliaMagCore.create_lock(path, a, String[])
+            fresh = read(path)
+            no_links(_, _) = throw(Base.IOError("hardlink: operation not permitted (EPERM)", Base.UV_EPERM))
+            take(link) = try
+                JuliaMagCore.take_over!(path, raw, folder; link)
+            catch err
+                err
+            end
+            sides() = filter(startswith(".project.lock"), readdir(folder))
+            # no hard links: A's lock is renamed back and B is refused
+            e = take(no_links)
+            @test e isa ProjectLockedError && e.user == "a" && isempty(e.note)
+            @test read(path) == fresh && isempty(sides())
+            # no hard links, and a third lock took the path meanwhile: A's lock is kept aside
+            third(src, dst) = (write_lock(folder; pid = 333, user = "c"); no_links(src, dst))
+            e = take(third)
+            @test e isa ProjectLockedError && e.user == "a"
+            side = only(sides())
+            @test occursin(side, e.note) && occursin(side, sprint(showerror, e))
+            @test read(joinpath(folder, side)) == fresh && lock_record(folder)["user"] == "c"
+            rm(joinpath(folder, side)); write(path, fresh)
+            # any other error: the moved lock is kept and named
+            broken(_, _) = throw(Base.IOError("hardlink: i/o error (EIO)", Base.UV_EIO))
+            e = take(broken)
+            @test e isa ProjectLockedError && e.user == "a"
+            side = only(sides())
+            @test occursin(side, e.note) && occursin("EIO", e.note)
+            @test read(joinpath(folder, side)) == fresh && !isfile(path)
+        end
+    end
+
     @testset "another program takes over between the check and the take-over" begin
         hook = JuliaMagCore.TAKE_OVER_HOOK
         mktempdir() do dir
