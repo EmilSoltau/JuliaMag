@@ -165,6 +165,87 @@ end
         end
     end
 
+    @testset "another spelling of the folder finds the lock" begin
+        mktempdir() do dir
+            folder = joinpath(dir, "p")
+            s = new_session(folder, "P")
+            link = joinpath(dir, "link")
+            symlink(folder, link)
+            @test_throws ProjectLockedError open_session(link)
+            @test_throws ProjectLockedError open_session(joinpath(dir, ".", "p", ""))
+            @test lock_record(folder)["started"] == s.held_lock.record.started
+            close_session!(s)
+            c = open_session(link)
+            @test isempty(c.warnings)
+            close_session!(c)
+            @test !isfile(lock_path(folder))
+        end
+    end
+
+    @testset "a failed open with force puts the other lock back" begin
+        mktempdir() do dir
+            folder = joinpath(dir, "p")
+            close_session!(new_session(folder, "P"))
+            pfile = joinpath(folder, "project.jmag.json")
+            good = read(pfile, String)
+            write(pfile, "{")
+            write_lock(folder; pid = 12345, host = "other-pc", user = "bob")
+            before = read(lock_path(folder), String)
+            @test_throws ProjectError open_session(folder; force = true)
+            @test lock_record(folder) == JSON3.read(before, Dict{String,Any})
+            # a stale lock that was taken over is just removed
+            write_lock(folder; pid = ended_pid())
+            @test_throws ProjectError open_session(folder)
+            @test !isfile(lock_path(folder))
+            write(pfile, good)
+            close_session!(open_session(folder))
+            @test !any(startswith(".project.lock"), readdir(folder))      # no temp files left
+        end
+    end
+
+    @testset "the lock file is made by one creator only" begin
+        mktempdir() do dir
+            path = lock_path(dir)
+            rec = JuliaMagCore.LockRecord(1, "h", "u", "t")
+            wins = zeros(Int, 16)
+            Threads.@threads for i in 1:16
+                wins[i] = JuliaMagCore.create_lock(path, rec, String[]) ? 1 : 0
+            end
+            @test sum(wins) == 1
+            @test readdir(dir) == [JuliaMagCore.LOCK_FILE]
+        end
+    end
+
+    @testset "two programs open a project at the same moment: one wins" begin
+        mktempdir() do dir
+            folder = joinpath(dir, "p")
+            close_session!(new_session(folder, "P"))
+            go = joinpath(dir, "go")
+            code = """
+                using JuliaMagCore
+                println("ready"); flush(stdout)
+                while !isfile($(repr(go))); sleep(0.001); end
+                try
+                    open_session($(repr(folder)))
+                    println("won"); flush(stdout)
+                    readline(stdin)                  # hold the lock until the test ends
+                catch e
+                    e isa ProjectLockedError || rethrow()
+                    println("locked"); flush(stdout)
+                end
+                """
+            cmd = `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $code`
+            procs = [open(cmd, "r+") for _ in 1:2]
+            @test all(p -> readline(p) == "ready", procs)
+            touch(go)
+            @test sort([readline(p) for p in procs]) == ["locked", "won"]
+            foreach(close, procs)
+            foreach(wait, procs)
+            @test all(success, procs)
+            @test !isfile(lock_path(folder))
+        end
+    end
+
     @testset "locks of open sessions are removed at exit" begin
         mktempdir() do dir
             a, b = joinpath(dir, "a"), joinpath(dir, "b")

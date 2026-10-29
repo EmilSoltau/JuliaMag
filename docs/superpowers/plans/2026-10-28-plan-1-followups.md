@@ -46,7 +46,6 @@ These are the open points from the reviews that later plans must handle.
 
 - A saved script opens its project with `open_session` and does not close it.
   Run in a REPL, it keeps the project locked until Julia exits.
-- Two programs that open the same project at the same moment can both pass the lock check, since the lock file is written with a rename and not created exclusively.
 - A job that appends and then runs Channel Math on the same item is refused (no caller does this yet).
 - A direct `import_xyz` replays as `import_file`, which adds an undo step the original session did not have.
 - Undo of a job with several noted steps is not retryable as a unit.

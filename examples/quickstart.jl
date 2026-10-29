@@ -91,3 +91,6 @@ script = joinpath(work, "steps.jl")
 write(script, script_text(s))
 println("Script saved to ", script)
 println(script_text(s))
+
+# Close the session. This removes the project lock, so another session can open it.
+close_session!(s)

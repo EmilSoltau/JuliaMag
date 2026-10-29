@@ -157,11 +157,11 @@ end
 # open is never disturbed (loading marks its running jobs as failed).
 function locked_session(make::Function, folder::String, force::Bool)::Session
     warnings = String[]
-    h = take_lock!(folder, force, warnings)
+    h, replaced = take_lock!(folder, force, warnings)
     s = try
         Session(make())
     catch
-        release_lock!(h)
+        replaced === nothing ? release_lock!(h) : restore_lock!(h, replaced)
         rethrow()
     end
     s.held_lock = h

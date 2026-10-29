@@ -9,6 +9,12 @@
 # is taken over with a session warning. `force = true` opens a locked project
 # anyway, also with a warning.
 #
+# The lock file is made with an exclusive create: the record is written to a
+# temp file of its own, which is then hard linked to `project.lock`. The link
+# fails when the lock is there, so of two programs that open a project at the
+# same moment only one gets it. On a file system without hard links the lock
+# is written the plain way, with a session warning.
+#
 # The lock file is not listed in `project.jmag.json`, so it is never an item.
 
 using JSON3
@@ -40,14 +46,16 @@ struct LockRecord
     started::String
 end
 
-"A lock that this process holds. `key` is the `folder_key` of `path`."
+"A lock that this process holds. `key` is the `lock_key` of its folder."
 struct HeldLock
     path::String
     key::String
     record::LockRecord
 end
 
-# The locks this process holds, for the `atexit` hook. Guarded by `HELD_LOCKS_LOCK`.
+# The locks this process holds, for the `atexit` hook. Guarded by `HELD_LOCKS_LOCK`,
+# which `take_lock!` holds from its check to the end, so two sessions of this
+# process never take the same lock at once.
 const HELD_LOCKS = HeldLock[]
 const HELD_LOCKS_LOCK = ReentrantLock()
 
@@ -67,9 +75,37 @@ function read_lock(path::String)::Union{Nothing,LockRecord}
     return LockRecord(d["pid"]::Int, d["host"]::String, d["user"]::String, d["started"]::String)
 end
 
-function write_lock(path::String, r::LockRecord)
-    write_json_atomic(path, Dict("pid" => r.pid, "host" => r.host, "user" => r.user, "started" => r.started))
-    return nothing
+lock_dict(r::LockRecord) = Dict("pid" => r.pid, "host" => r.host, "user" => r.user, "started" => r.started)
+
+"Write a lock file over what is there (see `write_json_atomic`)."
+write_lock(path::String, r::LockRecord) = (write_json_atomic(path, lock_dict(r)); nothing)
+
+"""
+    create_lock(path, r, warnings)::Bool
+
+Make the lock file only when there is none: write the record to a temp file of
+its own and hard link it to `path`. False when a lock is there.
+Where hard links do not work, the lock is written the plain way, with a note in `warnings`.
+"""
+function create_lock(path::String, r::LockRecord, warnings::Vector{String})::Bool
+    tmp = joinpath(dirname(path), ".$(LOCK_FILE).$(getpid()).$(string(rand(UInt64); base = 36)).tmp")
+    try
+        open(io -> JSON3.pretty(io, JSON3.write(lock_dict(r))), tmp, "w")
+        try
+            hardlink(tmp, path)
+            return true
+        catch e
+            e isa Base.IOError && e.code == Base.UV_EEXIST && return false
+            e isa InterruptException && rethrow()
+            isfile(path) && return false
+            write_lock(path, r)
+            push!(warnings, "$path: this file system has no hard links, so the lock was written the plain way. " *
+                            "Two programs that open the project at the same moment may both get it.")
+            return true
+        end
+    finally
+        rm(tmp; force = true)
+    end
 end
 
 "True when the process `pid` on this computer still runs."
@@ -103,6 +139,12 @@ end
 holds_lock(key::String)::Bool = lock(() -> any(h -> h.key == key, HELD_LOCKS), HELD_LOCKS_LOCK)
 
 """
+The key of a project folder in `HELD_LOCKS`: its real path, so a link or another
+spelling of the same folder gives the same key. The folder must exist.
+"""
+lock_key(folder::String)::String = folder_key(realpath(folder))
+
+"""
 True when the session that wrote `r` may still be open. A lock from another
 computer cannot be checked, so it counts as open. A lock this process wrote
 is open only while this process holds it for this folder; one that came with
@@ -115,37 +157,72 @@ function lock_alive(r::LockRecord, key::String)::Bool
 end
 
 """
-    take_lock!(folder, force, warnings)::HeldLock
+    take_lock!(folder, force, warnings)::Tuple{HeldLock,Union{Nothing,LockRecord}}
 
-Write the lock file of the project in `folder`, or throw `ProjectLockedError`.
+Make the lock file of the project in `folder`, or throw `ProjectLockedError`.
 Notes about a lock that was there go to `warnings`.
+Also returns the record of a live lock that `force = true` replaced, so a
+failed open can put it back (see `restore_lock!`), else `nothing`.
 """
-function take_lock!(folder::String, force::Bool, warnings::Vector{String})::HeldLock
+function take_lock!(folder::String, force::Bool, warnings::Vector{String})
     path = joinpath(folder, LOCK_FILE)
-    key = folder_key(path)
-    old = try
-        read_lock(path)
+    key = lock_key(folder)
+    me = LockRecord(getpid(), gethostname(), user_name(), now_text())
+    lock(HELD_LOCKS_LOCK) do
+        replaced = nothing
+        # Two tries: a lock that is there is checked, removed when it may be
+        # taken, and the create runs once more. A program that makes a new
+        # lock in between wins.
+        for attempt in 1:2
+            if create_lock(path, me, warnings)
+                h = HeldLock(path, key, me)
+                push!(HELD_LOCKS, h)
+                return (h, replaced)
+            end
+            old = try
+                read_lock(path)
+            catch e
+                e isa InterruptException && rethrow()
+                attempt == 2 && break
+                push!(warnings, "$path was broken; it was replaced: $(sprint(showerror, e))")
+                nothing
+            end
+            attempt == 2 && old === nothing && break
+            if old !== nothing
+                who = isempty(old.user) ? "another user" : old.user
+                alive = attempt == 2 || lock_alive(old, key)
+                if alive && (attempt == 2 || !force)
+                    throw(ProjectLockedError(folder, old.host, old.user, old.started))
+                elseif !alive
+                    push!(warnings, "$path: the session of $who on this computer (process $(old.pid)), " *
+                                    "open since $(old.started), has ended; its lock was taken over")
+                else
+                    push!(warnings, "$path: the project is open by $who on $(old.host) since $(old.started); " *
+                                    "it was opened anyway (force = true)")
+                    replaced = old
+                end
+            end
+            rm(path; force = true)
+        end
+        # Another program is making its lock at this moment.
+        throw(ProjectLockedError(folder, "a computer not known yet", "another program", now_text()))
+    end
+end
+
+"""
+Undo `take_lock!` after a failed open that replaced the live lock `old` with
+`force = true`: put `old` back, so the other session keeps its lock.
+"""
+function restore_lock!(h::HeldLock, old::LockRecord)
+    lock(() -> filter!(x -> x !== h, HELD_LOCKS), HELD_LOCKS_LOCK)
+    r = try
+        read_lock(h.path)
     catch e
         e isa InterruptException && rethrow()
-        push!(warnings, "$path was broken; it was replaced: $(sprint(showerror, e))")
         nothing
     end
-    if old !== nothing
-        who = isempty(old.user) ? "another user" : old.user
-        if !lock_alive(old, key)
-            push!(warnings, "$path: the session of $who on this computer (process $(old.pid)), " *
-                            "open since $(old.started), has ended; its lock was taken over")
-        elseif force
-            push!(warnings, "$path: the project is open by $who on $(old.host) since $(old.started); " *
-                            "it was opened anyway (force = true)")
-        else
-            throw(ProjectLockedError(folder, old.host, old.user, old.started))
-        end
-    end
-    h = HeldLock(path, key, LockRecord(getpid(), gethostname(), user_name(), now_text()))
-    write_lock(path, h.record)
-    lock(() -> push!(HELD_LOCKS, h), HELD_LOCKS_LOCK)
-    return h
+    r == h.record && write_lock(h.path, old)
+    return nothing
 end
 
 """
