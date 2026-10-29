@@ -44,7 +44,7 @@ function edit_grid_meta!(getter::Function, setter!::Function, s::Session, id::Ab
     lock(s.lock) do
         check_not_busy(s, key)
         old = getter(grid(s.project, key))
-        apply(v) = () -> begin
+        apply(v) = () -> lock(s.lock) do       # `undo!` runs it without the lock
             g = grid(s.project, key)
             setter!(g, v)
             save_grid_meta(g)

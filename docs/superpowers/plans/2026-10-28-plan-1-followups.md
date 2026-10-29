@@ -14,13 +14,9 @@ These are the open points from the reviews that later plans must handle.
 - `rerun!` with `replace = true` is not in the history, so replay keeps both outputs.
 - A job report (`IOBuffer`) is read while the worker writes it.
   This is a data race once the Jobs tab shows live reports.
-- `undo!` holds `s.lock` while it copies large files (Channel Math overwrite, append undo).
-  This would freeze the UI.
 - `Session.warnings` is stored but not shown.
 - An append with a coordinate system that differs from the existing pair gives no warning.
 - PROJ warnings (for example a ballpark transformation) are dropped.
-- `.undo-*` side folders left after a crash are never swept.
-- Settings are remembered before a quick tool runs, so a failed run still changes them.
 - Session API gaps: remove an item with undo, undoable channel property edits (unprotect, rename, delete), a setter for the marked range, an item-picker setting type for importer targets.
 
 ## Done in plan 2
@@ -28,6 +24,13 @@ These are the open points from the reviews that later plans must handle.
 - Two sessions on one project folder are not coordinated.
   Add a project lock file.
   Done in the commit "Lock a project while a session has it open".
+- `undo!` holds `s.lock` while it copies large files (Channel Math overwrite, append undo).
+  This would freeze the UI.
+  Done in the commit "Run undo steps outside the session lock and sweep leftovers".
+- `.undo-*` side folders left after a crash are never swept.
+  Done in the same commit: `open_session` removes `.undo-*` and `.importing-*` folders, each with a warning.
+- Settings are remembered before a quick tool runs, so a failed run still changes them.
+  Done in the same commit: a quick tool remembers its settings only after it ran without error.
 
 ## Checks on real systems
 

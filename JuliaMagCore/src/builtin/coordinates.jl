@@ -6,7 +6,8 @@
 # - `coordinates.guess_utm`: say which UTM zone most points are in.
 #
 # The quick tools change `database.json` under `s.lock` and push an undo step
-# that puts the old values back. The reproject job marks the database busy while
+# that puts the old values back. The step takes `s.lock` too, since `undo!`
+# runs it without the lock. The reproject job marks the database busy while
 # it writes (readers such as exports wait too), and notes an undo that rolls the
 # database back to its committed state before the job (see `note_append_undo!`).
 # Guess UTM zone only reads: it shares the database with exports and appends.
@@ -71,7 +72,7 @@ An undo step that sets the pair `x,y` of database `id` back to `old` with
 `apply(pair_index, db, value)`, and forward to `new` again.
 """
 function meta_undo_step(s::Session, id::String, label::String, apply::Function, x::String, y::String, old, new)
-    put(v) = () -> begin
+    put(v) = () -> lock(s.lock) do
         db = database(s.project, id)
         k = findfirst(p -> p.x == x && p.y == y, db.pairs)
         k === nothing && throw(DatabaseError("database $id has no position pair $x,$y any more"))
@@ -118,7 +119,7 @@ function run_set_current(s::Session, ins::Dict{String,String}, st::Dict{String,A
         old = db.current_pair
         # Undo goes back to the old current pair by its names, so look them up now.
         oldp = old == 0 ? nothing : db.pairs[old]
-        put(target) = () -> begin
+        put(target) = () -> lock(s.lock) do
             d = database(s.project, id)
             if target === nothing
                 d.current_pair = 0

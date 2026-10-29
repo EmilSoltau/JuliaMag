@@ -222,7 +222,7 @@ end
         # a ToolError gives its own message; a busy item gives a plain message
         ok, msg, out = run_tool(s, "test.scale_data"; inputs = Dict("database" => id), in = "NOPE")
         @test !ok && msg == "There is no channel NOPE." && out === nothing
-        @test last_settings(s, "test.scale_data")["in"] == "NOPE"     # remembered, as the dialog showed it
+        @test last_settings(s, "test.scale_data")["in"] == ""         # a failed run is not remembered
         JuliaMagCore.mark_busy!(s, id)
         ok, msg, _ = run_tool(s, "test.scale_data"; inputs = Dict("database" => id), in = "MAG")
         @test !ok && msg == "$id is busy: an import is running."

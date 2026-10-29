@@ -201,19 +201,25 @@ function finish_locked!(s::Session, job::Job, items::Vector{ProjectItem}, before
     undoable || return nothing
     noted = copy(ctx.undos)
     replaced_all = !kept_old
+    # The steps run without `s.lock` (see `UndoStep`). The noted steps may copy
+    # large files; the change of the item list takes the lock.
     undo = () -> begin
         foreach(u -> u[1](), reverse(noted))
-        swap_items!(p, new, old)
-        set_job_status!(s, job, JOB_UNDONE)
-        replaces === nothing || set_job_status!(s, replaces, old_status)
+        lock(s.lock) do
+            swap_items!(p, new, old)
+            set_job_status!(s, job, JOB_UNDONE)
+            replaces === nothing || set_job_status!(s, replaces, old_status)
+        end
         nothing
     end
     redo = () -> begin
         foreach(u -> u[2](), noted)
-        swap_items!(p, old, new)
-        set_job_status!(s, job, JOB_DONE)
-        (replaces === nothing || old_status != JOB_DONE || !replaced_all) ||
-            set_job_status!(s, replaces, JOB_UNDONE)
+        lock(s.lock) do
+            swap_items!(p, old, new)
+            set_job_status!(s, job, JOB_DONE)
+            (replaces === nothing || old_status != JOB_DONE || !replaced_all) ||
+                set_job_status!(s, replaces, JOB_UNDONE)
+        end
         nothing
     end
     # Redo is no longer possible: free what the noted steps kept, and delete the

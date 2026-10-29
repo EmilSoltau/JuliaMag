@@ -403,12 +403,17 @@ item `target`. The side folder holds `<file>.old`; undo also keeps `<file>.new`
 there for redo. Both refuse when `database.json` is no longer `committed`.
 """
 function note_overwrite_undo!(s::Session, target::String, file::String, side::String, committed::String)
-    folder() = item_path(s.project, item(s.project, target))
-    function check()
+    # It runs inside the undo step of the job, without `s.lock` (see `UndoStep`),
+    # or under it when the job fails. So it takes the lock to look up the item.
+    folder() = lock(s.lock) do
         check_not_busy(s, target)
-        read(joinpath(folder(), META_FILE), String) == committed || throw(DatabaseError(
+        item_path(s.project, item(s.project, target))
+    end
+    function check()
+        dir = folder()
+        read(joinpath(dir, META_FILE), String) == committed || throw(DatabaseError(
             "cannot undo or redo Channel Math on $target: database.json changed since"))
-        return joinpath(channels_folder(folder()), file)
+        return joinpath(channels_folder(dir), file)
     end
     undo = () -> begin
         path = check()

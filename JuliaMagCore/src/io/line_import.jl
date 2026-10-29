@@ -468,14 +468,17 @@ or until the redo is no longer possible.
 """
 function note_append_undo!(s::Session, target::String, before::CommittedState, committed::String)
     side = Ref("")
-    folder() = item_path(s.project, item(s.project, target))
-    undo = () -> begin
+    # It runs inside the undo step of the job, without `s.lock` (see `UndoStep`),
+    # or under it when the job fails. So it takes the lock to look up the item.
+    folder() = lock(s.lock) do
         check_not_busy(s, target)
+        item_path(s.project, item(s.project, target))
+    end
+    undo = () -> begin
         side[] = roll_back!(folder(), before, committed)
         nothing
     end
     redo = () -> begin
-        check_not_busy(s, target)
         roll_forward!(folder(), before, side[])
         side[] = ""
         nothing

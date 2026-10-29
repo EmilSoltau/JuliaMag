@@ -225,13 +225,14 @@ Run a tool. The given settings go over the remembered ones (see `last_settings`)
 Inputs are item ids by input name, such as `inputs = Dict("database" => "db-1")`.
 
 The settings are checked first. With problems, nothing runs and the result is
-`(false, <the problems>, nothing)`. Otherwise the settings are remembered.
+`(false, <the problems>, nothing)`, and nothing is remembered.
 
 - A `:quick` tool runs now and returns `(ok, message, outputs)`. Nothing is
   thrown: a `ToolError` gives its own message, other errors give
-  `"Tool failed: <message>"`. A run that worked is recorded in the history.
-- A `:job` tool returns the `Job` at once. The job records itself in the
-  history when it is done.
+  `"Tool failed: <message>"`. A run that worked is recorded in the history,
+  and only then are its settings remembered.
+- A `:job` tool returns the `Job` at once. Its settings are remembered when the
+  job starts. The job records itself in the history when it is done.
 """
 function run_tool(s::Session, id::AbstractString; inputs::AbstractDict = Dict{String,String}(), kwargs...)
     spec = find_tool(id)
@@ -245,9 +246,11 @@ function run_tool(s::Session, id::AbstractString; inputs::AbstractDict = Dict{St
     problems = vcat(input_problems(spec, inputs), validate(spec, values))
     isempty(problems) || return (false, join(problems, " "), nothing)
     ins = Dict{String,String}(String(k) => String(v) for (k, v) in inputs)
-    remember_settings!(s, spec.id, values)
     args = tool_args(values, ins)
-    spec.mode == :job && return start_job!(s, spec.id, args, tool_work(s, spec, ins, values))
+    if spec.mode == :job
+        remember_settings!(s, spec.id, values)
+        return start_job!(s, spec.id, args, tool_work(s, spec, ins, values))
+    end
     return run_quick(s, spec, ins, values, args)
 end
 
@@ -260,6 +263,7 @@ function run_quick(s::Session, spec::ToolSpec, ins::Dict{String,String}, values:
         e isa InterruptException && rethrow()
         return (false, failure_message(e), nothing)
     end
+    remember_settings!(s, spec.id, values)
     try
         record!(s, spec.id, args)
     catch e
