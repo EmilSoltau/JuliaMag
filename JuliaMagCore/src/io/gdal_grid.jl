@@ -43,18 +43,44 @@ end
 # GDAL keeps the blocks it reads and writes in a cache of 5 % of the memory by
 # default, so a big file would fill over 1 GB of it. JuliaMag moves blocks of
 # rows and needs little of it: the cache is set to `GDAL_CACHE_FLOOR` when the
-# package loads, and a job raises it by what it needs while it runs.
+# package loads, and a job raises it by what it needs while it runs, up to
+# `gdal_cache_cap()`.
+#
+# When the environment variable `GDAL_CACHEMAX` is set, the user has chosen the
+# cache size: JuliaMag then leaves the cache alone, also during jobs.
 
 "The size of the GDAL block cache when no job needs more, in bytes."
 const GDAL_CACHE_FLOOR = 64 * 2^20
+
+"""
+    gdal_cache_cap() -> Int
+
+The largest GDAL cache the jobs may raise it to: 1 GiB or an eighth of the
+memory, whichever is smaller, and never below `GDAL_CACHE_FLOOR`. Two rows of
+blocks can be huge (a tiled `Float64` file 3 million cells wide needs about
+12 GB, a file stored as one compressed strip needs the whole band); GDAL then
+reads or writes some blocks twice, which is slower but right.
+"""
+gdal_cache_cap() = max(GDAL_CACHE_FLOOR, min(2^30, Int(Sys.total_memory() ÷ 8)))
+
+"True when the user set `GDAL_CACHEMAX`, so JuliaMag leaves the GDAL cache alone."
+user_gdal_cache() = haskey(ENV, "GDAL_CACHEMAX")
 
 # The needs of the running jobs, guarded by the lock.
 const GDAL_CACHE_NEEDS = Int[]
 const GDAL_CACHE_LOCK = ReentrantLock()
 
-"Set the GDAL cache to the needs of the running jobs, and at least `GDAL_CACHE_FLOOR`."
-set_gdal_cache!() = lock(() -> GDAL.gdalsetcachemax64(max(GDAL_CACHE_FLOOR, sum(GDAL_CACHE_NEEDS; init = 0))),
-                         GDAL_CACHE_LOCK)
+"""
+Set the GDAL cache to the needs of the running jobs, at least `GDAL_CACHE_FLOOR`
+and at most `gdal_cache_cap()`. Does nothing when the user set `GDAL_CACHEMAX`.
+"""
+function set_gdal_cache!()
+    user_gdal_cache() && return nothing
+    lock(GDAL_CACHE_LOCK) do
+        GDAL.gdalsetcachemax64(clamp(sum(GDAL_CACHE_NEEDS; init = 0), GDAL_CACHE_FLOOR, gdal_cache_cap()))
+    end
+    return nothing
+end
 
 """
     gdal_cache_need(nx, block_height, T) -> Int
@@ -69,7 +95,8 @@ gdal_cache_need(nx::Integer, block_height::Integer, ::Type{T}) where {T} = 2 * I
     with_gdal_cache(f, need)
 
 Call `f()` with `need` bytes more in the GDAL cache than the other running jobs
-need. The cache is set back after, also on an error.
+need (see `set_gdal_cache!` for the bounds). The cache is set back after, also
+on an error.
 """
 function with_gdal_cache(f::F, need::Integer) where {F}
     n = Int(need)

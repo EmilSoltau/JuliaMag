@@ -2,13 +2,18 @@
 #
 # Usage:
 #   JULIA_NUM_THREADS=4 julia --project=JuliaMagCore bench/import_grid.jl [N] [--dir DIR] [--keep]
+#   JULIA_NUM_THREADS=4 julia --project=JuliaMagCore bench/import_grid.jl --step STEP N DIR
 #
-# It writes a synthetic Float32 grid of N by N cells (default 20,000: 1.6 GB) three
-# times: as an uncompressed Geosoft .grd, as a compressed Geosoft .grd and as a
-# GeoTIFF. It imports each with `import_file`, exports the first grid to every
-# format with `export_file`, both with `wait_job`, and prints the time, the speed
-# and the memory growth of each step. The files go in a temporary folder that is removed
-# at the end.
+# The first form writes a synthetic Float32 grid of N by N cells (default 20,000:
+# 1.6 GB) three times: as an uncompressed Geosoft .grd, as a compressed Geosoft
+# .grd and as a GeoTIFF. Then it runs each step in a new Julia process (the second
+# form): it imports each file with `import_file`, and exports the grid of the
+# uncompressed .grd to every format with `export_file`, both with `wait_job`.
+#
+# A step runs alone in its process, after a small warm-up, so its memory numbers
+# are not hidden by memory an earlier step freed but the process kept. Each step
+# prints the time, the speed and its memory numbers. The files go in a temporary
+# folder that is removed at the end.
 
 using JuliaMagCore
 import ArchGDAL as AG
@@ -71,52 +76,24 @@ function write_inputs(dir, n)
     return [(name, path) for (name, path, _) in files]
 end
 
-# Resident memory, and the part of it that is not backed by a file.
+# Resident memory, read from the kernel.
 rss_bytes() = parse(Int, split(read("/proc/self/statm", String))[2]) * 4096
-function anon_bytes()
-    for l in eachline("/proc/self/status")
-        startswith(l, "RssAnon:") && return parse(Int, split(l)[2]) * 1024
-    end
-    return 0
-end
 
 mutable struct Sampler
-    peak::Int
-    peak_anon::Int
+    rss::Int
+    live::Int
+    gdal::Int
     stop::Bool
 end
 
+sample!(smp::Sampler) = (smp.rss = max(smp.rss, rss_bytes());
+                         smp.live = max(smp.live, Int(Base.gc_live_bytes()));
+                         smp.gdal = max(smp.gdal, Int(AG.GDAL.gdalgetcacheused64())))
+
 mib(b) = round(b / 2^20; digits = 1)
 
-"""
-Run `f()` (which returns a job), wait for it and print its numbers.
-Growth is the peak sampled every 50 ms minus the value before the step,
-after a garbage collection.
-"""
-function measure(f, label, bytes)
-    GC.gc(); GC.gc()
-    base, base_anon, base_max = rss_bytes(), anon_bytes(), Sys.maxrss()
-    smp = Sampler(base, base_anon, false)
-    t = Threads.@spawn :interactive while !smp.stop
-        smp.peak = max(smp.peak, rss_bytes())
-        smp.peak_anon = max(smp.peak_anon, anon_bytes())
-        sleep(0.05)
-    end
-    local job
-    secs = @elapsed (job = wait_job(f()))
-    smp.stop = true; wait(t)
-    smp.peak = max(smp.peak, rss_bytes())
-    smp.peak_anon = max(smp.peak_anon, anon_bytes())
-    status(job) == JuliaMagCore.JOB_DONE || error("$label ended as $(status(job)): $(job.error)")
-    println(rpad(label, 34), lpad(round(secs; digits = 2), 7), " s, ", lpad(round(bytes / 1e6 / secs; digits = 0), 5),
-            " MB/s, growth ", mib(smp.peak - base), " MiB (not file-backed ", mib(smp.peak_anon - base_anon),
-            " MiB, maxrss ", mib(Sys.maxrss() - base_max), " MiB)")
-    return job
-end
-
-"Import, export and import again a small grid of every kind, so compile time is not in the numbers."
-function warm_up(root)
-    dir = mkpath(joinpath(root, "warm"))
+"Import and export a small grid of every kind, so compile time is not in the numbers."
+function warm_up(dir)
     s = new_session(joinpath(dir, "p"), "warm")
     for (_, path) in write_inputs(dir, 64)
         id = only(wait_job(import_file(s, path)).outputs)
@@ -124,11 +101,58 @@ function warm_up(root)
             wait_job(export_file(s, id, joinpath(dir, "out$ext")))
         end
     end
-    rm(dir; recursive = true)
+    return nothing
+end
+
+const STEPS = ["import-grd" => "import Geosoft .grd", "import-zlib" => "import Geosoft .grd, zlib",
+               "import-tif" => "import GeoTIFF", "export-grd" => "export to .grd",
+               "export-ers" => "export to .ers", "export-tif" => "export to .tif"]
+const INPUTS = Dict("import-grd" => "plain.grd", "import-zlib" => "zlib.grd", "import-tif" => "input.tif")
+
+"""
+Run one step on the files in `root`, in this process, and print its numbers.
+Each import makes its own project `p-<step>`; the exports use the grid of `p-import-grd`.
+The growth numbers are the peaks during the step minus the values just before
+it, after the warm-up and a garbage collection.
+"""
+function run_step(step, n, root)
+    label = Dict(STEPS)[step]
+    redirect_stdout(devnull) do
+        warm_up(mktempdir(root))
+    end
+    if startswith(step, "import")
+        s = new_session(joinpath(root, "p-$step"), "bench")
+        go = () -> import_file(s, joinpath(root, INPUTS[step]))
+        out = ""
+    else
+        s = open_session(joinpath(root, "p-import-grd"))
+        out = joinpath(root, "out." * split(step, "-")[2])
+        go = () -> export_file(s, s.project.items[end].id, out)
+    end
+    GC.gc(); GC.gc()
+    base, live, gdal, top = rss_bytes(), Int(Base.gc_live_bytes()), Int(AG.GDAL.gdalgetcacheused64()), Sys.maxrss()
+    smp = Sampler(base, live, gdal, false)
+    t = Threads.@spawn :interactive while !smp.stop
+        sample!(smp)
+        sleep(0.05)
+    end
+    local job
+    secs = @elapsed (job = wait_job(go()))
+    smp.stop = true; wait(t)
+    sample!(smp)
+    status(job) == JuliaMagCore.JOB_DONE || error("$label ended as $(status(job)): $(job.error)")
+    isempty(out) || (rm(out; force = true); rm(first(splitext(out)); force = true))
+    println(rpad(label, 27), lpad(round(secs; digits = 2), 6), " s ", lpad(round(Int, 4n^2 / 1e6 / secs), 5),
+            " MB/s | RSS ", lpad(mib(smp.rss - base), 6), " | heap ", lpad(mib(smp.live - live), 6),
+            " | GDAL ", lpad(mib(smp.gdal - gdal), 5), " | maxrss ", lpad(mib(Sys.maxrss() - top), 6),
+            " | base ", round(Int, base / 2^20), " MiB")
     return nothing
 end
 
 function main(args)
+    if !isempty(args) && args[1] == "--step"
+        return run_step(args[2], parse(Int, args[3]), args[4])
+    end
     n = 20_000
     keep = false
     dir = ""
@@ -145,23 +169,14 @@ function main(args)
     try
         println("grid of $n by $n Float32 cells (", round(4n^2 / 1e9; digits = 2), " GB of values), ",
                 Threads.nthreads(), " threads")
-        print("warm-up ... ")
-        redirect_stdout(devnull) do
-            warm_up(root)
-        end
-        println("done")
-        inputs = write_inputs(root, n)
-        s = new_session(joinpath(root, "p"), "bench")
-        GC.gc(); GC.gc()
-        println("resident memory before the steps: ", mib(rss_bytes()), " MiB")
-        values = 4n^2
-        # Import each file. The grids hold the same values, so export the first one to every format.
-        ids = [only(measure(() -> import_file(s, path), "import $name", values).outputs) for (name, path) in inputs]
-        for ext in (".grd", ".ers", ".tif")
-            out = joinpath(root, "out$ext")
-            measure(() -> export_file(s, ids[1], out), "export to $ext", values)
-            rm(out; force = true)
-            ext == ".ers" && rm(first(splitext(out)); force = true)
+        write_inputs(root, n)
+        println("Each step runs in a new process. Growth during the step, in MiB:")
+        println("RSS = resident memory; heap = Julia heap (live and not yet collected); ",
+                "GDAL = GDAL block cache in use; maxrss = high-water mark of RSS.")
+        julia = `$(Base.julia_cmd()) --project=$(dirname(Base.active_project()))`
+        for (step, _) in STEPS
+            flush(stdout)                  # keep the order of this output and the step's
+            run(`$julia $(@__FILE__) --step $step $n $root`)
         end
     finally
         keep || rm(root; recursive = true, force = true)

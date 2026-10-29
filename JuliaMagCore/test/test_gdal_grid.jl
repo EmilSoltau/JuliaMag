@@ -87,6 +87,39 @@ end
     @test cachemax() == floor
     # The need of a band: two rows of its blocks.
     @test JuliaMagCore.gdal_cache_need(20_000, 256, Float32) == 2 * 20_000 * 256 * 4
+
+    # The raise has a cap: 1 GiB or an eighth of the memory, whichever is smaller.
+    cap = JuliaMagCore.gdal_cache_cap()
+    @test cap == max(floor, min(2^30, Int(Sys.total_memory() ÷ 8)))
+    # A wide tiled Float64 file: 3e6 cells per row, 256-row tiles, about 12 GB for two rows of tiles.
+    need = JuliaMagCore.gdal_cache_need(3_000_000, 256, Float64)
+    @test need > 10^10
+    JuliaMagCore.with_gdal_cache(need) do
+        @test cachemax() == cap
+    end
+    @test cachemax() == floor
+end
+
+@testset "a GDAL_CACHEMAX the user set is kept" begin
+    cachemax() = AG.GDAL.gdalgetcachemax64()
+    floor = JuliaMagCore.GDAL_CACHE_FLOOR
+    @test !JuliaMagCore.user_gdal_cache()                  # the test runs without the variable
+    users = 300 * 2^20                                     # what GDAL took from the variable
+    AG.GDAL.gdalsetcachemax64(users)
+    try
+        withenv("GDAL_CACHEMAX" => "300") do
+            @test JuliaMagCore.user_gdal_cache()
+            JuliaMagCore.set_gdal_cache!()                 # what `__init__` calls
+            @test cachemax() == users
+            JuliaMagCore.with_gdal_cache(500 * 2^20) do
+                @test cachemax() == users
+            end
+            @test cachemax() == users
+        end
+    finally
+        JuliaMagCore.set_gdal_cache!()
+    end
+    @test cachemax() == floor
 end
 
 @testset "coordinate system text" begin

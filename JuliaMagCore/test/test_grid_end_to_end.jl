@@ -146,15 +146,18 @@ const E2E_GRIDS = joinpath(@__DIR__, "data", "grids")
         end
 
         @testset "a grid of more than one block round trips" begin
-            # 4096 by 1100 Float32 cells are 17.2 MiB: two blocks of at most 16 MiB.
-            nx, ny = 4096, 1100
+            # 4096 Float32 cells per row make blocks of 1024 rows (16 MiB). With 2100 rows a
+            # reader or writer fills two full blocks, the second in the buffer of the first,
+            # and then a short block of 52 rows.
+            nx, ny = 4096, 2100
             A = Float32[sin(i / 37) * 100 + j / 3 for i in 1:nx, j in 1:ny]
             A[1, 1] = A[nx, ny] = NaN32
-            A[:, 1000] .= NaN32                                  # a whole row in the second block
+            A[:, 1500] .= NaN32                                  # a whole row in the second full block
+            A[7, 2090] = NaN32                                   # a cell in the short block
             f = write_test_grd(joinpath(tmp, "big.grd"), A; x0 = 500000.0, y0 = 7000000.0, de = 25.0, dv = 25.0,
                                rot = 12.5)
             id, g, B = load(s, f)
-            @test block_rows(g) < ny
+            @test block_rows(g) == 1024 && 2 * block_rows(g) < ny
             @test isequal(B, A)
             set_grid_crs!(s, id, "EPSG:32633")
             round_trips(s, id, "EPSG:32633"; tag = "big")
