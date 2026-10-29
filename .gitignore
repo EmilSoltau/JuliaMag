@@ -1,0 +1,4 @@
+.superpowers/
+*.cov
+*.mem
+.DS_Store

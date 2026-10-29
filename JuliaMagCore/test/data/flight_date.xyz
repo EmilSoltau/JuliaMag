@@ -1,0 +1,11 @@
+/ X Y MAG
+//Flight 3
+//Date 2024/05/01
+Line 10
+1 2 3
+//Flight 4
+//Date 2024/05/02
+Tie 20
+4 5 6
+L30.2
+7 8 9
