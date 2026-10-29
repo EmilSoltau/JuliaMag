@@ -86,14 +86,15 @@ status(job::Job)::JobStatus = JobStatus(job.status[])
 set_status!(job::Job, st::JobStatus) = (job.status[] = Int(st); nothing)
 
 """
-A change noted with `note_job_undo!`: how to undo, redo and drop it, and the
-ids of the existing items it touches.
+A change noted with `note_job_undo!`: how to undo, redo, drop and commit it,
+and the ids of the existing items it touches.
 """
 struct NotedUndo
     undo::Function
     redo::Function
     drop::Function
     items::Vector{String}
+    commit::Function
 end
 
 """
@@ -167,20 +168,24 @@ function note_job_args!(args::AbstractDict)
 end
 
 """
-    note_job_undo!(undo, redo, drop; items = String[])
+    note_job_undo!(undo, redo, drop; items = String[], commit = nothing_to_commit)
 
 Tell the running job how to undo a change its work made that is not a new item,
 such as rows appended to a database. The job's undo step runs `undo`, its redo
 runs `redo`, and `drop` frees what `undo` kept once redo is no longer possible.
+`commit` frees what the change kept for `undo` once undo is no longer possible,
+which is when the session closes with the job's step on the undo stack (see
+`UndoStep`). It defaults to doing nothing.
 `items` are the ids of the items the change touches; the job's undo step is
 refused while one of them is busy.
 If the job fails after the change, `undo` and then `drop` run at once.
 Outside a job this does nothing.
 """
-function note_job_undo!(undo::Function, redo::Function, drop::Function; items::Vector{String} = String[])
+function note_job_undo!(undo::Function, redo::Function, drop::Function; items::Vector{String} = String[],
+                        commit::Function = nothing_to_commit)
     c = job_context()
     c === nothing && return nothing
-    push!(c.undos, NotedUndo(undo, redo, drop, copy(items)))
+    push!(c.undos, NotedUndo(undo, redo, drop, copy(items), commit))
     append!(c.touched, items)
     return nothing
 end

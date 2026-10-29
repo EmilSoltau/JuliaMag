@@ -38,11 +38,14 @@ struct UndoStep
     commit::Function
 end
 
+"The default `commit` of an `UndoStep` and of `note_job_undo!`: the step keeps nothing for undo."
+nothing_to_commit() = nothing
+
 UndoStep(label, undo, redo) = UndoStep(label, undo, redo, () -> nothing, String[])
 UndoStep(label, undo, redo, drop) = UndoStep(label, undo, redo, drop, String[])
-UndoStep(label, undo, redo, drop, items; commit::Function = () -> nothing) =
+UndoStep(label, undo, redo, drop, items; commit::Function = nothing_to_commit) =
     UndoStep(label, undo, redo, drop, items, true; commit)
-UndoStep(label, undo, redo, drop, items, recorded::Bool; commit::Function = () -> nothing) =
+UndoStep(label, undo, redo, drop, items, recorded::Bool; commit::Function = nothing_to_commit) =
     UndoStep(String(label), undo, redo, drop, collect(String, items), recorded, commit)
 
 """
@@ -134,6 +137,8 @@ step runs, which may take long; `lock` is not.
 Locks are taken in this order only: `undo_lock`, then `lock`, then `jobs_lock`.
 A task that holds one of them may take a later one, never an earlier one.
 So never call `undo!` or `redo!` while holding `lock` or `jobs_lock`.
+The lock of a job report, `HELD_LOCKS_LOCK`, `GDAL_CACHE_LOCK` and `XML_LOCK`
+are leaf locks: no other lock is taken while one of them is held.
 """
 mutable struct Session
     project::Project
@@ -311,31 +316,37 @@ redo stacks, then remove the project lock. A second call does nothing.
 
 Ending the stacks frees what their steps kept: `commit` runs for each step on
 the undo stack, oldest first, and `drop` for each step on the redo stack. Such
-as the folder of a removed item, or the files of a deleted channel. An error
+as the folder of a removed item, the files of a deleted channel, or the folders
+of the outputs that a rerun replaced. An error
 there becomes a warning in `s.warnings`; the close goes on.
 A session that is never closed (a crash, or an exit without close) keeps
 those files.
+The `commit` actions run only while the project lock is still ours. When
+another session opened the project with `force = true`, its project file may
+list those folders again, so they are kept, with a warning.
+The lock is removed also when ending the stacks is interrupted.
 """
 function close_session!(s::Session)
     running = filter(j -> status(j) == JOB_RUNNING, jobs(s))
     foreach(cancel!, running)
     foreach(wait_job, running)
-    end_stacks!(s)
-    held = lock(s.jobs_lock) do
-        old = s.held_lock
-        s.held_lock = nothing
-        return old
+    held = lock(() -> s.held_lock, s.jobs_lock)
+    try
+        end_stacks!(s; commit = held !== nothing && lock_is_ours(held))
+    finally
+        lock(() -> s.held_lock = nothing, s.jobs_lock)
+        held === nothing || release_lock!(held)
     end
-    held === nothing || release_lock!(held)
     return nothing
 end
 
 """
 Empty the undo and redo stacks for good: run `commit` of each undo step, oldest
 first, and `drop` of each redo step. Errors become session warnings.
+With `commit = false`, the undo steps keep what they kept, with one warning.
 Waits for a running `undo!` or `redo!` first.
 """
-function end_stacks!(s::Session)
+function end_stacks!(s::Session; commit::Bool = true)
     done, undone = lock(s.undo_lock) do
         lock(s.lock) do
             stacks = (copy(s.undo_stack), copy(s.redo_stack))
@@ -351,7 +362,14 @@ function end_stacks!(s::Session)
             e isa InterruptException && rethrow()
             session_warning!(s, "undo step \"$(step.label)\" could not $what at close: $(sprint(showerror, e))")
         end
-    foreach(step -> run_quietly(step.commit, "free its files", step), done)
+    filter!(step -> step.commit !== nothing_to_commit, done)
+    if commit
+        foreach(step -> run_quietly(step.commit, "free its files", step), done)
+    elseif !isempty(done)
+        session_warning!(s, "the project lock is no longer held by this session (another session may " *
+                            "have opened the project with force = true), so the files that these undo " *
+                            "steps kept were not deleted: " * join((step.label for step in done), ", "))
+    end
     foreach(step -> run_quietly(step.drop, "free its data", step), undone)
     return nothing
 end

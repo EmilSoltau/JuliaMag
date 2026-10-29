@@ -10,7 +10,9 @@
 # - A finished job is recorded in the history once, with its id, and gets an
 #   undo step. Undo takes its outputs out of the project but keeps their files,
 #   so redo can put them back. When redo is no longer possible, the files of
-#   outputs that are out of the project are deleted.
+#   outputs that are out of the project are deleted. A rerun with replace keeps
+#   the files of the outputs it replaced for undo; they are deleted when the
+#   session closes with the rerun done (the step's `commit`).
 # - Items the work marked busy with `mark_busy!` stay busy until the job ends:
 #   after its undo step is in place, or before a failed job undoes its work.
 # - Each job is saved in `jobs/<id>.json` with its report text.
@@ -273,9 +275,20 @@ function finish_locked!(s::Session, job::Job, items::Vector{ProjectItem}, before
         remove_unused_folders!(p, vcat(new, old))
         nothing
     end
+    # Undo is no longer possible (the session closes with the step done): free
+    # what the noted steps kept, and delete the files of the replaced outputs.
+    keeps = !isempty(old) || any(u -> u.commit !== nothing_to_commit, noted)
+    commit = !keeps ? nothing_to_commit : () -> begin
+        try
+            foreach(u -> u.commit(), noted)
+        finally
+            lock(() -> remove_unused_folders!(p, old), s.lock)
+        end
+        nothing
+    end
     # `undo!` and `redo!` refuse the step while one of these items is busy.
     touched = unique!(vcat(String[it.id for it in new], String[it.id for it in old], ctx.touched))
-    push_undo!(s, UndoStep(job_step_label(job.command, job.id), undo, redo, drop, touched))
+    push_undo!(s, UndoStep(job_step_label(job.command, job.id), undo, redo, drop, touched; commit))
     return nothing
 end
 
@@ -341,8 +354,10 @@ function undo_noted!(s::Session, job::Job, ctx::JobContext)
     undo = () -> (foreach(u -> u.undo(), kept); nothing)
     redo = () -> (foreach(u -> u.redo(), reverse(kept)); nothing)
     drop = () -> (foreach(u -> u.drop(), kept); nothing)
+    commit = all(u -> u.commit === nothing_to_commit, kept) ? nothing_to_commit :
+             () -> (foreach(u -> u.commit(), kept); nothing)
     # A failed job is not in the history, so neither is the undo of what it kept.
-    push_undo!(s, UndoStep("remove rows of failed $(job.id)", undo, redo, drop, items, false))
+    push_undo!(s, UndoStep("remove rows of failed $(job.id)", undo, redo, drop, items, false; commit))
     return nothing
 end
 
@@ -618,11 +633,13 @@ exporter id, such as `"export.csv"`; blank picks the exporter for the kind of
 the item by the extension of `path` (see `exporter_for`). The settings go to
 the exporter, such as `lines`, `channels` or `delimiter`.
 
-The job reports progress by rows and can be cancelled. The file is written to
-`path * ".tmp"` and renamed at the end; on cancel or failure the temp file is
-removed and `path` is not touched. The job makes no project item and has no
-undo step. It is recorded as the exporter id with `item`, `path` and the
-settings. An unknown exporter gives a failed job; nothing is thrown.
+The job reports progress by rows and can be cancelled. Each file is written to
+a temp file next to it, `path.tmp-<random>` (a grid export may write several,
+such as a header and its data file), and renamed at the end; on cancel or
+failure the temp files are removed and `path` is not touched. The job makes no
+project item and has no undo step. It is recorded as the exporter id with
+`item`, `path` and the settings. An unknown exporter gives a failed job;
+nothing is thrown.
 """
 function export_file(s::Session, item_id::AbstractString, path::AbstractString; exporter::AbstractString = "",
                      kwargs...)::Job

@@ -328,19 +328,27 @@ function restore_lock!(h::HeldLock, old::LockRecord)
 end
 
 """
-Remove a lock that this process holds. The file is kept when it is no longer
-ours, such as after another session opened the project with `force = true`,
-or when it cannot be read.
+True when the lock file of `h` still holds our record. False when it is gone,
+cannot be read, or holds another record, such as after another session opened
+the project with `force = true`.
 """
-function release_lock!(h::HeldLock)
-    lock(() -> filter!(x -> x !== h, HELD_LOCKS), HELD_LOCKS_LOCK)
+function lock_is_ours(h::HeldLock)::Bool
     r = try
         read_lock(h.path)
     catch e
         e isa InterruptException && rethrow()
         nothing
     end
-    r == h.record && rm(h.path; force = true)
+    return r == h.record
+end
+
+"""
+Remove a lock that this process holds. The file is kept when it is no longer
+ours (see `lock_is_ours`).
+"""
+function release_lock!(h::HeldLock)
+    lock(() -> filter!(x -> x !== h, HELD_LOCKS), HELD_LOCKS_LOCK)
+    lock_is_ours(h) && rm(h.path; force = true)
     return nothing
 end
 

@@ -283,6 +283,9 @@ new_log() = (String[], ReentrantLock())
         reader = Threads.@spawn begin
             problems, reads = String[], 0
             go[] = true
+            # Wait for the first line with a sleep: with one thread, a loop that
+            # only yields never lets the job wake from its wait for `go`.
+            await(() -> written[] > 0) || push!(problems, "the job never wrote")
             t0 = time()
             while time() - t0 < 1.0
                 text = report_text(j)
@@ -530,6 +533,35 @@ new_log() = (String[], ReentrantLock())
             @test isempty(s2.warnings)
         end
         close_session!(s)                                     # a second close does nothing
+    end
+
+    @testset "a close keeps the files when another session took the project lock" begin
+        (; s, id) = make_db_with(MAG = [1.0, 2.0])
+        folder = JuliaMagCore.item_path(s.project, item(s.project, id))
+        project = s.project.folder
+        rename_item!(s, id, "renamed")                        # keeps nothing for undo
+        remove_item!(s, id)
+        # Another program opens the project with force = true: its project file may list the item.
+        lockfile = joinpath(project, JuliaMagCore.LOCK_FILE)
+        other = JSON3.write(Dict("pid" => 12345, "host" => "other-pc", "user" => "bob",
+                                 "started" => "2026-10-01T08:00:00+0200"))
+        write(lockfile, other)
+        close_session!(s)
+        @test isdir(folder)
+        @test length(s.warnings) == 1
+        @test occursin("force = true", s.warnings[1]) && occursin("remove renamed", s.warnings[1])
+        @test !occursin("rename", replace(s.warnings[1], "remove renamed" => ""))
+        @test read(lockfile, String) == other                     # the other lock stays
+    end
+
+    @testset "an interrupted close still removes the project lock" begin
+        s = fresh_session()
+        project = s.project.folder
+        stop = () -> throw(InterruptException())
+        push_undo!(s, UndoStep("stop", () -> nothing, () -> nothing, () -> nothing, String[]; commit = stop))
+        @test_throws InterruptException close_session!(s)
+        @test !isfile(joinpath(project, JuliaMagCore.LOCK_FILE))
+        close_session!(open_session(project))
     end
 
     @testset "remove_item! clears the cursor on the item, and undo puts it back" begin

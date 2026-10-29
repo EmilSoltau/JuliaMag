@@ -524,6 +524,34 @@ end
     end
 end
 
+@testset "closing the session deletes the folders that a rerun replaced" begin
+    mktempdir() do dir
+        a = joinpath(dir, "a.xyz"); write_synthetic_xyz(a; lines = 2, ties = 0, rows_per_line = 50)
+        # A rerun with replace that is still done at close: the old folder goes.
+        folder = joinpath(dir, "p")
+        s = new_session(folder, "p")
+        dbs = joinpath(folder, "databases")
+        j1 = wait_job(import_file(s, a))
+        j2 = wait_job(rerun!(s, j1; replace = true))
+        @test status(j2) == JOB_DONE && sort(readdir(dbs)) == ["a", "a-2"]
+        close_session!(s)
+        @test isempty(s.warnings)
+        @test readdir(dbs) == ["a-2"]
+        @test with_session(s2 -> ([i.id for i in s2.project.items], s2.warnings), folder) == (j2.outputs, String[])
+        # An undone rerun keeps the old folder; the new one goes with the redo stack.
+        folder = joinpath(dir, "q")
+        s = new_session(folder, "q")
+        dbs = joinpath(folder, "databases")
+        j1 = wait_job(import_file(s, a))
+        wait_job(rerun!(s, j1; replace = true))
+        @test undo!(s)
+        close_session!(s)
+        @test isempty(s.warnings)
+        @test readdir(dbs) == ["a"]
+        @test with_session(s2 -> [i.id for i in s2.project.items], folder) == j1.outputs
+    end
+end
+
 @testset "a dropped step keeps a folder that an item still uses (I5)" begin
     s = fresh_session()
     keep = joinpath(s.project.folder, "grids", "shared")

@@ -350,6 +350,22 @@ end
     @test read_channel(db, CM_L1, "MAG") == [1.0, 2.0, 3.0] && read_channel(db, CM_L2, "MAG") == [0.0, 0.0, 0.0]
 end
 
+@testset "channel math tool: an overwrite leaves no side folder after close" begin
+    s, id = two_line_db()
+    folder = s.project.folder
+    dbf = cm_folder(s, id)
+    @test status(cm_run(s, id; expr = "MAG = MAG * 2", lines = "all")) == JOB_DONE
+    @test length(cm_sides(s, id)) == 1                       # kept for undo
+    close_session!(s)
+    @test isempty(s.warnings)
+    @test !any(startswith(".undo-"), readdir(dbf))
+    # The next open in the same process finds nothing to sweep.
+    s = open_session(folder)
+    @test isempty(s.warnings)
+    @test read_channel(database(s.project, id), CM_L2, "MAG") == [8.0, 10.0, 12.0]
+    close_session!(s)
+end
+
 @testset "channel math tool: refusals" begin
     s, id = two_line_db()
     meta = cm_meta(s, id)
