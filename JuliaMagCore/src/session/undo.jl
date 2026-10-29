@@ -48,8 +48,9 @@ The step runs without `s.lock` (see `UndoStep`). Its items are busy meanwhile,
 with reason `"undo is running"`. A second `undo!` or `redo!` waits for it.
 If the step throws, it stays on the stack and the error is thrown. So does a
 step whose items are busy (`ItemBusyError`), before it runs.
-The undo is recorded as `"session.undo"` so the script repeats it, unless the
-step's change is not in the history (`recorded = false`).
+The undo is recorded as `"session.undo"`, with the label of the step as `step`,
+so the script repeats it, unless the step's change is not in the history
+(`recorded = false`).
 Do not call it while holding `s.lock` (see `Session` for the order of locks).
 """
 undo!(s::Session)::Bool = run_step!(s, true)
@@ -84,7 +85,8 @@ function run_step!(s::Session, undo::Bool)::Bool
                 s.held_edits = nothing
                 try
                     push!(ok ? to() : from(), step)
-                    ok && step.recorded && record!(s, undo ? "session.undo" : "session.redo", Dict{String,Any}())
+                    ok && step.recorded && record!(s, undo ? "session.undo" : "session.redo",
+                                                  Dict{String,Any}("step" => step.label))
                 finally
                     foreach(x -> add_held!(s, x), held)
                 end

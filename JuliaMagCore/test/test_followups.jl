@@ -2,7 +2,7 @@
 # of leftover side folders, settings that a failed quick tool keeps, job reports
 # that are read while a job writes them, job warnings, and the session edits
 # the views need (remove and rename items, channel edits, the marked range and
-# the item-picker setting).
+# the item-picker setting), and scripts that replay on the same project.
 # It runs alone too, with several threads:
 #   julia --project=JuliaMagCore -t 4 JuliaMagCore/test/test_followups.jl
 
@@ -796,5 +796,161 @@ new_log() = (String[], ReentrantLock())
         end
     finally
         unregister_tool!("test.followups.maybe")
+    end
+end
+
+# Saved scripts bind the outputs of each job to a variable, so they replay on
+# the same project too (plan 2, Task 15).
+@testset "scripts replay on the same project" begin
+    var(id) = replace(id, "-" => "_")
+    strip_times(t) = replace(t, r"# \S+ " => "# ")
+    kinds(p, kind) = [i.id for i in p.items if i.kind == kind]
+    grd = testdata(joinpath("grids", "om_float.grd"))
+    code = "EPSG:28355"
+
+    @testset "a script runs twice on the same project and makes new items each time" begin
+        root = mktempdir()
+        folder = joinpath(root, "p")
+        xyz = joinpath(root, "flight.xyz")
+        write_synthetic_xyz(xyz; lines = 2, ties = 0, rows_per_line = 20, channels = ["X", "Y", "MAG"])
+        s = new_session(folder, "P")
+        pre = add_test_database!(s, ["A" => [1.0, 2.0]])     # made before the first history entry
+        id = only(wait_job(import_file(s, xyz)).outputs)
+        job = wait_job(run_tool(s, "database.channel_math"; inputs = Dict("database" => id),
+                                expr = "MAG_C = MAG * 2", lines = "all"))
+        @test status(job) == JOB_DONE
+        gid = only(wait_job(import_file(s, grd)).outputs)
+        @test grid(s.project, gid).crs != code
+        set_grid_crs!(s, gid, code)
+        rename_item!(s, pre, "Before")
+        text = script_text(s)
+        @test occursin("\n$(var(id)) = only(wait_job(import_file(s, $(repr(xyz))", text)
+        @test occursin("\n$(var(gid)) = only(wait_job(import_file(s, $(repr(grd))", text)
+        @test occursin("inputs = Dict(\"database\" => $(var(id)))", text)
+        @test occursin("\nset_grid_crs!(s, $(var(gid)), $(repr(code)))\n", text)
+        @test !occursin(repr(id), text) && !occursin(repr(gid), text)
+        @test occursin("\nrename_item!(s, $(repr(pre)), \"Before\")\n", text)    # older items stay literal
+        @test endswith(text, "\nclose_session!(s)\n")
+        close_session!(s)
+        include_string(Module(), text)
+        include_string(Module(), text)       # the script closed its session, so the project is free
+        p = open_project(folder)
+        dbs = filter(!=(pre), kinds(p, ITEM_DATABASE))
+        grids = kinds(p, ITEM_GRID)
+        @test length(dbs) == 3 && allunique(dbs)
+        @test length(grids) == 3 && allunique(grids)
+        L = LineId(LINE, 1001, 0)
+        for d in dbs
+            db = database(p, d)
+            @test "MAG_C" in [c.name for c in db.channels]
+            @test isequal(collect(read_channel(db, L, "MAG_C")), 2 .* collect(read_channel(db, L, "MAG")))
+        end
+        @test all(g -> grid(p, g).crs == code, grids)
+        @test item(p, pre).name == "Before"
+        with_session(_ -> nothing, folder)     # not locked
+    end
+
+    @testset "a rerun that replaces is recorded, and its undo and redo replay" begin
+        folder = joinpath(mktempdir(), "p")
+        s = new_session(folder, "P")
+        j1 = wait_job(import_file(s, grd))
+        g1 = only(j1.outputs)
+        j2 = wait_job(rerun!(s, j1; replace = true))
+        g2 = only(j2.outputs)
+        e = s.history[end]
+        @test e.job == j2.id && e.replaces == j1.id && e.replaced == [g1]
+        @test undo!(s) && redo!(s)
+        set_grid_crs!(s, g2, code)
+        @test kinds(s.project, ITEM_GRID) == [g2]
+        text = script_text(s)
+        @test occursin("\n$(var(g2)) = only(wait_job(import_file(s, $(repr(grd))", text)
+        @test occursin("\nremove_item!(s, $(var(g1)))\n", text)
+        # the one live undo step is two steps in the script: the import and the removal
+        lines = split(text, '\n')
+        @test count(==("undo!(s)"), lines) == 2 && count(==("redo!(s)"), lines) == 2
+        close_session!(s)
+        h = with_session(s2 -> s2.history, folder)
+        @test h[2].replaces == j1.id && h[2].replaced == [g1]
+        @test with_session(s2 -> strip_times(script_text(s2)), folder) == strip_times(text)
+        include_string(Module(), text)
+        include_string(Module(), text)
+        p = open_project(folder)
+        grids = kinds(p, ITEM_GRID)
+        @test length(grids) == 3 && grids[1] == g2
+        @test all(g -> grid(p, g).crs == code, grids)
+    end
+
+    @testset "a direct import binds its output too, and old history lines take outputs from the job" begin
+        root = mktempdir()
+        folder = joinpath(root, "p")
+        xyz = joinpath(root, "flight.xyz")
+        write_synthetic_xyz(xyz; lines = 1, ties = 0, rows_per_line = 5, channels = ["X", "Y", "MAG"])
+        s = new_session(folder, "P")
+        d = import_xyz(s, xyz; name = "direct").item.id
+        rename_item!(s, d, "Direct")
+        g = only(wait_job(import_file(s, grd)).outputs)
+        set_grid_crs!(s, g, code)
+        @test s.history[1].outputs == [d] && s.history[3].outputs == [g]
+        text = script_text(s)
+        @test occursin("\n$(var(d)) = only(wait_job(import_file(s, $(repr(xyz))", text)
+        @test occursin("\nrename_item!(s, $(var(d)), \"Direct\")\n", text)
+        close_session!(s)
+        # a history file from before entries kept their outputs: the job record has them
+        path = joinpath(folder, "jobs", "history.jsonl")
+        lines = [JSON3.read(l, Dict{String,Any}) for l in eachline(path)]
+        @test haskey(lines[3], "outputs")
+        foreach(l -> delete!(l, "outputs"), lines)
+        write(path, join((JSON3.write(l) for l in lines), "\n") * "\n")
+        old = with_session(script_text, folder)
+        @test occursin("\n$(var(g)) = only(wait_job(import_file(s, $(repr(grd))", old)
+        @test occursin("\nset_grid_crs!(s, $(var(g)), $(repr(code)))\n", old)
+        @test occursin("\nrename_item!(s, $(repr(d)), \"Direct\")\n", old)     # no job record: literal
+        include_string(Module(), text)
+        p = open_project(folder)
+        @test length(kinds(p, ITEM_DATABASE)) == 2 && count(i -> i.name == "Direct", p.items) == 2
+        @test length(kinds(p, ITEM_GRID)) == 2 && all(x -> grid(p, x).crs == code, kinds(p, ITEM_GRID))
+    end
+
+    try
+        register_tool!(ToolSpec("test.followups.factor", "Factor", "", "", Place[], ["database" => ITEM_DATABASE],
+            [NumberSetting("factor", "Factor"; default = 1.0),
+             NumberSetting("count", "Count"; default = 1, integer = true)],
+            :quick, (s, i, st, p, r) -> nothing))
+        @testset "the script of a reopened session is the same as the live one" begin
+            (; s, id, L) = make_db_with(X = [1.0, 2.0], MAG = [5.0, 6.0])
+            folder = s.project.folder
+            @test run_tool(s, "test.followups.factor"; inputs = Dict("database" => id), factor = 3.0, count = 2.0)[1]
+            set_cell!(s, id, L, "MAG", 1, 3.0)
+            out = joinpath(mktempdir(), "out.csv")
+            @test status(wait_job(export_file(s, id, out; channels = ["MAG"]))) == JOB_DONE
+            set_channel_info!(s, id, "MAG"; decimals = 2, width = 10)
+            live = script_text(s)
+            @test occursin("count = 2, factor = 3.0", live)
+            @test occursin("channels = [\"MAG\"]", live)
+            close_session!(s)
+            @test with_session(s2 -> strip_times(script_text(s2)), folder) == strip_times(live)
+        end
+    finally
+        unregister_tool!("test.followups.factor")
+    end
+
+    @testset "a direct grid.set_crs call has its own record name; old history lines still replay" begin
+        s = fresh_session()
+        gid = add_test_grid!(s, [1.0 2.0; 3.0 4.0])
+        set_grid_crs!(s, gid, code)
+        @test s.history[end].command == "grid.set_grid_crs"
+        @test run_tool(s, "grid.set_crs"; inputs = Dict("grid" => gid), crs = "")[1]
+        @test s.history[end].command == "grid.set_crs"
+        text = script_text(s)
+        @test occursin("\nset_grid_crs!(s, $(repr(gid)), $(repr(code)))\n", text)
+        @test occursin("\nwait_job(run_tool(s, \"grid.set_crs\"; crs = \"\", " *
+                       "inputs = Dict(\"grid\" => $(repr(gid)))))\n", text)
+        close_session!(s)
+        # a history line from before this change
+        old = Dict("time" => "t", "command" => "grid.set_crs", "args" => Dict("item" => gid, "crs" => code),
+                   "job" => "")
+        open(io -> println(io, JSON3.write(old)), joinpath(s.project.folder, "jobs", "history.jsonl"), "a")
+        text = with_session(script_text, s.project.folder)
+        @test count("\nset_grid_crs!(s, $(repr(gid)), $(repr(code)))\n", text) == 2
     end
 end

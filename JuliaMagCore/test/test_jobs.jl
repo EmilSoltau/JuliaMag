@@ -552,7 +552,7 @@ end
         L = database_of(s, r).lines[1].id
         set_line_selected!(s, r.item.id, L, false)
         txt = script_text(s)
-        @test occursin("\nwait_job(import_file(s, $(repr(a)); ", txt)
+        @test occursin("\ndb_1 = only(wait_job(import_file(s, $(repr(a)); ", txt)
         c = open_session(start)
         body = join(filter(l -> !startswith(l, "s = open_session"), split(txt, '\n')), "\n")
         Core.eval(@__MODULE__, :(s = $c))

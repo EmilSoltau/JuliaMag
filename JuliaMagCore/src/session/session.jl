@@ -45,13 +45,24 @@ UndoStep(label, undo, redo, drop, items; commit::Function = () -> nothing) =
 UndoStep(label, undo, redo, drop, items, recorded::Bool; commit::Function = () -> nothing) =
     UndoStep(String(label), undo, redo, drop, collect(String, items), recorded, commit)
 
-"One recorded action. `time` is local time as text. `job` is a job id or `\"\"`."
+"""
+One recorded action. `time` is local time as text. `job` is a job id or `\"\"`.
+`outputs` are the ids of the items the action made, such as the database of an
+import. A job run again with `rerun!(...; replace = true)` names the job it
+replaces in `replaces`, and the items that it took out of the project in
+`replaced`. Else they are empty.
+"""
 struct HistoryEntry
     time::String
     command::String
     args::Dict{String,Any}
     job::String
+    outputs::Vector{String}
+    replaces::String
+    replaced::Vector{String}
 end
+
+HistoryEntry(time, command, args, job) = HistoryEntry(time, command, args, job, String[], "", String[])
 
 "Where the user is working: an item, a line and a row."
 mutable struct Cursor
@@ -385,7 +396,10 @@ function load_history(p::Project, warnings::Vector{String})::Vector{HistoryEntry
         isempty(strip(ln)) && continue
         try
             d = plain(JSON3.read(ln; allow_inf = true))::Dict{String,Any}
-            push!(out, HistoryEntry(d["time"], d["command"], d["args"], d["job"]))
+            # Older lines have no "outputs", "replaces" or "replaced".
+            ids(key) = String[x for x in get(d, key, String[])]
+            push!(out, HistoryEntry(d["time"], d["command"], d["args"], d["job"], ids("outputs"),
+                                    get(d, "replaces", ""), ids("replaced")))
         catch e
             e isa InterruptException && rethrow()
             push!(warnings, "$path line $n skipped: $(sprint(showerror, e))")
@@ -397,18 +411,21 @@ end
 now_text() = Libc.strftime("%Y-%m-%dT%H:%M:%S%z", time())
 
 """
-    record!(s, command, args; job = "")
+    record!(s, command, args; job = "", outputs = String[], replaces = "", replaced = String[])
 
 Add an entry to the history and append it to `jobs/history.jsonl`.
+`outputs`, `replaces` and `replaced` are described at `HistoryEntry`.
 Values in `args` must be plain: numbers, strings, booleans, vectors and dictionaries.
 While an undo or redo step runs, the entry is held and written after the step
 (see `Session`), so the history keeps the order of the stacks.
 A held entry that cannot be written then does not throw: it becomes a warning
 in `s.warnings`, and a job warning for the entry of a job (see `add_held!`).
 """
-function record!(s::Session, command::String, args::AbstractDict; job::String = "")
+function record!(s::Session, command::String, args::AbstractDict; job::String = "",
+                 outputs::Vector{String} = String[], replaces::String = "", replaced::Vector{String} = String[])
     lock(s.lock) do
-        e = HistoryEntry(now_text(), command, Dict{String,Any}(String(k) => v for (k, v) in args), job)
+        e = HistoryEntry(now_text(), command, Dict{String,Any}(String(k) => v for (k, v) in args), job,
+                         copy(outputs), replaces, copy(replaced))
         line = history_line(e)                 # a bad value throws now, not later
         held = s.held_edits
         if held !== nothing
@@ -420,8 +437,15 @@ function record!(s::Session, command::String, args::AbstractDict; job::String = 
     end
 end
 
-history_line(e::HistoryEntry)::String =
-    JSON3.write(Dict("time" => e.time, "command" => e.command, "args" => e.args, "job" => e.job); allow_inf = true)
+function history_line(e::HistoryEntry)::String
+    d = Dict{String,Any}("time" => e.time, "command" => e.command, "args" => e.args, "job" => e.job)
+    isempty(e.outputs) || (d["outputs"] = e.outputs)
+    if !isempty(e.replaces)
+        d["replaces"] = e.replaces
+        d["replaced"] = e.replaced
+    end
+    return JSON3.write(d; allow_inf = true)
+end
 
 "Append the entry to the history file and to `s.history`. Call it under `s.lock`."
 function write_history!(s::Session, e::HistoryEntry, line::String = history_line(e))

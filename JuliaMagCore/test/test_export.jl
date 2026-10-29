@@ -299,21 +299,24 @@ end
     @test count(h -> h.job == j.id, s.history) == 1
     @test occursin("rows in 6 lines", report_text(j))
 
-    # The script waits for the export, and the line runs again.
-    line = split(script_text(s), '\n')[end-1]
-    @test line == "wait_job(export_file(s, $(repr(id)), $(repr(path)); exporter = \"export.csv\", " *
+    # The script waits for the export, and the line runs again. The database came
+    # from an import earlier in the history, so the script names it by a variable.
+    v = JuliaMagCore.var_name(id)
+    line = split(script_text(s), '\n')[end-2]       # the last line closes the session
+    @test line == "wait_job(export_file(s, $v, $(repr(path)); exporter = \"export.csv\", " *
                   "channels = [\"MAG\"], delimiter = \";\"))"
     rm(path)
     m = Module()
     Core.eval(m, :(using JuliaMagCore))
     Core.eval(m, :(s = $s))
+    Core.eval(m, :($(Symbol(v)) = $id))
     j2 = Core.eval(m, Meta.parse(line))
     @test status(j2) == JOB_DONE && startswith(read(path, String), "LINE;MAG\n")
 
     # A direct call is recorded and becomes a job in the script too.
     export_xyz(s, id, joinpath(dir, "direct.xyz"); channels = ["X"])
     @test s.history[end].command == "export.geosoft_xyz" && isempty(s.history[end].job)
-    @test startswith(split(script_text(s), '\n')[end-1], "wait_job(export_file(s, $(repr(id)), ")
+    @test startswith(split(script_text(s), '\n')[end-2], "wait_job(export_file(s, $v, ")
 
     # Run again.
     rm(path)

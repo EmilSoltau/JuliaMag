@@ -7,24 +7,20 @@ These are the open points from the reviews that later plans must handle.
 
 ## Must be done before the UI depends on it (plan 2 to 4)
 
-- Saved scripts use literal item ids, so they only replay on a copy of the starting project.
-  Bind outputs to variables before the Run Script UI exists.
-- `rerun!` with `replace = true` is not in the history, so replay keeps both outputs.
 - `Session.warnings` is stored but not shown.
 
 ## Done in plan 2
 
-- Two sessions on one project folder are not coordinated.
-  Add a project lock file.
-  Done in the commit "Lock a project while a session has it open".
-- `undo!` holds `s.lock` while it copies large files (Channel Math overwrite, append undo).
-  This would freeze the UI.
+- Two sessions on one project folder were not coordinated.
+  Done with a project lock file, in the commit "Lock a project while a session has it open".
+- `undo!` held `s.lock` while it copied large files (Channel Math overwrite, append undo).
+  This would have frozen the UI.
   Done in the commit "Run undo steps outside the session lock and sweep leftovers".
-- `.undo-*` side folders left after a crash are never swept.
+- `.undo-*` side folders left after a crash were never swept.
   Done in the same commit: `open_session` removes `.undo-*` and `.importing-*` folders, each with a warning.
-- Settings are remembered before a quick tool runs, so a failed run still changes them.
+- Settings were remembered before a quick tool ran, so a failed run still changed them.
   Done in the same commit: a quick tool remembers its settings only after it ran without error.
-- A job that fails after a finished append, while a reader (export, Statistics, Guess UTM) holds the item, kept the appended rows and had no undo.
+- A job that failed after a finished append, while a reader (export, Statistics, Guess UTM) holds the item, kept the appended rows and had no undo.
   Done in the commit "Make job reports thread safe and show job warnings".
   The job gets a warning, and an undo step "remove rows of failed <job id>" that works once the reader ends.
   The failed job is not in the history, so the undo of that step is not recorded either.
@@ -35,14 +31,31 @@ These are the open points from the reviews that later plans must handle.
 - PROJ warnings were dropped.
   Done in the same commit: the lines PROJ logs reach `with_crs` and `Reprojector`, and a reprojection job shows them as warnings.
   PROJ logs nothing for a ballpark transformation, so the reprojector asks PROJ which operation it used and adds a line for a ballpark one.
-- Jobs have warnings now (`job_warning!`, `job_warnings`), saved in the job record.
+- Jobs had no warnings.
+  Now they have them (`job_warning!`, `job_warnings`), saved in the job record.
   A job that finishes during an undo, and whose held history entry then cannot be written, gets such a warning.
-- Session API gaps: remove an item with undo, undoable channel property edits (unprotect, rename, delete), a setter for the marked range, an item-picker setting type for importer targets.
+- The session API had gaps: remove an item with undo, undoable channel property edits (unprotect, rename, delete), a setter for the marked range, an item-picker setting type for importer targets.
   Done in the commit "Add undoable item and channel edits for the views".
   The new calls are `remove_item!(s, id)`, `rename_item!`, `set_channel_protected!`, `rename_channel!`, `delete_channel!`, `set_channel_info!` and `set_marked!`.
   Each edit except `set_marked!` is undoable, recorded, and replays from a script.
   `ItemSetting` names an item of one kind, and `validate(spec, settings; session = s)` checks it against the project.
   The append target of the CSV and XYZ importers is an `ItemSetting` now.
+- Saved scripts used literal item ids, so they only replayed on a copy of the starting project.
+  Done in the commit "Bind outputs to variables so scripts replay on the same project".
+  The outputs of each job are bound to variables named after their ids, such as `db_1`, and later lines use them.
+  A history entry keeps the ids of the items it made, also for a direct import; older history files take them from the job records.
+  Items from before the first history entry keep their literal ids.
+  A script replays on the same project too, and each run makes new items.
+- `rerun!` with `replace = true` was not in the history, so replay kept both outputs.
+  Done in the same commit: the history entry of the new job names the job it replaces and the items it took out.
+  The script runs the command and then removes those items with `remove_item!`.
+  An undo or redo of that job becomes one `undo!(s)` or `redo!(s)` per script step.
+- A saved script opened its project and did not close it, so it kept the project locked until Julia exited.
+  Done in the same commit: the script ends with `close_session!(s)`.
+- A direct `set_grid_crs!` and the tool `grid.set_crs` were told apart in the script only by an `"item"` argument.
+  Done in the same commit: a direct call is recorded as `"grid.set_grid_crs"`; old history files still replay.
+- A script made from a reopened session could differ from the live one, since JSON reads `3.0` back as `3`.
+  Done in the same commit: the script writes each value in one form, and a number setting in the type the setting keeps.
 
 ## Checks on real systems
 
@@ -59,8 +72,6 @@ These are the open points from the reviews that later plans must handle.
 
 ## Can wait
 
-- A saved script opens its project with `open_session` and does not close it.
-  Run in a REPL, it keeps the project locked until Julia exits.
 - A job that appends and then runs Channel Math on the same item is refused (no caller does this yet).
 - A direct `import_xyz` replays as `import_file`, which adds an undo step the original session did not have.
 - Undo of a job with several noted steps is not retryable as a unit.

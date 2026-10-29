@@ -352,7 +352,9 @@ function import_xyz(s::Session, path::String; name::AbstractString = splitext(ba
         read_xyz!(st)
         return (final_warnings(st.log), st.rows, st.lines)
     end
-    record && record!(s, "import.geosoft_xyz", args)
+    # A new database is an output, so a script can name it by a variable.
+    made = mode == :new && r.item !== nothing ? String[r.item.id] : String[]
+    record && record!(s, "import.geosoft_xyz", args; outputs = made)
     return r
 end
 

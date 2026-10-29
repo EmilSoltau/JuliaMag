@@ -199,7 +199,8 @@ function finish_locked!(s::Session, job::Job, items::Vector{ProjectItem}, before
     try
         foreach(it -> isempty(it.made_by) && (it.made_by = job.id), new)
         swap_items!(p, old, new)
-        record!(s, job.command, job.args; job = job.id)
+        record!(s, job.command, job.args; job = job.id, outputs = String[it.id for it in new],
+                replaces = replaces === nothing ? "" : replaces.id, replaced = String[it.id for it in old])
     catch
         # Leave no half-made item: take the new ones out, delete their files,
         # and undo the other changes the work noted.
@@ -253,9 +254,12 @@ function finish_locked!(s::Session, job::Job, items::Vector{ProjectItem}, before
     end
     # `undo!` and `redo!` refuse the step while one of these items is busy.
     touched = unique!(vcat(String[it.id for it in new], String[it.id for it in old], ctx.touched))
-    push_undo!(s, UndoStep("$(job.command) ($(job.id))", undo, redo, drop, touched))
+    push_undo!(s, UndoStep(job_step_label(job.command, job.id), undo, redo, drop, touched))
     return nothing
 end
+
+"The label of the undo step of a finished job. `script_text` finds the step of a job by it."
+job_step_label(command::AbstractString, id::AbstractString)::String = "$command ($id)"
 
 """
 Delete the folders of the items in `items` that are out of the project, unless
@@ -544,8 +548,11 @@ end
 Run the command of a job again, with the same or new `args` (spec 8.5).
 The command is an importer, an exporter or a `:job` tool.
 With `replace = true`, the outputs of the old job are taken out of the project
-once the new job is done; undo puts them back. An export makes no items, so
-`replace` does nothing for it, and the new export job has no undo step.
+once the new job is done; undo puts them back. The history entry of the new job
+names the old job and the items it took out (see `HistoryEntry`), so a script
+runs the command and then removes those items with `remove_item!`.
+An export makes no items, so `replace` does nothing for it, and the new export
+job has no undo step.
 A command that cannot run again gives a failed job; nothing is thrown.
 """
 function rerun!(s::Session, job::Job; args::AbstractDict = job.args, replace::Bool = false)::Job

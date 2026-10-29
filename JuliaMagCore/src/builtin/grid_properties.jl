@@ -67,7 +67,8 @@ change_grid_crs!(s::Session, id::AbstractString, code::String) =
     set_grid_crs!(s, id, crs)
 
 Set the coordinate system of grid `id`, such as `"EPSG:32633"`. Blank means
-unknown. Changes `grid.json` only. Undoable and recorded as `"grid.set_crs"`.
+unknown. Changes `grid.json` only. Undoable and recorded as `"grid.set_grid_crs"`
+(the tool `"grid.set_crs"` is recorded under its own id).
 Throws `ArgumentError` for a code PROJ does not know, and `ItemBusyError` while
 an import or an export uses the grid.
 """
@@ -76,7 +77,7 @@ function set_grid_crs!(s::Session, id::AbstractString, crs::AbstractString)
     isempty(code) || valid_crs(code) || throw(ArgumentError("coordinate system \"$code\" is not known"))
     lock(s.lock) do
         change_grid_crs!(s, id, code)
-        record!(s, "grid.set_crs", Dict{String,Any}("item" => String(id), "crs" => code))
+        record!(s, "grid.set_grid_crs", Dict{String,Any}("item" => String(id), "crs" => code))
     end
     return nothing
 end

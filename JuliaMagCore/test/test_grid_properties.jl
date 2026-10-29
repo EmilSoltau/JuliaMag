@@ -83,7 +83,8 @@ end
     s, id = grid_session()
     set_grid_crs!(s, id, "EPSG:32633")
     @test grid(s.project, id).crs == "EPSG:32633"
-    @test last(s.history).command == "grid.set_crs" && last(s.history).args == Dict("item" => id, "crs" => "EPSG:32633")
+    @test last(s.history).command == "grid.set_grid_crs"
+    @test last(s.history).args == Dict("item" => id, "crs" => "EPSG:32633")
     undo!(s); @test grid(s.project, id).crs == ""
     redo!(s); @test grid(s.project, id).crs == "EPSG:32633"
     set_grid_crs!(s, id, "")

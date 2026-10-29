@@ -690,7 +690,9 @@ function import_csv(s::Session, path::String, layout::CsvLayout; name::AbstractS
         read_csv!(st)
         return (final_warnings(st.log), st.rows, st.lines)
     end
-    record && record!(s, "import.csv", args)
+    # A new database is an output, so a script can name it by a variable.
+    made = mode == :new && r.item !== nothing ? String[r.item.id] : String[]
+    record && record!(s, "import.csv", args; outputs = made)
     return r
 end
 
