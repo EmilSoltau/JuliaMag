@@ -84,9 +84,9 @@ println("Grid export: ", status(job), ", ", round(filesize(tif) / 1000; digits =
 undo!(s)
 println("After undo: ", grid(s.project, gid).crs)
 
-# Save the history as a Julia script. It repeats these steps on a copy of the
-# project as it was at the start. It uses the item ids of this session, such as
-# db-1, so running it on this project again would make new ids.
+# Save the history as a Julia script. It keeps the items each job makes in
+# variables, such as db_1, so it repeats these steps on this project too, not
+# only on a copy of it. Each run makes new items with new ids.
 script = joinpath(work, "steps.jl")
 write(script, script_text(s))
 println("Script saved to ", script)

@@ -58,5 +58,8 @@ Items that were in the project before the first history entry are named by their
 A job run again with `rerun!(...; replace = true)` replays as its command, followed by `remove_item!` for each item it replaced.
 `check = true` makes the script stop with a plain message at a job that failed or was cancelled.
 The lines run inside `try ... finally close_session!(s) end`, so the script does not leave the project locked, also when it stops part-way.
+The script opens its own session.
+So close the current session on the same project before you run the script in the same Julia process, or the script stops with `ProjectLockedError`.
+The variables of the script are local to its `try` block, so they are gone when the script ends.
 
 `docs/bench.md` has the import and export speed and memory numbers for big files and grids.

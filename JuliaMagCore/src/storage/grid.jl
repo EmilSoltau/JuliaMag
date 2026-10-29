@@ -49,8 +49,10 @@ GridSource() = GridSource("", "", "", "")
 """
 A grid stored in `folder`.
 
-`vmin`, `vmax` and `count` (cells that are not `NaN`) are kept up to date by
-every writer of the grid.
+`vmin`, `vmax` and `count` (cells that are not `NaN`) describe the values.
+The import sink sets them when it writes the grid. The raw writers
+`write_rows!` and `with_grid_values(...; write = true)` do not: code that
+changes values with them must set the three itself and call `save_grid_meta`.
 """
 mutable struct Grid
     folder::String
