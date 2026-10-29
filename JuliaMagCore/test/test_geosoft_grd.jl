@@ -507,7 +507,7 @@ le(::Type{T}, b, off) where {T} = ltoh(only(reinterpret(T, b[off + 1:off + sizeo
             id = make(s, Float32)
             d = mkpath(joinpath(tmp, "cancel"))
             f = joinpath(d, "c.grd")
-            # A test exporter that cancels its own job, then writes: the cancel is seen after the first block.
+            # A test exporter that cancels its own job before it starts: the export stops before any file is made.
             register_exporter!(ExporterSpec("export.test_grd_cancel", "Cancel test", ".grd_cancel_test", ITEM_GRID,
                 SettingSpec[], (s, item_id, path, settings, progress) -> begin
                     cancel!(only(filter(j -> j.command == "export.test_grd_cancel" && status(j) == JOB_RUNNING,
@@ -518,17 +518,53 @@ le(::Type{T}, b, off) where {T} = ltoh(only(reinterpret(T, b[off + 1:off + sizeo
             j = wait_job(export_file(s, id, f; exporter = "export.test_grd_cancel"))
             @test status(j) == JOB_CANCELLED
             @test isempty(readdir(d))
+
+            # A cancel seen after the first block, while the temp .grd is half written.
+            # 2^20 by 5 Float32 cells are 20 MiB: two blocks of at most 16 MiB.
+            h = GridHeader(2^20, 5, 1.0, 1.0, 0.0, 0.0, 0.0, "", "", Float32, GridSource())
+            big = import_grid(sink -> put_rows!(sink, 1, ones(Float32, 2^20, 5)), s, "big", h).item.id
+            @test block_rows(grid(s.project, big)) < 5
+            seen = Ref{Vector{String}}(String[])
+            register_exporter!(ExporterSpec("export.test_grd_mid_cancel", "Cancel test", ".grd_mid_cancel_test",
+                ITEM_GRID, SettingSpec[], (s, item_id, path, settings, progress) -> begin
+                    stop = Ref(false)
+                    p = Progress(x -> (x > 0 && !stop[] && (seen[] = readdir(d); stop[] = true); nothing),
+                                 () -> stop[])
+                    export_geosoft_grd(s, item_id, path; progress = p, record = false)
+                end))
+            j = wait_job(export_file(s, big, f; exporter = "export.test_grd_mid_cancel"))
+            @test status(j) == JOB_CANCELLED
+            @test length(seen[]) == 1 && startswith(only(seen[]), "c.grd.tmp-")   # the half-written temp file
+            @test isempty(readdir(d))
+            @test check_not_busy(s, big) === nothing                            # the read mark is released
+
             # An old target and its .xml are kept as they were.
             write(f, "old"); write(f * ".xml", "old xml")
-            j = wait_job(export_file(s, id, f; exporter = "export.test_grd_cancel"))
-            @test status(j) == JOB_CANCELLED
-            @test sort(readdir(d)) == ["c.grd", "c.grd.xml"] && read(f, String) == "old"
+            for e in ("export.test_grd_cancel", "export.test_grd_mid_cancel")
+                j = wait_job(export_file(s, big, f; exporter = e))
+                @test status(j) == JOB_CANCELLED
+                @test sort(readdir(d)) == ["c.grd", "c.grd.xml"] && read(f, String) == "old"
+                @test read(f * ".xml", String) == "old xml"
+            end
             @test length(s.history) == n
             # The .xml target is a folder: the export fails and leaves no temp files.
             rm(f * ".xml"); mkdir(f * ".xml")
             j = wait_job(export_file(s, id, f))
             @test status(j) == JOB_FAILED && occursin("c.grd.xml is a folder", j.error)
             @test sort(readdir(d)) == ["c.grd", "c.grd.xml"] && read(f, String) == "old"
+            @test check_not_busy(s, id) === nothing
+        end
+
+        @testset "an old .gi that cannot be removed is a note" begin
+            f = joinpath(tmp, "held.grd")
+            mkpath(joinpath(f * ".gi", "inside"))            # a folder that is not empty: rm fails
+            n = length(s.history)
+            job = wait_job(export_file(s, make(s, Float32), f))
+            @test status(job) == JOB_DONE && isfile(f) && isfile(f * ".xml")
+            @test occursin("The old held.grd.gi could not be removed; delete it by hand, " *
+                           "or Oasis may read a wrong coordinate system from it.", report_text(job))
+            @test length(s.history) == n + 1
+            @test isempty(temps(tmp))
         end
 
         @testset "a database is not exported to .grd" begin

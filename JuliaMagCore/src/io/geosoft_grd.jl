@@ -459,7 +459,8 @@ end
 Write grid `item_id` to a Geosoft grid file (spec 7), and its coordinate
 system to `<path>.xml` (that is `name.grd.xml`, see `write_grd_xml`). No `.gi`
 file is written. An old `<path>.gi` is removed, since it holds the
-coordinate system of the grid that was there before.
+coordinate system of the grid that was there before. When it cannot be
+removed, the export still succeeds, with a note in the report.
 
 The file is uncompressed and keeps the grid's type: `ES = 4` for a `Float32`
 grid and `ES = 8` for a `Float64` grid, `SF = 2`. It holds rows (`KX = 1`),
@@ -479,7 +480,10 @@ function export_geosoft_grd(s::Session, item_id::AbstractString, path::AbstractS
     return run_grid_export(s, "export.geosoft_grd", item_id, path, progress, record) do x
         write_output(io -> write_grd!(io, x), x, x.path)
         notes = write_output(io -> write_grd_xml(io, x), x, x.path * ".xml")
-        remove_after!(x, x.path * ".gi", "it held the coordinate system of the grid that was there before")
+        gi = x.path * ".gi"
+        remove_after!(x, gi, "it held the coordinate system of the grid that was there before",
+                      "The old $(basename(gi)) could not be removed; delete it by hand, " *
+                      "or Oasis may read a wrong coordinate system from it.")
         return notes
     end
 end

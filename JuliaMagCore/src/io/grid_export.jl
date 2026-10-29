@@ -25,8 +25,8 @@ struct GridExport
     ticker::RowProgress
     "Each temp file and the file it becomes, in the order they were started."
     files::Vector{Pair{String,String}}
-    "Old files to remove once the new files are in place, and why, for the report."
-    remove::Vector{Pair{String,String}}
+    "Old files to remove once the new files are in place: the path, why, and the note when it cannot be removed."
+    remove::Vector{NTuple{3,String}}
 end
 
 """
@@ -44,12 +44,13 @@ function write_output(f::F, x::GridExport, path::String) where {F}
 end
 
 """
-    remove_after!(x, path, why)
+    remove_after!(x, path, why, stuck)
 
 Remove the old file `path`, if there is one, once the new files of export `x`
-are in place. `why` ends the note in the report.
+are in place. `why` ends the note in the report. When it cannot be removed,
+the export still succeeds and `stuck` is the note instead.
 """
-remove_after!(x::GridExport, path::String, why::String) = (push!(x.remove, path => why); nothing)
+remove_after!(x::GridExport, path::String, why::String, stuck::String) = (push!(x.remove, (path, why, stuck)); nothing)
 
 """
     each_row_block(f, x)
@@ -73,7 +74,8 @@ end
 
 """
 Move every temp file of `x` to its target, then remove the old files of
-`remove_after!`. Returns the notes for the removed files. If a move fails, the
+`remove_after!`. Returns the notes for the removed files, and for those that
+could not be removed. If a move fails, the
 temp files not yet moved are removed; files already moved stay.
 """
 function commit_output!(x::GridExport)::Vector{String}
@@ -85,11 +87,18 @@ function commit_output!(x::GridExport)::Vector{String}
             rethrow()
         end
     end
+    # The new files are in place, so a file that cannot be removed (on Windows,
+    # one that another program holds open) is a note, not a failed export.
     notes = String[]
-    for (path, why) in x.remove
-        isfile(path) || continue
-        rm(path)
-        push!(notes, "Removed $(basename(path)): $why.")
+    for (path, why, stuck) in x.remove
+        ispath(path) || continue
+        try
+            rm(path)
+            push!(notes, "Removed $(basename(path)): $why.")
+        catch e
+            e isa Base.IOError || e isa SystemError || rethrow()
+            push!(notes, stuck)
+        end
     end
     return notes
 end
@@ -119,7 +128,7 @@ function run_grid_export(write_body::F, s::Session, command::String, item_id::Ab
     local g::Grid
     try
         g, name = lock(() -> (grid(s.project, item_id), item(s.project, item_id).name), s.lock)
-        x = GridExport(g, name, path, RowProgress(progress, g.ny), Pair{String,String}[], Pair{String,String}[])
+        x = GridExport(g, name, path, RowProgress(progress, g.ny), Pair{String,String}[], NTuple{3,String}[])
         try
             check_export_cancel(x.ticker)
             append!(notes, write_body(x))
