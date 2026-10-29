@@ -1,4 +1,5 @@
 # Grid import through GDAL: GeoTIFF, ER Mapper, and Surfer (Task 6 forces the driver).
+# Grid export through GDAL: GeoTIFF and ER Mapper (see "export" below).
 #
 # The file is opened read-only. One band is read in blocks of rows with
 # `ArchGDAL.read!`, turned into real values (nodata becomes `NaN`, band scale
@@ -100,13 +101,15 @@ function import_gdal_band(s::Session, ds::ArchGDAL.Dataset, path::String, n::Int
     ny = Int(ArchGDAL.height(ds))
     drv = ArchGDAL.getdriver(ds)
     gt = geotransform(ds)
-    if gt === nothing && ArchGDAL.shortname(drv) == "ERS"
+    # ER Mapper names coordinate systems its own way, such as NUTM33 (see `crs_from_wkt`).
+    ers = ArchGDAL.shortname(drv) == "ERS"
+    if gt === nothing && ers
         gt = ers_meters_transform(path)
     end
     if gt === nothing
         push!(warnings, ImportWarning(0, "The file has no georeference. The cells are 1 by 1, from 0, 0."))
         gt = (0.0, 1.0, 0.0, Float64(ny), 0.0, -1.0)
-    elseif ArchGDAL.shortname(drv) == "ERS"
+    elseif ers
         gt = ers_rotated(path, gt)
     end
     geo = georef_from_affine(gt, nx, ny)
@@ -122,7 +125,7 @@ function import_gdal_band(s::Session, ds::ArchGDAL.Dataset, path::String, n::Int
     compression = ArchGDAL.metadataitem(ds, "COMPRESSION"; domain = "IMAGE_STRUCTURE")
     source = GridSource(path, ArchGDAL.longname(drv), lowercase(string(T)), compression)
     header = GridHeader(nx, ny, geo.dx, geo.dy, geo.x0, geo.y0, geo.rotation,
-                        crs_from_wkt(ArchGDAL.getproj(ds)), ArchGDAL.getunittype(band), O, source)
+                        crs_from_wkt(ArchGDAL.getproj(ds); any_name = ers), ArchGDAL.getunittype(band), O, source)
     name = splitext(basename(path))[1]
     fill = sink -> read_band!(sink, band, W, O, nodata, scale, offset, geo.bottom_up)
     return import_grid(fill, s, name, header; warnings, progress)
@@ -263,6 +266,181 @@ function ers_rotated(path::String, gt::NTuple{6,Float64})::NTuple{6,Float64}
     return (ex - rx * a * c + ry * d * s, a * c, -d * s, ey - rx * a * s - ry * d * c, a * s, d * c)
 end
 
+# ---- export ------------------------------------------------------------------
+
+"The GDAL creation options of a GeoTIFF export (spec 7)."
+const GEOTIFF_OPTIONS = ["COMPRESS=DEFLATE", "PREDICTOR=3", "TILED=YES", "BIGTIFF=IF_SAFER"]
+
+"What an ER Mapper export writes for `NaN`: the Geosoft float dummy, so Oasis reads the dummies."
+const ERS_NODATA = -1.0e32
+
+"""
+Write the grid of export `x` with the GDAL driver `driver` to the temp file
+`tmp`: one band of the grid's type, with the affine transform `gt`, the
+coordinate system as WKT, and `NaN` written as `nodata`. Rows are written in
+blocks, north row first, as GDAL stores them. The file is closed before this
+returns, also on an error or a cancel. Returns the notes for the report.
+"""
+function write_gdal_grid!(x::GridExport, tmp::String, driver::String, options::Vector{String},
+                          gt::NTuple{6,Float64}, nodata::Float64)::Vector{String}
+    g = x.grid
+    T = g.eltype
+    wkt = isempty(g.crs) ? "" : crs_wkt(g.crs)
+    notes = String[]
+    isempty(g.crs) || !isempty(wkt) ||
+        push!(notes, "PROJ could not read the coordinate system of the grid, so $(basename(x.path)) has none.")
+    gdal_errors() do
+        ds = ArchGDAL.unsafe_create(tmp; driver = ArchGDAL.getdriver(driver), width = g.nx, height = g.ny,
+                                    nbands = 1, dtype = T, options)
+        ds.ptr == C_NULL && throw(GridError("GDAL could not create $tmp"))
+        try
+            v = collect(gt)
+            GC.@preserve v ArchGDAL.setgeotransform!(ds, v)   # ArchGDAL passes a bare pointer
+            isempty(wkt) || ArchGDAL.setproj!(ds, wkt)
+            band = ArchGDAL.getband(ds, 1)
+            ArchGDAL.setnodatavalue!(band, nodata)
+            dummy = T(nodata)
+            each_row_block(x; north_first = true) do j1, block
+                isnan(dummy) || replace_nan!(block, dummy)
+                reverse!(block; dims = 2)                  # north row first, as stored
+                n = size(block, 2)
+                r1 = g.ny - (j1 + n - 1) + 1               # grid row j is stored row ny - j + 1
+                GC.@preserve block ArchGDAL.write!(band, block, r1:(r1 + n - 1), 1:g.nx)
+            end
+        finally
+            ArchGDAL.destroy(ds)                           # close before the rename (Windows)
+        end
+    end
+    return notes
+end
+
+"Set each `NaN` of `block` to `dummy`."
+function replace_nan!(block::Matrix{T}, dummy::T) where {T}
+    @inbounds for k in eachindex(block)
+        isnan(block[k]) && (block[k] = dummy)
+    end
+    return block
+end
+
+"""
+Remove an old `<path>.aux.xml` once the new files of export `x` are in place.
+GDAL reads such a file with the grid, and its coordinate system or nodata
+would override those of the new file.
+"""
+remove_old_aux!(x::GridExport) =
+    remove_after!(x, x.path * ".aux.xml", "GDAL would read its old settings with the new grid",
+                  "The old $(basename(x.path)).aux.xml could not be removed; delete it by hand, " *
+                  "or GDAL may read wrong settings from it.")
+
+"""
+    export_geotiff(s, item_id, path; progress = NO_PROGRESS, record = true)::ExportResult
+
+Write grid `item_id` to a GeoTIFF file through GDAL (spec 7): one band of the
+grid's type, `NaN` cells as `NaN` with nodata `NaN`, the coordinate system as
+WKT, and the affine transform of `affine_from_grid` (the rotation is kept).
+The creation options are `GEOTIFF_OPTIONS`. An old `<path>.aux.xml` is removed.
+
+The grid is busy for reading while the export runs (ruling R12). Rows are
+written in blocks, north row first; cancel is checked once per block. The file
+is written to a temp name and renamed when complete, so a cancel or a failure
+leaves no new file. Recorded as `"export.geotiff"` unless `record` is false.
+"""
+function export_geotiff(s::Session, item_id::AbstractString, path::AbstractString;
+                        progress::Progress = NO_PROGRESS, record::Bool = true)::ExportResult
+    return run_grid_export(s, "export.geotiff", item_id, path, progress, record) do x
+        tmp = output_path!(x, x.path)
+        notes = write_gdal_grid!(x, tmp, "GTiff", GEOTIFF_OPTIONS, affine_from_grid(x.grid), NaN)
+        remove_old_aux!(x)
+        return notes
+    end
+end
+
+"""
+    export_ers(s, item_id, path; progress = NO_PROGRESS, record = true)::ExportResult
+
+Write grid `item_id` to an ER Mapper header `path` (it must end in `.ers`) and
+its data file, `path` without `.ers`, through GDAL (spec 7). The data has the
+grid's type, north row first; `NaN` is written as `-1.0e32` with
+`NullCellValue = -1e+32`, the Geosoft float dummy, so Oasis reads the dummies.
+
+GDAL refuses a rotated affine transform for ER Mapper. So GDAL writes the grid
+without rotation, registered at the outer north-west corner, and `Rotation`
+in the header is then set to the grid's rotation (`ers_dms`). ER Mapper turns
+the grid about that corner, which gives the grid's own georeference
+(`ers_rotated` reads it back the same way). An old `<path>.aux.xml` is removed.
+A coordinate system that ER Mapper has no name for is lost, with a note in
+the report.
+
+Both files are written to temp names and renamed when complete. See
+`export_geotiff` for the busy mark, cancel and the history.
+"""
+function export_ers(s::Session, item_id::AbstractString, path::AbstractString;
+                    progress::Progress = NO_PROGRESS, record::Bool = true)::ExportResult
+    lowercase(file_extension(String(path))) == ".ers" ||
+        throw(ToolError("The ER Mapper file $path must end in .ers, since its data file is the same name without .ers."))
+    return run_grid_export(s, "export.ers", item_id, path, progress, record) do x
+        g = x.grid
+        # GDAL names the data file after the header: header `t.ers`, data file `t`.
+        # The data file is first in the list, so it is renamed before the header.
+        tmp = output_path!(x, String(chop(x.path; tail = 4)))
+        header = output_path!(x, x.path; tmp = tmp * ".ers")
+        gx, _, _, gy, _, _ = affine_from_grid(g)       # the north-west corner, which rotation keeps
+        notes = write_gdal_grid!(x, header, "ERS", String[], (gx, g.dx, 0.0, gy, 0.0, -g.dy), ERS_NODATA)
+        # GDAL writes the RAW projection when ER Mapper has no name for the coordinate system.
+        if isempty(notes) && !isempty(g.crs) && ers_field(ers_header(header), "Projection") in (nothing, "RAW")
+            push!(notes, "ER Mapper has no name for the coordinate system of the grid, so " *
+                         "$(basename(x.path)) has none. Export to GeoTIFF to keep it.")
+        end
+        set_ers_header!(header, basename(x.path), g.rotation)
+        remove_old_aux!(x)
+        return notes
+    end
+end
+
+"""
+Set `Name` to the final file name `name` and `Rotation` to `rotation` degrees
+in the ER Mapper header `path` that GDAL wrote. GDAL writes no `DataFile`, so
+the data file is the header name without `.ers`, which the rename keeps.
+For a grid with no coordinate system GDAL writes no `CoordinateSpace`; the
+header then gets one with the `RAW` datum and projection, which ER Mapper
+needs and which holds the rotation.
+"""
+function set_ers_header!(path::String, name::String, rotation::Float64)
+    text = read(path, String)
+    space = r"^\s*CoordinateSpace Begin\s*$"m
+    if !occursin(space, text)
+        raster = ers_entry(text, r"^\s*RasterInfo Begin\s*$"m, "RasterInfo block")
+        block = "\tCoordinateSpace Begin\n\t\tDatum\t= \"RAW\"\n\t\tProjection\t= \"RAW\"\n" *
+                "\t\tCoordinateType\t= EN\n\t\tRotation\t= 0:0:0.0\n\tCoordinateSpace End\n"
+        text = replace(text, raster => line -> block * line)
+    end
+    ers_entry(text, space, "CoordinateSpace block")
+    for (r, what, value) in ((r"^\s*Name\s*=.*$"m, "Name entry", "\"$name\""),
+                             (r"^\s*Rotation\s*=.*$"m, "Rotation entry", ers_dms(rotation)))
+        text = replace(text, ers_entry(text, r, what) => line -> line[1:something(findfirst('=', line))] * " " * value)
+    end
+    write(path, text)
+    return nothing
+end
+
+"Return `r`, or throw `GridError` when the header `text` does not match it once."
+function ers_entry(text::String, r::Regex, what::String)::Regex
+    count(r, text) == 1 || throw(GridError("the ER Mapper header that GDAL wrote has no single $what"))
+    return r
+end
+
+"""
+An angle in degrees as ER Mapper writes it: `degrees:minutes:seconds`, such
+as `15:0:0.0` or `-33:18:0.0`. The seconds are rounded to a nano second of arc
+(about 3e-13 degrees), so `ers_angle` reads back the same angle to that.
+"""
+function ers_dms(θ::Float64)::String
+    n = round(Int64, abs(θ) * 3600e9)          # nano seconds of arc
+    d, r = divrem(n, 3_600_000_000_000)
+    m, ns = divrem(r, 60_000_000_000)
+    return (θ < 0 && n > 0 ? "-" : "") * "$d:$m:$(plain_decimal(string(ns / 1e9)))"
+end
+
 # ---- importers ---------------------------------------------------------------
 
 run_geotiff_importer(s::Session, path::String, settings::AbstractDict, progress::Progress)::ImportResult =
@@ -275,3 +453,20 @@ register_importer!(ImporterSpec("import.geotiff", "GeoTIFF", [".tif", ".tiff"], 
                                 GDAL_GRID_SETTINGS, run_geotiff_importer))
 register_importer!(ImporterSpec("import.ers", "ER Mapper", [".ers"], ITEM_GRID,
                                 GDAL_GRID_SETTINGS, run_ers_importer))
+
+"Run the GeoTIFF exporter. It has no settings. Not recorded: the job that runs it records it."
+function run_geotiff_exporter(s::Session, item_id::String, path::String, settings::AbstractDict,
+                              progress::Progress)::ExportResult
+    spec_values(SettingSpec[], settings, "GeoTIFF export")
+    return export_geotiff(s, item_id, path; progress, record = false)
+end
+
+"Run the ER Mapper exporter. It has no settings. Not recorded: the job that runs it records it."
+function run_ers_exporter(s::Session, item_id::String, path::String, settings::AbstractDict,
+                          progress::Progress)::ExportResult
+    spec_values(SettingSpec[], settings, "ER Mapper export")
+    return export_ers(s, item_id, path; progress, record = false)
+end
+
+register_exporter!(ExporterSpec("export.geotiff", "GeoTIFF", ".tif", ITEM_GRID, SettingSpec[], run_geotiff_exporter))
+register_exporter!(ExporterSpec("export.ers", "ER Mapper", ".ers", ITEM_GRID, SettingSpec[], run_ers_exporter))

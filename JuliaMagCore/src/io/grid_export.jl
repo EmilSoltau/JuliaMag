@@ -1,10 +1,13 @@
 # The frame of every grid export (spec 7). Each format writes its files with
-# `run_grid_export`; Geosoft `.grd` is in `geosoft_grd.jl`.
+# `run_grid_export`; Geosoft `.grd` is in `geosoft_grd.jl`, GeoTIFF and
+# ER Mapper are in `gdal_grid.jl`.
 #
 # - While it runs, an export marks its grid busy for reading (`mark_reading!`,
 #   ruling R12), so edits of the grid wait with `ItemBusyError`.
 # - Rows are read in blocks of at most `GRID_BLOCK_BYTES` (`each_row_block`),
 #   so memory stays flat however large the grid is.
+# - A writer that opens its files itself, such as GDAL, gets the temp name
+#   from `output_path!`.
 # - An export may write several files, such as a `.grd` and its `.grd.xml`.
 #   Each is written to a temp name next to it (`path.tmp-<random>`). Only when
 #   all are complete are they renamed, one after the other. On an error or a
@@ -36,11 +39,20 @@ Call `f(io)` to write the file `path` of export `x`, and return what `f`
 returns. The file is written to a temp name; `run_grid_export` renames it once
 every file of the export is complete.
 """
-function write_output(f::F, x::GridExport, path::String) where {F}
+write_output(f::F, x::GridExport, path::String) where {F} = open(f, output_path!(x, path), "w")
+
+"""
+    output_path!(x, path; tmp = export_temp_path(path))::String
+
+Add the file `path` to export `x` and return the temp name to write it to, for
+a writer that opens the file itself, such as GDAL. `run_grid_export` renames
+the temp file to `path` once every file of the export is complete, and removes
+it on a failure or a cancel. Close the file before the export ends.
+"""
+function output_path!(x::GridExport, path::String; tmp::String = export_temp_path(path))::String
     isdir(path) && throw(ToolError("$path is a folder. Give the name of a file to export to."))
-    tmp = export_temp_path(path)
     push!(x.files, tmp => path)          # before the file exists, so a failure removes it
-    return open(f, tmp, "w")
+    return tmp
 end
 
 """
@@ -53,21 +65,23 @@ the export still succeeds and `stuck` is the note instead.
 remove_after!(x::GridExport, path::String, why::String, stuck::String) = (push!(x.remove, (path, why, stuck)); nothing)
 
 """
-    each_row_block(f, x)
+    each_row_block(f, x; north_first = false)
 
-Call `f(j1, block)` for each block of rows of the grid of `x`, south row first.
-`block` is a new `nx` by `n` matrix of rows `j1` on, which `f` may change.
-Reports progress and checks for cancel after each block.
+Call `f(j1, block)` for each block of rows of the grid of `x`, south row first,
+or north row first when `north_first`. `block` is a new `nx` by `n` matrix of
+rows `j1` to `j1 + n - 1` (south row first inside the block), which `f` may
+change. Reports progress and checks for cancel after each block.
 """
-function each_row_block(f::F, x::GridExport) where {F}
+function each_row_block(f::F, x::GridExport; north_first::Bool = false) where {F}
     g = x.grid
     n = block_rows(g)
-    j1 = 1
-    while j1 <= g.ny
-        k = min(n, g.ny - j1 + 1)
+    left = g.ny                          # rows not yet read
+    while left > 0
+        k = min(n, left)
+        j1 = north_first ? left - k + 1 : g.ny - left + 1
         f(j1, read_rows(g, j1, k))
         rows_done!(x.ticker, k)
-        j1 += k
+        left -= k
     end
     return nothing
 end

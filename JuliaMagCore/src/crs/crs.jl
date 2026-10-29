@@ -104,43 +104,89 @@ function crs_axis_unit(code::AbstractString)::Union{Nothing,Tuple{String,Float64
 end
 
 """
-    crs_from_wkt(wkt)::String
+    crs_from_wkt(wkt; any_name = false)::String
 
 The code of a coordinate system given as WKT text, such as one read from a
 GeoTIFF. `"EPSG:n"` when PROJ identifies it as that EPSG code with full
 confidence (100), else the WKT text itself. Blank text gives `""`.
 Never throws.
+
+With `any_name`, the name may differ too: an EPSG code whose definition PROJ
+finds the same counts when it is the only one. PROJ gives such a code
+confidence 70. ER Mapper headers need this: they name a coordinate system by
+ER Mapper's own names, such as `NUTM33` for `"EPSG:32633"`.
 """
-function crs_from_wkt(wkt::AbstractString)::String
+function crs_from_wkt(wkt::AbstractString; any_name::Bool = false)::String
     text = String(strip(wkt))
     isempty(text) && return ""
-    code = with_crs_context(epsg_code, text)
+    code = with_crs_context((pj, ctx) -> epsg_code(pj, ctx; any_name), text)
     return code isa String ? code : text
 end
 
-"The EPSG code of `pj` when PROJ is sure of it (confidence 100), else `nothing`."
-function epsg_code(pj::Ptr{Proj.PJ}, ctx::Ptr{Proj.PJ_CONTEXT})::Union{Nothing,String}
+"""
+The EPSG code of `pj` when PROJ is sure of it (confidence 100), else `nothing`.
+With `any_name`, else the one code of confidence 70 or more whose definition
+is the same as that of `pj` (see `same_definition_code`).
+A candidate is checked for confidence 100 too, when it has no id.
+"""
+function epsg_code(pj::Ptr{Proj.PJ}, ctx::Ptr{Proj.PJ_CONTEXT}; any_name::Bool = false)::Union{Nothing,String}
     confidence = Ref(Ptr{Cint}(C_NULL))
     list = Proj.proj_identify(pj, "EPSG", confidence, C_NULL, ctx)
     list == C_NULL && return nothing
     try
         n = Proj.proj_list_get_count(list)
+        same = Set{String}()
         for k in 1:n
-            unsafe_load(confidence[], k) == 100 || continue
+            c = unsafe_load(confidence[], k)
+            (c == 100 || any_name && c >= 70) || continue
             obj = Proj.proj_list_get(list, k - 1, ctx)
             obj == C_NULL && continue
             try
                 auth = Proj.proj_get_id_auth_name(obj, 0)
                 id = Proj.proj_get_id_code(obj, 0)
-                (auth isa String && id isa String) && return "$auth:$id"
+                c == 100 && auth isa String && id isa String && return "$auth:$id"
+                # A bound coordinate system (see `same_definition_code`) gives candidates without an id.
+                if any_name
+                    code = same_definition_code(obj, pj, ctx)
+                    code === nothing || push!(same, code)
+                end
             finally
                 Proj.proj_destroy(obj)
             end
         end
-        return nothing
+        return length(same) == 1 ? only(same) : nothing
     finally
         confidence[] == C_NULL || Proj.proj_int_list_destroy(confidence[])
         Proj.proj_list_destroy(list)
+    end
+end
+
+"""
+The EPSG code of the candidate `obj` that `proj_identify` found for `pj`, when
+the coordinate system of that code has the same definition as `pj`, else
+`nothing`. A candidate of confidence 70 may have no id; its name then gives
+the code (`crs_from_name`).
+
+WKT with `TOWGS84`, as GDAL gives for ER Mapper, makes PROJ build a bound
+coordinate system: the coordinate system and a shift to WGS 84. An EPSG code
+holds no such shift, so the coordinate system inside is compared.
+"""
+function same_definition_code(obj::Ptr{Proj.PJ}, pj::Ptr{Proj.PJ}, ctx::Ptr{Proj.PJ_CONTEXT})::Union{Nothing,String}
+    auth = Proj.proj_get_id_auth_name(obj, 0)
+    id = Proj.proj_get_id_code(obj, 0)
+    name = Proj.proj_get_name(obj)
+    code = (auth isa String && id isa String) ? "$auth:$id" : name isa String ? crs_from_name(name) : nothing
+    code === nothing && return nothing
+    ref = Proj.proj_create(code, ctx)
+    ref == C_NULL && return nothing
+    base = Proj.proj_get_type(pj) == Proj.PJ_TYPE_BOUND_CRS ? Proj.proj_get_source_crs(pj, ctx) : C_NULL
+    try
+        target = base == C_NULL ? pj : base
+        same = Proj.proj_is_equivalent_to_with_ctx(ref, target, Proj.PJ_COMP_EQUIVALENT_EXCEPT_AXIS_ORDER_GEOGCRS, ctx)
+        return same == 1 ? code : nothing
+    finally
+        Proj.proj_destroy(ref)
+        base == C_NULL || Proj.proj_destroy(base)
     end
 end
 

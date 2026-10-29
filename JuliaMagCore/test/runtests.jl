@@ -13,6 +13,7 @@ using Test
     include("test_gdal_grid.jl")
     include("test_geosoft_grd.jl")
     include("test_grd_files.jl")
+    include("test_grid_export.jl")
     include("test_csv.jl")
     include("test_jobs.jl")
     include("test_tools.jl")
