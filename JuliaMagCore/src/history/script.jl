@@ -38,7 +38,9 @@ end
 
 # Commands that `command_text` writes as a call of their core function.
 const CORE_COMMANDS = ("database.set_cell", "database.set_line_selected", "session.undo", "session.redo",
-                       "grid.set_georef", "grid.set_style")
+                       "grid.set_georef", "grid.set_style", "project.remove_item", "project.rename_item",
+                       "database.set_channel_protected", "database.rename_channel", "database.delete_channel",
+                       "database.set_channel_info")
 
 # True for a `"grid.set_crs"` entry of `set_grid_crs!`. The tool of the same id
 # is recorded with its inputs instead, and replays with `run_tool`.
@@ -67,6 +69,18 @@ function command_text(e::HistoryEntry)::String
         return "set_grid_georef!(s, $(repr(a["item"])); $kw)"
     elseif c == "grid.set_style"
         return "set_grid_style!(s, $(repr(a["item"])), $(style_text(a)))"
+    elseif c == "project.remove_item"
+        return "remove_item!(s, $(repr(a["item"])))"
+    elseif c == "project.rename_item"
+        return "rename_item!(s, $(repr(a["item"])), $(repr(a["name"])))"
+    elseif c == "database.set_channel_protected"
+        return "set_channel_protected!(s, $(repr(a["item"])), $(repr(a["channel"])), $(repr(a["protected"])))"
+    elseif c == "database.rename_channel"
+        return "rename_channel!(s, $(repr(a["item"])), $(repr(a["channel"])), $(repr(a["name"])))"
+    elseif c == "database.delete_channel"
+        return "delete_channel!(s, $(repr(a["item"])), $(repr(a["channel"])))"
+    elseif c == "database.set_channel_info"
+        return "set_channel_info!(s, $(repr(a["item"])), $(repr(a["channel"])); $(channel_info_text(a)))"
     end
     if is_import(c, a)
         kw = kwtext(a, filter(!=("path"), collect(keys(a))))
@@ -79,6 +93,12 @@ function command_text(e::HistoryEntry)::String
     end
     kw = kwtext(a, keys(a))
     return isempty(kw) ? "run_tool(s, $(repr(c)))" : "run_tool(s, $(repr(c)); $kw)"
+end
+
+"The keywords of a `\"database.set_channel_info\"` entry, sorted. `format` is written as a symbol."
+function channel_info_text(a::AbstractDict)::String
+    ks = sort!([String(k) for k in keys(a) if !(k in ("item", "channel"))])
+    return join(("$k = $(k == "format" ? repr(Symbol(a[k])) : repr(a[k]))" for k in ks), ", ")
 end
 
 """

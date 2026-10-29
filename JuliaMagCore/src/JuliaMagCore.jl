@@ -62,6 +62,7 @@ export UndoStep, HistoryEntry, Cursor, Session, ProtectedError, ItemBusyError
 export LOCK_FILE, ProjectLockedError
 export open_session, new_session, close_session!, check_not_busy, push_undo!, undo!, redo!, can_undo, can_redo
 export record!, set_cell!, set_line_selected!, set_cursor!, script_text
+export rename_item!, set_marked!, set_channel_protected!, rename_channel!, delete_channel!, set_channel_info!
 export eachfileline, ImportWarning, ImportResult, Progress, report, is_cancelled, NO_PROGRESS
 export GridHeader, GridSink, put_rows!, put_columns!, import_grid
 export georef_from_affine, affine_from_grid, read_gdal_grid
@@ -76,7 +77,8 @@ export JobReport, report_text, job_warning!, job_warnings
 export ExportResult, ExporterSpec, register_exporter!, exporters, exporter_for
 export export_xyz, export_csv, export_parquet, export_geosoft_grd, export_geotiff, export_ers
 export SettingSpec, NumberSetting, TextSetting, ExprSetting, ChoiceSetting, BoolSetting, FileSetting,
-    ChannelSetting, ChannelListSetting, LinesSetting, CRSSetting, PairSetting, ExtentSetting, PointSetting
+    ChannelSetting, ChannelListSetting, LinesSetting, CRSSetting, PairSetting, ExtentSetting, PointSetting,
+    ItemSetting
 export Place, ToolSpec, ToolError, register_tool!, unregister_tool!, tools, tool, tabs
 export default_settings, validate, last_settings, reset_settings!, run_tool
 export valid_crs, crs_name, crs_from_wkt, crs_from_name, crs_wkt, guess_utm, reproject_xy

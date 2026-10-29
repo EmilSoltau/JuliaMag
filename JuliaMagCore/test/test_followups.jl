@@ -1,6 +1,8 @@
 # Plan 1 follow-ups that plan 2 fixes: undo outside the session lock, the sweep
 # of leftover side folders, settings that a failed quick tool keeps, job reports
-# that are read while a job writes them, and job warnings.
+# that are read while a job writes them, job warnings, and the session edits
+# the views need (remove and rename items, channel edits, the marked range and
+# the item-picker setting).
 # It runs alone too, with several threads:
 #   julia --project=JuliaMagCore -t 4 JuliaMagCore/test/test_followups.jl
 
@@ -8,6 +10,7 @@ using Test
 using JSON3
 using JuliaMagCore
 isdefined(@__MODULE__, :fresh_session) || include(joinpath(@__DIR__, "support", "synthetic.jl"))
+isdefined(@__MODULE__, :add_test_grid!) || include(joinpath(@__DIR__, "support", "grids.jl"))
 
 # Wait until `f()` is true, at most `timeout` seconds. True when it became true.
 await(f::Function, timeout::Real = 30.0) = timedwait(f, Float64(timeout); pollint = 0.001) === :ok
@@ -457,6 +460,249 @@ new_log() = (String[], ReentrantLock())
         @test startswith(only(job_warnings(j)), "the history entry of this job could not be saved")
         @test any(w -> occursin("test.held", w), s.warnings)
         close_session!(s)
+    end
+
+    # ---- session edits the views need -------------------------------------
+
+    # `f()` throws `ItemBusyError` while an export reads item `id`, and changes nothing.
+    function refused_while_read(f::Function, s, id)
+        JuliaMagCore.mark_reading!(s, id)
+        n = length(s.history)
+        e = try
+            f()
+            nothing
+        catch err
+            err
+        end
+        JuliaMagCore.unmark_reading!(s, id)
+        return e isa ItemBusyError && e.item == id && length(s.history) == n
+    end
+
+    item_ids(s) = [i.id for i in s.project.items]
+    saved_ids(s) = [i.id for i in open_project(s.project.folder).items]
+    channel_names(db) = [c.name for c in db.channels]
+    channel_file(s, id, name) = joinpath(JuliaMagCore.item_path(s.project, item(s.project, id)), "channels", name)
+
+    @testset "remove_item! takes an item out, and undo puts it back" begin
+        (; s, id) = make_db_with(MAG = [1.0, 2.0])
+        id2 = add_test_database!(s, ["A" => [1.0]])
+        folder = JuliaMagCore.item_path(s.project, item(s.project, id))
+        @test refused_while_read(() -> remove_item!(s, id), s, id)
+        @test item_ids(s) == [id, id2]
+        remove_item!(s, id)
+        @test item_ids(s) == saved_ids(s) == [id2]
+        @test isdir(folder)                                   # kept for undo
+        @test s.history[end].command == "project.remove_item" && s.history[end].args == Dict("item" => id)
+        undo!(s)
+        @test item_ids(s) == saved_ids(s) == [id, id2]        # back in its place
+        @test read_channel(database(s.project, id), LineId(LINE, 1001, 0), "MAG") == [1.0, 2.0]
+        redo!(s)
+        @test item_ids(s) == saved_ids(s) == [id2]
+        @test isdir(folder)
+        undo!(s)
+        # A new change ends the redo of the remove; the item is in, so its files stay.
+        rename_item!(s, id2, "Other")
+        @test isdir(folder) && item_ids(s) == [id, id2]
+        @test_throws ProjectError remove_item!(s, "db-99")
+        # The drop of a step whose item is out deletes the item's files.
+        remove_item!(s, id)
+        s.undo_stack[end].drop()
+        @test !isdir(folder)
+        close_session!(s)
+    end
+
+    @testset "rename_item! is undoable" begin
+        (; s, id) = make_db_with(MAG = [1.0])
+        old = item(s.project, id).name
+        @test refused_while_read(() -> rename_item!(s, id, "Survey A"), s, id)
+        @test_throws ArgumentError rename_item!(s, id, "  ")
+        rename_item!(s, id, " Survey A ")
+        @test item(s.project, id).name == item(open_project(s.project.folder), id).name == "Survey A"
+        @test s.history[end].command == "project.rename_item"
+        @test s.history[end].args == Dict("item" => id, "name" => "Survey A")
+        undo!(s)
+        @test item(s.project, id).name == item(open_project(s.project.folder), id).name == old
+        redo!(s)
+        @test item(s.project, id).name == "Survey A"
+        @test refused_while_read(() -> undo!(s), s, id)
+        close_session!(s)
+    end
+
+    @testset "set_channel_protected! is undoable" begin
+        s = fresh_session()
+        id = make_test_database!(s)
+        L = LineId(LINE, 1001, 0)
+        @test_throws ProtectedError set_cell!(s, id, L, "MAGP", 1, 0.5)
+        @test refused_while_read(() -> set_channel_protected!(s, id, "MAGP", false), s, id)
+        set_channel_protected!(s, id, "MAGP", false)
+        @test !channel(database(s.project, id), "MAGP").protected
+        @test s.history[end].command == "database.set_channel_protected"
+        set_cell!(s, id, L, "MAGP", 1, 0.5)
+        undo!(s)                                             # the cell
+        undo!(s)                                             # the flag
+        @test channel(database(s.project, id), "MAGP").protected
+        @test_throws ProtectedError set_cell!(s, id, L, "MAGP", 1, 0.5)
+        redo!(s)
+        @test !channel(database(s.project, id), "MAGP").protected
+        @test_throws DatabaseError set_channel_protected!(s, id, "NOPE", true)
+        close_session!(s)
+    end
+
+    @testset "rename_channel! renames the files and the position pairs" begin
+        (; s, id, L) = make_db_with(X = [1.0, 2.0], Y = [3.0, 4.0], MAG = [5.0, 6.0])
+        db = database(s.project, id)
+        add_channel!(db, ChannelInfo("NOTE", "NOTE", String, "", ROLE_NONE, :normal, 10, -1, false, 1))
+        write_value!(db, L, "NOTE", 2, "spike")
+        push!(db.pairs, PositionPair("X", "Y", "EPSG:32633"), PositionPair("LON", "LAT", ""))
+        db.current_pair = 1
+        save_meta(db)
+        @test refused_while_read(() -> rename_channel!(s, id, "X", "EAST"), s, id)
+        @test_throws ArgumentError rename_channel!(s, id, "MAG", "y")          # in use (case is ignored)
+        @test_throws ArgumentError rename_channel!(s, id, "MAG", "LON")        # a position pair uses it
+        @test_throws ArgumentError rename_channel!(s, id, "MAG", "A/B")        # not a file name
+        @test_throws DatabaseError rename_channel!(s, id, "NOPE", "B")
+        @test length(s.history) == 0
+        rename_channel!(s, id, "X", "EAST")
+        db = database(s.project, id)
+        @test channel_names(db) == ["EAST", "Y", "MAG", "NOTE"]
+        @test db.pairs[1].x == "EAST" && db.pairs[1].y == "Y" && db.current_pair == 1
+        @test read_channel(db, L, "EAST") == [1.0, 2.0]
+        @test isfile(channel_file(s, id, "EAST.f64")) && !isfile(channel_file(s, id, "X.f64"))
+        @test s.history[end].command == "database.rename_channel"
+        @test s.history[end].args == Dict("item" => id, "channel" => "X", "name" => "EAST")
+        undo!(s)
+        db = database(s.project, id)
+        @test channel_names(db) == ["X", "Y", "MAG", "NOTE"] && db.pairs[1].x == "X"
+        @test read_channel(db, L, "X") == [1.0, 2.0] && !isfile(channel_file(s, id, "EAST.f64"))
+        redo!(s)
+        @test database(s.project, id).pairs[1].x == "EAST"
+        # A string channel has two files; a rename that changes only the case works too.
+        rename_channel!(s, id, "NOTE", "note")
+        db = database(s.project, id)
+        @test read_channel(db, L, "note") == ["", "spike"]
+        @test basename.(readdir(dirname(channel_file(s, id, "x")))) ⊇ ["note.str", "note.off"]
+        undo!(s)
+        @test read_channel(database(s.project, id), L, "NOTE") == ["", "spike"]
+        close_session!(s)
+    end
+
+    @testset "delete_channel! keeps the files for undo" begin
+        (; s, id, L) = make_db_with(X = [1.0, 2.0], MAG = [5.0, NaN], Y = [3.0, 4.0])
+        db = database(s.project, id)
+        push!(db.pairs, PositionPair("X", "Y", ""))
+        db.current_pair = 1
+        channel(db, "Y").protected = true
+        save_meta(db)
+        old = read_channel(db, L, "MAG")
+        @test refused_while_read(() -> delete_channel!(s, id, "MAG"), s, id)
+        @test_throws ArgumentError delete_channel!(s, id, "X")                 # a position pair uses it
+        @test_throws ProtectedError delete_channel!(s, id, "Y")
+        @test length(s.history) == 0
+        delete_channel!(s, id, "MAG")
+        @test channel_names(database(s.project, id)) == ["X", "Y"]
+        @test !isfile(channel_file(s, id, "MAG.f64"))
+        @test s.history[end].command == "database.delete_channel"
+        @test s.history[end].args == Dict("item" => id, "channel" => "MAG")
+        undo!(s)
+        db = database(s.project, id)
+        @test channel_names(db) == ["X", "MAG", "Y"]                          # back in its place
+        @test isequal(read_channel(db, L, "MAG"), old)
+        redo!(s)
+        @test channel_names(database(s.project, id)) == ["X", "Y"]
+        undo!(s)
+        # A new change ends the redo; no side folder is left.
+        set_cell!(s, id, L, "MAG", 1, 7.0)
+        dbfolder = JuliaMagCore.item_path(s.project, item(s.project, id))
+        @test !any(startswith(".undo-"), readdir(dbfolder))
+        @test isequal(read_channel(database(s.project, id), L, "MAG"), [7.0, NaN])
+        close_session!(s)
+    end
+
+    @testset "set_channel_info! is undoable" begin
+        (; s, id) = make_db_with(MAG = [1.0])
+        info(db) = (c = channel(db, "MAG"); (c.label, c.units, c.decimals, c.format, c.width))
+        old = info(database(s.project, id))
+        @test refused_while_read(() -> set_channel_info!(s, id, "MAG"; units = "pT"), s, id)
+        @test_throws ArgumentError set_channel_info!(s, id, "MAG"; format = :fancy)
+        @test_throws ArgumentError set_channel_info!(s, id, "MAG"; decimals = -2)
+        @test_throws ArgumentError set_channel_info!(s, id, "MAG"; width = 0)
+        set_channel_info!(s, id, "MAG"; label = "Total field", units = "pT", decimals = 2,
+                          format = :exponential, width = 12)
+        @test info(database(s.project, id)) == ("Total field", "pT", 2, :exponential, 12)
+        @test s.history[end].command == "database.set_channel_info"
+        set_channel_info!(s, id, "MAG"; units = "nT")
+        @test info(database(s.project, id)) == ("Total field", "nT", 2, :exponential, 12)
+        undo!(s)
+        undo!(s)
+        @test info(database(s.project, id)) == old
+        redo!(s)
+        @test info(database(s.project, id)) == ("Total field", "pT", 2, :exponential, 12)
+        close_session!(s)
+    end
+
+    @testset "set_marked! is not undoable and not recorded" begin
+        s = fresh_session()
+        set_marked!(s, (3, 8))
+        @test s.marked == (3, 8)
+        set_marked!(s, nothing)
+        @test s.marked === nothing
+        @test_throws ArgumentError set_marked!(s, (8, 3))
+        @test isempty(s.history) && !can_undo(s)
+        close_session!(s)
+    end
+
+    @testset "an item setting checks the kind of the item" begin
+        (; s, id) = make_db_with(MAG = [1.0])
+        gid = add_test_grid!(s, Float32[1 2; 3 4])
+        for imp in ("import.geosoft_xyz", "import.csv")
+            spec = only(filter(i -> i.id == imp, importers()))
+            st = only(filter(x -> x.key == "target", spec.settings))
+            @test st isa ItemSetting && st.kind == ITEM_DATABASE && st.optional
+            @test isempty(validate(spec, Dict("mode" => "append", "target" => gid)))     # no session: no check
+            @test validate(spec, Dict("mode" => "append", "target" => gid); session = s) ==
+                  ["Append to must be a database, but $gid is a grid."]
+            @test validate(spec, Dict("mode" => "append", "target" => "db-99"); session = s) ==
+                  ["Append to: there is no item db-99 in the project."]
+            @test isempty(validate(spec, Dict("mode" => "append", "target" => id); session = s))
+            @test isempty(validate(spec, Dict("mode" => "new"); session = s))       # optional: blank is fine
+        end
+        st = ItemSetting("grid", "Grid", ITEM_GRID)
+        @test st.default == "" && !st.optional
+        @test JuliaMagCore.validate_settings([st], Dict{String,Any}(), "T") == ["Grid is not set."]
+        @test JuliaMagCore.validate_settings([st], Dict("grid" => 3), "T") == ["Grid must be an item id."]
+        close_session!(s)
+    end
+
+    @testset "the item and channel edits replay by script" begin
+        (; s, id, L) = make_db_with(X = [1.0, 2.0], MAG = [5.0, 6.0], OLD = [0.0, 0.0])
+        id2 = add_test_database!(s, ["A" => [1.0]])
+        copy_folder = joinpath(mktempdir(), "copy")
+        cp(s.project.folder, copy_folder)
+        rm(joinpath(copy_folder, LOCK_FILE); force = true)
+        rename_item!(s, id, "Survey")
+        rename_channel!(s, id, "X", "EAST")
+        set_channel_protected!(s, id, "MAG", true)
+        set_channel_info!(s, id, "MAG"; units = "pT", format = :exponential)
+        delete_channel!(s, id, "OLD")
+        remove_item!(s, id2)
+        undo!(s)
+        remove_item!(s, id2)
+        text = replace(script_text(s), repr(s.project.folder) => repr(copy_folder))
+        @test occursin("\nremove_item!(s, $(repr(id2)))\n", text)
+        @test occursin("\nrename_item!(s, $(repr(id)), \"Survey\")\n", text)
+        @test occursin("\nrename_channel!(s, $(repr(id)), \"X\", \"EAST\")\n", text)
+        @test occursin("\nset_channel_protected!(s, $(repr(id)), \"MAG\", true)\n", text)
+        @test occursin("\nset_channel_info!(s, $(repr(id)), \"MAG\"; format = :exponential, units = \"pT\")\n", text)
+        @test occursin("\ndelete_channel!(s, $(repr(id)), \"OLD\")\n", text)
+        close_session!(s)
+        include_string(Module(), text)
+        b = open_project(copy_folder)
+        @test [i.id for i in b.items] == [id] && item(b, id).name == "Survey"
+        db = database(b, id)
+        @test channel_names(db) == ["EAST", "MAG"]
+        c = channel(db, "MAG")
+        @test c.protected && c.units == "pT" && c.format == :exponential
+        @test read_channel(db, L, "EAST") == [1.0, 2.0]
     end
 
     try

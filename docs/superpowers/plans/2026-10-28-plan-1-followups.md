@@ -11,7 +11,6 @@ These are the open points from the reviews that later plans must handle.
   Bind outputs to variables before the Run Script UI exists.
 - `rerun!` with `replace = true` is not in the history, so replay keeps both outputs.
 - `Session.warnings` is stored but not shown.
-- Session API gaps: remove an item with undo, undoable channel property edits (unprotect, rename, delete), a setter for the marked range, an item-picker setting type for importer targets.
 
 ## Done in plan 2
 
@@ -38,6 +37,12 @@ These are the open points from the reviews that later plans must handle.
   PROJ logs nothing for a ballpark transformation, so the reprojector asks PROJ which operation it used and adds a line for a ballpark one.
 - Jobs have warnings now (`job_warning!`, `job_warnings`), saved in the job record.
   A job that finishes during an undo, and whose held history entry then cannot be written, gets such a warning.
+- Session API gaps: remove an item with undo, undoable channel property edits (unprotect, rename, delete), a setter for the marked range, an item-picker setting type for importer targets.
+  Done in the commit "Add undoable item and channel edits for the views".
+  The new calls are `remove_item!(s, id)`, `rename_item!`, `set_channel_protected!`, `rename_channel!`, `delete_channel!`, `set_channel_info!` and `set_marked!`.
+  Each edit except `set_marked!` is undoable, recorded, and replays from a script.
+  `ItemSetting` names an item of one kind, and `validate(spec, settings; session = s)` checks it against the project.
+  The append target of the CSV and XYZ importers is an `ItemSetting` now.
 
 ## Checks on real systems
 

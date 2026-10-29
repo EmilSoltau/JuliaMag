@@ -551,3 +551,288 @@ function set_cursor!(s::Session, c::Cursor)
         return nothing
     end
 end
+
+"""
+    set_marked!(s, range)
+
+Set the marked range, a stretch of rows on the current line, as `(first, last)`,
+or clear it with `nothing`. Not undoable and not recorded, like `set_cursor!`.
+Throws `ArgumentError` when `first` is above `last`.
+"""
+function set_marked!(s::Session, range::Union{Nothing,Tuple{Int,Int}})
+    range === nothing || range[1] <= range[2] ||
+        throw(ArgumentError("the marked range must not end before it starts: $(range[1]) to $(range[2])"))
+    lock(s.lock) do
+        s.marked = range
+        return nothing
+    end
+end
+
+# ---- items -----------------------------------------------------------------
+
+"Make `items` the item list of the project and save it. On an error, the old list is put back."
+function set_items!(p::Project, items::Vector{ProjectItem})
+    saved = copy(p.items)
+    try
+        empty!(p.items)
+        append!(p.items, items)
+        save_project(p)
+    catch
+        empty!(p.items)
+        append!(p.items, saved)
+        rethrow()
+    end
+    return nothing
+end
+
+"""
+    remove_item!(s, id)
+
+Take item `id` out of the project. Undoable: undo puts it back in its place,
+and redo takes it out again. Recorded as `"project.remove_item"`.
+The item's files stay, so undo works. They are deleted when the step leaves
+the redo stack while the item is out, as for an undone import.
+Throws `ItemBusyError` while a job or an export uses the item, and
+`ProjectError` when there is no such item.
+"""
+function remove_item!(s::Session, id::AbstractString)
+    key = String(id)
+    p = s.project
+    lock(s.lock) do
+        check_not_busy(s, key)
+        it = item(p, key)
+        k = something(findfirst(i -> i === it, p.items))
+        take_out() = lock(s.lock) do                # `undo!` runs the steps without the lock
+            set_items!(p, filter(i -> i.id != key, p.items))
+            nothing
+        end
+        put_back() = lock(s.lock) do
+            any(i -> i.id == key, p.items) && return nothing
+            items = copy(p.items)
+            insert!(items, clamp(k, 1, length(items) + 1), it)
+            set_items!(p, items)
+            nothing
+        end
+        # Redo is no longer possible: delete the files if the item is out.
+        drop() = lock(() -> remove_unused_folders!(p, [it]), s.lock)
+        take_out()
+        push_undo!(s, UndoStep("remove $(it.name)", put_back, take_out, drop, [key]))
+        record!(s, "project.remove_item", Dict{String,Any}("item" => key))
+        return nothing
+    end
+end
+
+"""
+    rename_item!(s, id, name)
+
+Give item `id` a new name. Leading and trailing spaces are dropped.
+Undoable and recorded as `"project.rename_item"`.
+Throws `ArgumentError` for a blank name, `ItemBusyError` while a job or an
+export uses the item, and `ProjectError` when there is no such item.
+"""
+function rename_item!(s::Session, id::AbstractString, name::AbstractString)
+    key = String(id)
+    new = String(strip(name))
+    isempty(new) && throw(ArgumentError("the name of an item cannot be blank"))
+    p = s.project
+    lock(s.lock) do
+        check_not_busy(s, key)
+        old = item(p, key).name
+        put(v::String) = () -> lock(s.lock) do
+            it = item(p, key)
+            before = it.name
+            it.name = v
+            try
+                save_project(p)
+            catch
+                it.name = before
+                rethrow()
+            end
+            nothing
+        end
+        step = UndoStep("rename $old to $new", put(old), put(new), () -> nothing, [key])
+        step.redo()
+        push_undo!(s, step)
+        record!(s, "project.rename_item", Dict{String,Any}("item" => key, "name" => new))
+        return nothing
+    end
+end
+
+# ---- channels --------------------------------------------------------------
+#
+# Each channel edit runs under `s.lock`, refuses a busy database with
+# `ItemBusyError`, saves `database.json` atomically, pushes an undo step that
+# puts back the exact old values, and is recorded in the history.
+
+"""
+Change a fact of channel `name` of database `id` to `new` with `setter!(c, value)`,
+save `database.json`, and push an undo step that puts back the value `getter(c)` had.
+Call it under `s.lock`. Throws `ItemBusyError` when the database is busy, before anything changes.
+"""
+function edit_channel_meta!(getter::Function, setter!::Function, s::Session, id::String, name::String,
+                            label::String, new)
+    check_not_busy(s, id)
+    old = getter(channel(database(s.project, id), name))
+    put(v) = () -> lock(s.lock) do               # `undo!` runs it without the lock
+        db = database(s.project, id)
+        setter!(channel(db, name), v)
+        save_meta(db)
+        nothing
+    end
+    step = UndoStep(label, put(old), put(new), () -> nothing, [id])
+    step.redo()
+    push_undo!(s, step)
+    return nothing
+end
+
+"""
+    set_channel_protected!(s, id, channel, flag)
+
+Protect a channel of database `id` (`flag = true`) or unprotect it. The values
+of a protected channel cannot be edited. Undoable and recorded as
+`"database.set_channel_protected"`. Throws `ItemBusyError` while a job or an
+export uses the database.
+"""
+function set_channel_protected!(s::Session, id::AbstractString, name::AbstractString, flag::Bool)
+    key, ch = String(id), String(name)
+    lock(s.lock) do
+        edit_channel_meta!(c -> c.protected, (c, v) -> (c.protected = v), s, key, ch,
+                           (flag ? "protect " : "unprotect ") * ch, flag)
+        record!(s, "database.set_channel_protected", Dict{String,Any}("item" => key, "channel" => ch,
+                                                                      "protected" => flag))
+    end
+    return nothing
+end
+
+const CHANNEL_INFO_FIELDS = (:label, :units, :decimals, :format, :width)
+
+"""
+    set_channel_info!(s, id, channel; label, units, decimals, format, width)
+
+Change how a channel of database `id` is described and shown. Each keyword is
+optional; the others stay. `format` is one of `:normal`, `:exponential`,
+`:date` and `:time`. `decimals` is -1 (not set) or more, and `width` is 1 or more.
+The values do not change. Undoable and recorded as `"database.set_channel_info"`
+with the given keywords. Throws `ArgumentError` for a bad value, and
+`ItemBusyError` while a job or an export uses the database.
+"""
+function set_channel_info!(s::Session, id::AbstractString, name::AbstractString;
+                           label::Union{Nothing,AbstractString} = nothing,
+                           units::Union{Nothing,AbstractString} = nothing,
+                           decimals::Union{Nothing,Integer} = nothing, format::Union{Nothing,Symbol} = nothing,
+                           width::Union{Nothing,Integer} = nothing)
+    format === nothing || format in CHANNEL_FORMATS ||
+        throw(ArgumentError("format must be one of $(join(CHANNEL_FORMATS, ", ")), not $format"))
+    decimals === nothing || decimals >= -1 || throw(ArgumentError("decimals must be -1 (not set) or more, not $decimals"))
+    width === nothing || width >= 1 || throw(ArgumentError("width must be 1 or more, not $width"))
+    given = Dict{Symbol,Any}()
+    for (k, v) in zip(CHANNEL_INFO_FIELDS, (label, units, decimals, format, width))
+        v === nothing || (given[k] = v isa AbstractString ? String(v) : v isa Integer ? Int(v) : v)
+    end
+    key, ch = String(id), String(name)
+    info(c) = Tuple(getfield(c, k) for k in CHANNEL_INFO_FIELDS)
+    set_info!(c, v) = foreach((k, x) -> setfield!(c, k, x), CHANNEL_INFO_FIELDS, v)
+    lock(s.lock) do
+        check_not_busy(s, key)
+        old = info(channel(database(s.project, key), ch))
+        isempty(given) && return nothing
+        new = Tuple(get(given, k, o) for (k, o) in zip(CHANNEL_INFO_FIELDS, old))
+        edit_channel_meta!(info, set_info!, s, key, ch, "change channel $ch", new)
+        args = Dict{String,Any}("item" => key, "channel" => ch)
+        foreach(((k, v),) -> args[String(k)] = v isa Symbol ? String(v) : v, given)
+        record!(s, "database.set_channel_info", args)
+    end
+    return nothing
+end
+
+"The position pairs of `db` as text, such as `X,Y`."
+pairs_text(ps) = join(("$(p.x),$(p.y)" for p in ps), " and ")
+
+"""
+    rename_channel!(s, id, old, new)
+
+Rename channel `old` of database `id` to `new`, with its files. A position pair
+that uses `old` uses `new` after it. Undoable and recorded as
+`"database.rename_channel"`.
+Throws `ArgumentError` when `new` is not a valid channel name, is the name of
+another channel (case is ignored), or is a name that a position pair uses;
+`ItemBusyError` while a job or an export uses the database; and `DatabaseError`
+when there is no channel `old`.
+"""
+function rename_channel!(s::Session, id::AbstractString, old::AbstractString, new::AbstractString)
+    key, from, to = String(id), String(old), String(new)
+    lock(s.lock) do
+        check_not_busy(s, key)
+        db = database(s.project, key)
+        c = channel(db, from)
+        from == to && return nothing
+        renamed = copy_info(c)
+        renamed.name = to
+        try
+            check_channel_info(renamed, Set{String}(lowercase(x.name) for x in db.channels if x !== c))
+        catch e
+            e isa DatabaseError || rethrow()
+            throw(ArgumentError(e.msg))
+        end
+        clash = filter(p -> any(n -> n != from && lowercase(n) == lowercase(to), (p.x, p.y)), db.pairs)
+        isempty(clash) || throw(ArgumentError("channel name $to is used by position pair $(pairs_text(clash))"))
+        apply(a, b) = () -> lock(s.lock) do      # `undo!` runs it without the lock
+            rename_channel_files!(database(s.project, key), a, b)
+            nothing
+        end
+        step = UndoStep("rename channel $from to $to", apply(to, from), apply(from, to), () -> nothing, [key])
+        step.redo()
+        push_undo!(s, step)
+        record!(s, "database.rename_channel", Dict{String,Any}("item" => key, "channel" => from, "name" => to))
+        return nothing
+    end
+end
+
+"""
+    delete_channel!(s, id, channel)
+
+Delete a channel of database `id`. Undoable: its files move to a side folder
+`<database>/.undo-*`, and undo moves them back, so the values come back as
+they were. The side folder is removed by undo, and else by the sweep when the
+project opens next time. Recorded as `"database.delete_channel"`.
+Throws `ProtectedError` for a protected channel, `ArgumentError` for a channel
+that a position pair uses, `ItemBusyError` while a job or an export uses the
+database, and `DatabaseError` when there is no such channel.
+"""
+function delete_channel!(s::Session, id::AbstractString, name::AbstractString)
+    key, ch = String(id), String(name)
+    lock(s.lock) do
+        check_not_busy(s, key)
+        db = database(s.project, key)
+        c = channel(db, ch)
+        c.protected && throw(ProtectedError(ch))
+        used = filter(p -> ch in (p.x, p.y), db.pairs)
+        isempty(used) || throw(ArgumentError("channel $ch is used by position pair $(pairs_text(used))"))
+        info = copy_info(c)
+        side = Ref("")                         # the side folder that holds the files, while deleted
+        pos = Ref(0)
+        take_out() = lock(s.lock) do           # `undo!` runs the steps without the lock
+            d = database(s.project, key)
+            dir = mktempdir(d.folder; prefix = ".undo-", cleanup = false)
+            try
+                pos[] = take_out_channel!(d, ch, dir)
+            catch
+                rm(dir; recursive = true, force = true)
+                rethrow()
+            end
+            side[] = dir
+            nothing
+        end
+        put_back() = lock(s.lock) do
+            put_back_channel!(database(s.project, key), copy_info(info), pos[], side[])
+            rm(side[]; recursive = true, force = true)
+            side[] = ""
+            nothing
+        end
+        drop() = (isempty(side[]) || rm(side[]; recursive = true, force = true); nothing)
+        take_out()
+        push_undo!(s, UndoStep("delete channel $ch", put_back, take_out, drop, [key]))
+        record!(s, "database.delete_channel", Dict{String,Any}("item" => key, "channel" => ch))
+        return nothing
+    end
+end

@@ -114,13 +114,14 @@ file settings without a tool default are empty and must be set before a run.
 default_settings(spec::ToolSpec)::Dict{String,Any} = default_settings(spec.settings)
 
 """
-    validate(spec, settings)::Vector{String}
+    validate(spec, settings; session = nothing)::Vector{String}
 
 The problems with `settings`, as plain sentences such as `"Factor must be at least 0."`.
 Empty means the settings are fine. A missing setting takes its default.
+With a `session`, an `ItemSetting` must name an item of its kind in the project.
 """
-validate(spec::ToolSpec, settings::AbstractDict)::Vector{String} =
-    validate_settings(spec.settings, settings, spec.name)
+validate(spec::ToolSpec, settings::AbstractDict; session::Union{Nothing,Session} = nothing)::Vector{String} =
+    validate_settings(spec.settings, settings, spec.name; session)
 
 # ---- remembered settings ---------------------------------------------------
 
@@ -243,7 +244,7 @@ function run_tool(s::Session, id::AbstractString; inputs::AbstractDict = Dict{St
         st = findfirst(x -> x.key == key, spec.settings)
         values[key] = st === nothing ? plain_arg(v) : setting_value(spec.settings[st], plain_arg(v))
     end
-    problems = vcat(input_problems(spec, inputs), validate(spec, values))
+    problems = vcat(input_problems(spec, inputs), validate(spec, values; session = s))
     isempty(problems) || return (false, join(problems, " "), nothing)
     ins = Dict{String,String}(String(k) => String(v) for (k, v) in inputs)
     args = tool_args(values, ins)
@@ -287,7 +288,7 @@ function tool_rerun_work(s::Session, spec::ToolSpec, a::Dict{String,Any})::Funct
         st = findfirst(x -> x.key == k, spec.settings)
         values[k] = st === nothing ? v : setting_value(spec.settings[st], v)
     end
-    problems = vcat(input_problems(spec, inputs), validate(spec, values))
+    problems = vcat(input_problems(spec, inputs), validate(spec, values; session = s))
     isempty(problems) || return (_, _) -> throw(ToolError(join(problems, " ")))
     ins = Dict{String,String}(String(k) => String(v) for (k, v) in inputs)
     return tool_work(s, spec, ins, values)

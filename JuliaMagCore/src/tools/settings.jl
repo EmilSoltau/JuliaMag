@@ -258,6 +258,26 @@ struct PointSetting <: SettingSpec
             default === nothing ? nothing : collect(Float64, default))
 end
 
+"""
+    ItemSetting(key, label, kind; optional = false, default = "", help = "", advanced = false)
+
+An item of the project of kind `kind`, such as `ITEM_DATABASE`, by its id,
+such as `"db-1"`. The UI shows a list of the project's items of that kind.
+The value is a `String`. With `optional = true` it may be blank (no item).
+`validate` checks that the item exists and has the kind when it is given the session.
+"""
+struct ItemSetting <: SettingSpec
+    key::String
+    label::String
+    help::String
+    advanced::Bool
+    kind::ItemKind
+    optional::Bool
+    default::String
+    ItemSetting(key, label, kind::ItemKind; optional::Bool = false, default = "", help = "", advanced::Bool = false) =
+        new(String(key), String(label), String(help), advanced, kind, optional, String(default))
+end
+
 # ---- values ----------------------------------------------------------------
 
 "The default value of a setting. Vectors are copied, so callers may change them."
@@ -623,6 +643,32 @@ function setting_problem(st::ChannelListSetting, x)::Union{Nothing,String}
     return nothing
 end
 
+function setting_problem(st::ItemSetting, x)::Union{Nothing,String}
+    istext(x) || return "$(st.label) must be an item id."
+    isempty(x) && !st.optional && return "$(st.label) is not set."
+    return nothing
+end
+
+"""
+    session_problem(st, x, s)::Union{Nothing,String}
+
+What is wrong with value `x` in the project of session `s`, as a plain
+sentence, or `nothing`. Only settings that name project items check anything.
+Call it only for a value that `setting_problem` passed.
+"""
+session_problem(::SettingSpec, _, ::Session)::Union{Nothing,String} = nothing
+
+function session_problem(st::ItemSetting, x, s::Session)::Union{Nothing,String}
+    isempty(x) && return nothing
+    kind = lock(s.lock) do
+        k = findfirst(i -> i.id == x, s.project.items)
+        return k === nothing ? nothing : s.project.items[k].kind
+    end
+    kind === nothing && return "$(st.label): there is no item $x in the project."
+    kind == st.kind && return nothing
+    return "$(st.label) must be a $(KIND_NAMES[st.kind]), but $x is a $(KIND_NAMES[kind])."
+end
+
 finite_numbers(x, n) = x isa AbstractVector && length(x) == n && all(v -> v isa Real && !(v isa Bool) && isfinite(v), x)
 
 function setting_problem(st::ExtentSetting, x)::Union{Nothing,String}
@@ -636,17 +682,21 @@ setting_problem(st::PointSetting, x)::Union{Nothing,String} =
     (x === nothing || finite_numbers(x, 2)) ? nothing : "$(st.label) must be two numbers: x and y."
 
 """
-    validate_settings(list, values, owner)::Vector{String}
+    validate_settings(list, values, owner; session = nothing)::Vector{String}
 
 Check `values` against the settings in `list`. A missing key takes its default.
 A key that is not a setting is a problem too; `owner` names the tool in that message.
+With a `session`, settings that name project items are checked against its
+project too (see `session_problem`).
 """
-function validate_settings(list::AbstractVector{<:SettingSpec}, values::AbstractDict, owner::AbstractString)::Vector{String}
+function validate_settings(list::AbstractVector{<:SettingSpec}, values::AbstractDict, owner::AbstractString;
+                           session::Union{Nothing,Session} = nothing)::Vector{String}
     given = Dict{String,Any}(String(k) => v for (k, v) in values)
     problems = String[]
     for st in list
         v = haskey(given, st.key) ? setting_value(st, given[st.key]) : setting_default(st)
         p = setting_problem(st, v)
+        p === nothing && session !== nothing && (p = session_problem(st, v, session))
         p === nothing || push!(problems, p)
     end
     known = Set(st.key for st in list)

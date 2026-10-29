@@ -76,9 +76,9 @@ end
 "The default value of each setting of the importer, by key."
 default_settings(spec::ImporterSpec)::Dict{String,Any} = default_settings(spec.settings)
 
-"The problems with importer settings, as plain sentences. Empty means fine."
-validate(spec::ImporterSpec, settings::AbstractDict)::Vector{String} =
-    validate_settings(spec.settings, settings, spec.name)
+"The problems with importer settings, as plain sentences. Empty means fine. See `validate` of a tool."
+validate(spec::ImporterSpec, settings::AbstractDict; session::Union{Nothing,Session} = nothing)::Vector{String} =
+    validate_settings(spec.settings, settings, spec.name; session)
 
 const IMPORTERS = ImporterSpec[]
 const IMPORTERS_LOCK = ReentrantLock()
@@ -156,9 +156,9 @@ end
 "The default value of each setting of the exporter, by key."
 default_settings(spec::ExporterSpec)::Dict{String,Any} = default_settings(spec.settings)
 
-"The problems with exporter settings, as plain sentences. Empty means fine."
-validate(spec::ExporterSpec, settings::AbstractDict)::Vector{String} =
-    validate_settings(spec.settings, settings, spec.name)
+"The problems with exporter settings, as plain sentences. Empty means fine. See `validate` of a tool."
+validate(spec::ExporterSpec, settings::AbstractDict; session::Union{Nothing,Session} = nothing)::Vector{String} =
+    validate_settings(spec.settings, settings, spec.name; session)
 
 const EXPORTERS = ExporterSpec[]
 const EXPORTERS_LOCK = ReentrantLock()
