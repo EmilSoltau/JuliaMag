@@ -2,7 +2,6 @@ using Test, JuliaMagCore
 import ArchGDAL as AG
 
 @testset "GeoTIFF and ER Mapper export" begin
-    report_text(job) = String(take!(copy(job.report)))
     temps(dir) = filter(f -> occursin(".tmp", f), readdir(dir))
     function load(s, f)
         job = wait_job(import_file(s, f))

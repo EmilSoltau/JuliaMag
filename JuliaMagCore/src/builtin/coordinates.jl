@@ -10,6 +10,8 @@
 # runs it without the lock. The reproject job marks the database busy while
 # it writes (readers such as exports wait too), and notes an undo that rolls the
 # database back to its committed state before the job (see `note_append_undo!`).
+# What PROJ says while it reprojects, such as that it used a ballpark
+# transformation, becomes a job warning.
 # Guess UTM zone only reads: it shares the database with exports and appends.
 
 const COORDINATES_TAB = "Coordinates"
@@ -261,6 +263,7 @@ function run_reproject(s::Session, ins::Dict{String,String}, st::Dict{String,Any
     local xname::String
     local yname::String
     failed = 0
+    messages = String[]
     try
         nchannels, rows = length(db.channels), db.rows_written
         r = Reprojector(p.crs, target)
@@ -281,6 +284,7 @@ function run_reproject(s::Session, ins::Dict{String,String}, st::Dict{String,Any
                 done += l.nrows
                 report(progress, rows == 0 ? 1.0 : done / rows)
             end
+            messages = proj_messages(r)
             push!(db.pairs, PositionPair(xname, yname, target))
             st["make_current"] === true && (db.current_pair = length(db.pairs))
             release_maps!(db)
@@ -305,6 +309,8 @@ function run_reproject(s::Session, ins::Dict{String,String}, st::Dict{String,Any
     println(out, "New position pair: ", xname, ",", yname,
             st["make_current"] === true ? " (now the current pair)." : ".")
     failed > 0 && println(out, failed_text(failed, p.crs, target))
+    # What PROJ said, such as that it used a ballpark transformation.
+    foreach(job_warning!, messages)
     return nothing
 end
 

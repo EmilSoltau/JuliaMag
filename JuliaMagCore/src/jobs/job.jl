@@ -8,10 +8,41 @@ the project by undo (spec 13.4). Redo makes it `JOB_DONE` again.
 @enum JobStatus JOB_RUNNING JOB_DONE JOB_FAILED JOB_CANCELLED JOB_UNDONE
 
 """
+The report of a job: the text its work writes. Other threads read it while the
+job runs, such as the Jobs tab, so each write and each read takes `lock`.
+`print(report, a, b, ...)` and `println` write their parts as one piece.
+Read it with `report_text(job)`.
+"""
+struct JobReport <: IO
+    buf::IOBuffer
+    lock::ReentrantLock
+end
+
+JobReport() = JobReport(IOBuffer(), ReentrantLock())
+
+function JobReport(text::AbstractString)
+    r = JobReport()
+    write(r.buf, text)
+    return r
+end
+
+# `print` and `println` with several parts hold the lock of the IO for all parts.
+Base.lock(r::JobReport) = lock(r.lock)
+Base.unlock(r::JobReport) = unlock(r.lock)
+Base.unsafe_write(r::JobReport, p::Ptr{UInt8}, n::UInt) = @lock r.lock unsafe_write(r.buf, p, n)
+Base.write(r::JobReport, b::UInt8) = @lock r.lock write(r.buf, b)
+Base.isopen(::JobReport) = true
+Base.iswritable(::JobReport) = true
+Base.isreadable(::JobReport) = false
+
+"""
 One run of a long task, such as an import. Made by `start_job!`.
 
 - `status`, `progress` (0 to 1) and `cancel` are atomics: other threads read them.
-- `report` is the text the work wrote. It is saved with the job.
+- `report` is the text the work wrote (a `JobReport`). It is saved with the job.
+  Read it with `report_text(job)`, which is safe while the job runs.
+- `warnings` are things the user should check, from `job_warning!`. They are
+  saved with the job. Read them with `job_warnings(job)`.
 - `outputs` are the ids of the project items the job made.
 - `error` is the message of a failed or cancelled job.
 - `task` runs the work. It is `nothing` for a job loaded from disk.
@@ -25,10 +56,28 @@ mutable struct Job
     cancel::Threads.Atomic{Bool}
     started::String
     finished::String
-    report::IOBuffer
+    report::JobReport
+    "Guarded by the lock of `report`."
+    warnings::Vector{String}
     outputs::Vector{String}
     error::String
     task::Union{Nothing,Task}
+end
+
+"""
+    job_warnings(job)::Vector{String}
+
+The warnings of a job, as a copy. Safe from any thread while the job runs.
+"""
+job_warnings(job::Job)::Vector{String} = @lock job.report.lock copy(job.warnings)
+
+"Add a warning to the job and a line for it to its report. Safe from any thread."
+function add_job_warning!(job::Job, text::AbstractString)
+    @lock job.report.lock begin
+        push!(job.warnings, String(text))
+        println(job.report, "Warning: ", text)
+    end
+    return nothing
 end
 
 "The state of a job now."
@@ -37,15 +86,28 @@ status(job::Job)::JobStatus = JobStatus(job.status[])
 set_status!(job::Job, st::JobStatus) = (job.status[] = Int(st); nothing)
 
 """
+A change noted with `note_job_undo!`: how to undo, redo and drop it, and the
+ids of the existing items it touches.
+"""
+struct NotedUndo
+    undo::Function
+    redo::Function
+    drop::Function
+    items::Vector{String}
+end
+
+"""
 What the work of a running job noted with `note_job_folder!`, `note_job_item!`
 and `note_job_undo!`. It lives in the task-local storage of the job's task.
 Tasks that the work starts itself do not see it.
 """
 struct JobContext
+    "The job, or `nothing` in tests that run work without one."
+    job::Union{Nothing,Job}
     folders::Vector{String}
     items::Vector{String}
-    "Steps as (undo, redo, drop), in the order they were noted."
-    undos::Vector{NTuple{3,Function}}
+    "Steps from `note_job_undo!`, in the order they were noted."
+    undos::Vector{NotedUndo}
     "Ids of existing items that the noted steps change."
     touched::Vector{String}
     "Args to add to the job's record, from `note_job_args!`."
@@ -54,7 +116,8 @@ struct JobContext
     busy::Vector{String}
 end
 
-JobContext() = JobContext(String[], String[], NTuple{3,Function}[], String[], Dict{String,Any}(), String[])
+JobContext(job::Union{Nothing,Job} = nothing) =
+    JobContext(job, String[], String[], NotedUndo[], String[], Dict{String,Any}(), String[])
 
 const JOB_CONTEXT_KEY = :juliamag_job_context
 
@@ -117,7 +180,20 @@ Outside a job this does nothing.
 function note_job_undo!(undo::Function, redo::Function, drop::Function; items::Vector{String} = String[])
     c = job_context()
     c === nothing && return nothing
-    push!(c.undos, (undo, redo, drop))
+    push!(c.undos, NotedUndo(undo, redo, drop, copy(items)))
     append!(c.touched, items)
+    return nothing
+end
+
+"""
+    job_warning!(text)
+
+Add a warning to the running job: something the user should check, although
+the job did its work. `jobs(s)` and the saved job record show it, and the
+report gets a line for it. Outside a job this does nothing.
+"""
+function job_warning!(text::AbstractString)
+    c = job_context()
+    (c === nothing || c.job === nothing) || add_job_warning!(something(c.job), text)
     return nothing
 end

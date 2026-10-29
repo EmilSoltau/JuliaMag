@@ -497,7 +497,7 @@ function setup_csv_channels!(st::CsvState, layout::CsvLayout, plans::Vector{Chan
         xk = findfirst(p -> p.role != :array && p.name == layout.x, plans)
         yk = findfirst(p -> p.role != :array && p.name == layout.y, plans)
         crs = isempty(layout.crs) && name_role(layout.x) == ROLE_LON ? "EPSG:4326" : layout.crs
-        add_pair!(db, names[something(xk)], names[something(yk)], crs)
+        add_pair!(db, names[something(xk)], names[something(yk)], crs; warn = !isempty(layout.crs))
         db.current_pair == 0 && !isempty(db.pairs) && (db.current_pair = 1)
     end
     d = open_appenders(db, names)

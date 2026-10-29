@@ -20,6 +20,10 @@ the session goes on. While one runs, its items carry a busy mark with reason
 `"undo is running"`, so no other change or reader touches them. A step that
 reads or changes other session state, such as the item list, takes `s.lock`
 for that part only.
+
+`recorded` is false for a change that is not in the history, such as the rows
+a failed job kept (see `undo_noted!`). Then its undo and redo are not recorded
+either, so a script does not undo some other step in its place.
 """
 struct UndoStep
     label::String
@@ -27,10 +31,12 @@ struct UndoStep
     redo::Function
     drop::Function
     items::Vector{String}
+    recorded::Bool
 end
 
 UndoStep(label, undo, redo) = UndoStep(label, undo, redo, () -> nothing, String[])
 UndoStep(label, undo, redo, drop) = UndoStep(label, undo, redo, drop, String[])
+UndoStep(label, undo, redo, drop, items) = UndoStep(label, undo, redo, drop, items, true)
 
 "One recorded action. `time` is local time as text. `job` is a job id or `\"\"`."
 struct HistoryEntry
@@ -90,7 +96,10 @@ BusyMark(writing::Bool, reading::Int, why::String, kind::Symbol) = BusyMark(writ
 "The reason of the busy mark of a running undo or redo step."
 const UNDO_RUNNING = "undo is running"
 
-busy_reason(m::BusyMark) = m.writing ? m.why : "an export is running"
+"The reason of a mark that only readers hold."
+const READING = "an export is running"
+
+busy_reason(m::BusyMark) = m.writing ? m.why : READING
 
 "True when readers may share the item with the mark `m`: no writer, or one that only appends."
 readers_allowed(m::BusyMark) = !m.writing || m.kind == :append
@@ -353,6 +362,8 @@ Add an entry to the history and append it to `jobs/history.jsonl`.
 Values in `args` must be plain: numbers, strings, booleans, vectors and dictionaries.
 While an undo or redo step runs, the entry is held and written after the step
 (see `Session`), so the history keeps the order of the stacks.
+A held entry that cannot be written then does not throw: it becomes a warning
+in `s.warnings`, and a job warning for the entry of a job (see `add_held!`).
 """
 function record!(s::Session, command::String, args::AbstractDict; job::String = "")
     lock(s.lock) do

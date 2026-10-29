@@ -26,7 +26,7 @@ using Test, JuliaMagCore
             @test g.crs == "EPSG:32633" && g.units == "nT" && g.source.format == "test"
             @test g.dx == 10.0 && g.y0 == 200.0
             @test isempty(importing(s))
-            @test occursin("test grid 4 x 3 cells, 11 with values", String(take!(copy(job.report))))
+            @test occursin("test grid 4 x 3 cells, 11 with values", report_text(job))
             @test grid(s.project, only(job.outputs)).count == 11   # saved with the metadata
         end
 

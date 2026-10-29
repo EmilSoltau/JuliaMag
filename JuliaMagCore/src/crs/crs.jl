@@ -7,50 +7,104 @@
 # share PROJ state. The context has a quiet log function: PROJ errors do not
 # throw out of C code (Proj.jl's default log function throws). We read errors
 # from return values instead: a NULL object, or a point that comes back as
-# infinity.
+# infinity. The log function keeps the lines PROJ logs in a `ProjLog` of the
+# context, so a caller can show them (see `with_crs` and `proj_messages`).
+#
+# PROJ logs nothing when it picks a ballpark transformation (checked with
+# PROJ 9.9). So a `Reprojector` asks PROJ which operation it used, and adds a
+# line when that operation is a ballpark one.
 
 using Proj
 
-# PROJ calls this for each log message of our contexts. It drops them.
-quiet_proj_log(::Ptr{Cvoid}, ::Cint, ::Cstring)::Cvoid = nothing
+"Most lines a `ProjLog` keeps. Later ones are counted, not kept."
+const MAX_PROJ_LINES = 100
 
-"A new PROJ context with a quiet log function. Free it with `Proj.proj_context_destroy`."
-function quiet_context()::Ptr{Proj.PJ_CONTEXT}
+"""
+The lines PROJ logged for one PROJ context, each kept once. PROJ calls the log
+function from C on the thread that called PROJ, so the lines take a lock.
+"""
+mutable struct ProjLog
+    lock::Threads.SpinLock
+    lines::Vector{String}
+    "Lines not kept, past `MAX_PROJ_LINES`."
+    more::Int
+end
+
+ProjLog() = ProjLog(Threads.SpinLock(), String[], 0)
+
+function add_line!(log::ProjLog, line::String)
+    @lock log.lock begin
+        line in log.lines && return nothing
+        length(log.lines) < MAX_PROJ_LINES ? push!(log.lines, line) : (log.more += 1)
+    end
+    return nothing
+end
+
+"The lines of the log, with a note for the lines not kept."
+function log_lines(log::ProjLog)::Vector{String}
+    lines, more = @lock log.lock (copy(log.lines), log.more)
+    more > 0 && push!(lines, "PROJ logged $more more lines.")
+    return lines
+end
+
+# PROJ calls this for each log message of our contexts, with the `ProjLog` of
+# the context as `data`. It must never throw into C.
+function collect_proj_log(data::Ptr{Cvoid}, ::Cint, msg::Cstring)::Cvoid
+    try
+        (data == C_NULL || msg == C_NULL) && return nothing
+        add_line!(unsafe_pointer_to_objref(data)::ProjLog, unsafe_string(msg))
+    catch
+    end
+    return nothing
+end
+
+"""
+A new PROJ context with a quiet log function that keeps the lines in `log`.
+Keep `log` alive while the context lives. Free it with `Proj.proj_context_destroy`.
+"""
+function quiet_context(log::ProjLog)::Ptr{Proj.PJ_CONTEXT}
     ctx = Proj.proj_context_create()
     ctx == C_NULL && throw(ArgumentError("PROJ could not make a context"))
-    Proj.proj_log_func(C_NULL, @cfunction(quiet_proj_log, Cvoid, (Ptr{Cvoid}, Cint, Cstring)), ctx)
+    Proj.proj_log_func(pointer_from_objref(log), @cfunction(collect_proj_log, Cvoid, (Ptr{Cvoid}, Cint, Cstring)),
+                       ctx)
     Proj.proj_context_set_search_paths(1, [Proj.PROJ_DATA[]], ctx)
     return ctx
 end
 
 """
-    with_crs(f, code)
+    with_crs(f, code; messages = nothing)
 
 Call `f(pj)` with the PROJ object of coordinate system `code` and return its
 result. Returns `nothing` when PROJ cannot read `code` as a coordinate system.
 Never throws for bad codes. An error in `f` is thrown as it is.
+The lines PROJ logged meanwhile are added to the vector `messages`, if given.
 """
-with_crs(f::F, code::AbstractString) where {F} = with_crs_context((pj, _) -> f(pj), code)
+with_crs(f::F, code::AbstractString; messages::Union{Nothing,Vector{String}} = nothing) where {F} =
+    with_crs_context((pj, _) -> f(pj), code; messages)
 
 "Like `with_crs`, but call `f(pj, ctx)` with the PROJ context of `pj` too."
-function with_crs_context(f::F, code::AbstractString) where {F}
+function with_crs_context(f::F, code::AbstractString; messages::Union{Nothing,Vector{String}} = nothing) where {F}
     (isempty(code) || occursin('\0', code)) && return nothing
-    ctx = quiet_context()
-    pj = Ptr{Proj.PJ}(C_NULL)
-    try
-        # Only reading the code counts as "not a coordinate system"; the quiet
-        # log function means PROJ reports that with NULL, not with an error.
-        pj = try
-            Proj.proj_create(String(code), ctx)
-        catch e
-            e isa InterruptException && rethrow()
-            Ptr{Proj.PJ}(C_NULL)
+    log = ProjLog()
+    GC.@preserve log begin
+        ctx = quiet_context(log)
+        pj = Ptr{Proj.PJ}(C_NULL)
+        try
+            # Only reading the code counts as "not a coordinate system"; the quiet
+            # log function means PROJ reports that with NULL, not with an error.
+            pj = try
+                Proj.proj_create(String(code), ctx)
+            catch e
+                e isa InterruptException && rethrow()
+                Ptr{Proj.PJ}(C_NULL)
+            end
+            (pj == C_NULL || Proj.proj_is_crs(pj) == 0) && return nothing
+            return f(pj, ctx)
+        finally
+            pj == C_NULL || Proj.proj_destroy(pj)
+            Proj.proj_context_destroy(ctx)
+            messages === nothing || append!(messages, log_lines(log))
         end
-        (pj == C_NULL || Proj.proj_is_crs(pj) == 0) && return nothing
-        return f(pj, ctx)
-    finally
-        pj == C_NULL || Proj.proj_destroy(pj)
-        Proj.proj_context_destroy(ctx)
     end
 end
 
@@ -205,29 +259,32 @@ current system has it. Never throws.
 function crs_from_name(name::AbstractString)::Union{Nothing,String}
     text = String(strip(name))
     (isempty(text) || occursin('\0', text)) && return nothing
-    ctx = quiet_context()
-    try
-        list = Proj.proj_create_from_name("EPSG", text, NAMED_CRS_TYPES, length(NAMED_CRS_TYPES), 0, 0, C_NULL, ctx)
-        list == C_NULL && return nothing
-        codes = String[]
+    log = ProjLog()            # the lines are not used; PROJ needs a log to write to
+    GC.@preserve log begin
+        ctx = quiet_context(log)
         try
-            for k in 1:Proj.proj_list_get_count(list)
-                obj = Proj.proj_list_get(list, k - 1, ctx)
-                obj == C_NULL && continue
-                try
-                    Proj.proj_is_deprecated(obj) == 0 || continue
-                    id = Proj.proj_get_id_code(obj, 0)
-                    id isa String && push!(codes, "EPSG:$id")
-                finally
-                    Proj.proj_destroy(obj)
+            list = Proj.proj_create_from_name("EPSG", text, NAMED_CRS_TYPES, length(NAMED_CRS_TYPES), 0, 0, C_NULL, ctx)
+            list == C_NULL && return nothing
+            codes = String[]
+            try
+                for k in 1:Proj.proj_list_get_count(list)
+                    obj = Proj.proj_list_get(list, k - 1, ctx)
+                    obj == C_NULL && continue
+                    try
+                        Proj.proj_is_deprecated(obj) == 0 || continue
+                        id = Proj.proj_get_id_code(obj, 0)
+                        id isa String && push!(codes, "EPSG:$id")
+                    finally
+                        Proj.proj_destroy(obj)
+                    end
                 end
+            finally
+                Proj.proj_list_destroy(list)
             end
+            return length(codes) == 1 ? only(codes) : nothing
         finally
-            Proj.proj_list_destroy(list)
+            Proj.proj_context_destroy(ctx)
         end
-        return length(codes) == 1 ? only(codes) : nothing
-    finally
-        Proj.proj_context_destroy(ctx)
     end
 end
 
@@ -338,12 +395,17 @@ as_float(_)::Float64 = NaN
 """
 A transformation from one coordinate system to another, with its own PROJ
 context. Make it once and use it for many points; `close` frees it.
-Use it on one thread at a time.
+Use it on one thread at a time. `proj_messages` gives what PROJ said, such as
+that it used a ballpark transformation.
 """
 mutable struct Reprojector
     ctx::Ptr{Proj.PJ_CONTEXT}
     trans::Proj.Transformation
+    log::ProjLog
 end
+
+"Points between two checks of the operation PROJ used (see `note_ballpark!`)."
+const OPERATION_CHECK_POINTS = 4096
 
 """
     Reprojector(from, to)
@@ -355,7 +417,8 @@ function Reprojector(from::AbstractString, to::AbstractString)
     for code in (from, to)
         valid_crs(code) || throw(ArgumentError("Coordinate system \"$code\" is not known."))
     end
-    ctx = quiet_context()
+    log = ProjLog()
+    ctx = quiet_context(log)
     trans = try
         Proj.Transformation(String(from), String(to); always_xy = true, ctx)
     catch e
@@ -363,7 +426,7 @@ function Reprojector(from::AbstractString, to::AbstractString)
         e isa InterruptException && rethrow()
         throw(ArgumentError("There is no way to transform from $from to $to."))
     end
-    r = Reprojector(ctx, trans)
+    r = Reprojector(ctx, trans, log)
     finalizer(close, r)
     return r
 end
@@ -376,11 +439,41 @@ function Base.close(r::Reprojector)
 end
 
 """
+    proj_messages(r)::Vector{String}
+
+What PROJ said while `r` was made and used, each line once: the lines PROJ
+logged, and a line for each ballpark transformation it used.
+"""
+proj_messages(r::Reprojector)::Vector{String} = log_lines(r.log)
+
+"""
+Add a line to the log of `r` when the operation PROJ used for the last point is
+a ballpark transformation. PROJ picks the operation per point, by area, so
+`reproject!` checks every `OPERATION_CHECK_POINTS` points and at the end.
+"""
+function note_ballpark!(r::Reprojector)
+    op = Proj.proj_trans_get_last_used_operation(r.trans.pj)
+    op == C_NULL && return nothing
+    try
+        Proj.proj_coordoperation_has_ballpark_transformation(op, r.ctx) == 1 || return nothing
+        name = Proj.proj_get_name(op)
+        name isa AbstractString || return nothing
+        name = replace(String(name), " (with axis order normalized for visualization)" => "")
+        add_line!(r.log, "PROJ used a ballpark transformation: \"$name\". It leaves out the shift between " *
+                         "the two datums, so the positions can be off by many metres.")
+    finally
+        Proj.proj_destroy(op)
+    end
+    return nothing
+end
+
+"""
     reproject!(r, x, y, ox, oy)::Int
 
 Transform the points `x, y` into `ox, oy`. A missing value in gives `NaN` out.
 A point PROJ cannot transform gives `NaN` too. Returns how many points PROJ
 could not transform. Never throws for bad points.
+A ballpark transformation adds a line to `proj_messages(r)`.
 """
 function reproject!(r::Reprojector, x::AbstractVector, y::AbstractVector,
                     ox::AbstractVector{Float64}, oy::AbstractVector{Float64})::Int
@@ -389,6 +482,7 @@ function reproject!(r::Reprojector, x::AbstractVector, y::AbstractVector,
     r.ctx == C_NULL && throw(ArgumentError("the reprojector is closed"))
     t = r.trans
     failed = 0
+    done = 0                       # points PROJ transformed since the last check
     @inbounds for k in eachindex(x, y, ox, oy)
         px, py = as_float(x[k]), as_float(y[k])
         if !(isfinite(px) && isfinite(py))
@@ -398,12 +492,15 @@ function reproject!(r::Reprojector, x::AbstractVector, y::AbstractVector,
         qx, qy = t(px, py)
         if isfinite(qx) && isfinite(qy)
             ox[k], oy[k] = qx, qy
+            done += 1
+            done == OPERATION_CHECK_POINTS && (note_ballpark!(r); done = 0)
         else
             ox[k], oy[k] = NaN, NaN
             failed += 1
             Proj.proj_errno_reset(t.pj)
         end
     end
+    done > 0 && note_ballpark!(r)
     return failed
 end
 
@@ -422,11 +519,12 @@ function reproject_xy(x::AbstractVector, y::AbstractVector, from::AbstractString
     ox = Vector{Float64}(undef, length(x))
     oy = Vector{Float64}(undef, length(y))
     r = Reprojector(from, to)
-    failed = try
-        reproject!(r, x, y, ox, oy)
+    failed, messages = try
+        reproject!(r, x, y, ox, oy), proj_messages(r)
     finally
         close(r)
     end
+    foreach(m -> @warn(m), messages)
     failed > 0 && @warn failed_text(failed, from, to)
     return ox, oy
 end

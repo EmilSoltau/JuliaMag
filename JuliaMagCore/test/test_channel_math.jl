@@ -289,7 +289,7 @@ end
     c = channel(db, "D")
     @test c.eltype == Float64 && !c.protected && c.decimals == -1 && c.arraylen == 1
     @test read_channel(db, CM_L1, "D") == [0.5, 1.5, 2.5] && read_channel(db, CM_L2, "D") == [3.0, 4.0, 5.0]
-    @test occursin("D = MAG - IGRF", String(take!(copy(job.report))))
+    @test occursin("D = MAG - IGRF", report_text(job))
     @test last(s.undo_stack).items == [id]
     # undo removes the channel exactly; redo puts it back
     @test undo!(s)

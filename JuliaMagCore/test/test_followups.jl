@@ -1,5 +1,6 @@
 # Plan 1 follow-ups that plan 2 fixes: undo outside the session lock, the sweep
-# of leftover side folders, and settings that a failed quick tool keeps.
+# of leftover side folders, settings that a failed quick tool keeps, job reports
+# that are read while a job writes them, and job warnings.
 # It runs alone too, with several threads:
 #   julia --project=JuliaMagCore -t 4 JuliaMagCore/test/test_followups.jl
 
@@ -258,6 +259,204 @@ new_log() = (String[], ReentrantLock())
             @test occursin("not removed", s.warnings[2]) && occursin("force = true", s.warnings[2])
             close_session!(s)
         end
+    end
+
+    @testset "a job report can be read while the job writes it" begin
+        s = fresh_session()
+        go, stop = Threads.Atomic{Bool}(false), Threads.Atomic{Bool}(false)
+        written = Threads.Atomic{Int}(0)
+        # Short lines, at most 50,000: the report stays below the 1 MB cut.
+        work = (p, io) -> begin
+            await(() -> go[]) || error("the reader never started")
+            for k in 1:50_000
+                stop[] && break
+                println(io, "line ", k)
+                written[] = k
+                k % 100 == 0 && yield()
+            end
+            ProjectItem[]
+        end
+        j = start_job!(s, "test.live_report", Dict{String,Any}(), work; undoable = false)
+        reader = Threads.@spawn begin
+            problems, reads = String[], 0
+            go[] = true
+            t0 = time()
+            while time() - t0 < 1.0
+                text = report_text(j)
+                reads += 1
+                # Each read holds whole lines, in order.
+                (isempty(text) || endswith(text, "\n")) || push!(problems, "a cut line")
+                lines = split(text, '\n'; keepempty = false)
+                all(k -> lines[k] == "line $k", eachindex(lines)) || push!(problems, "lines out of order")
+                yield()
+            end
+            stop[] = true
+            (problems, reads)
+        end
+        found, nreads = fetch(reader)
+        wait_job(j)
+        @test status(j) == JOB_DONE
+        @test isempty(found) && nreads > 0
+        @test j.report isa JuliaMagCore.JobReport
+        n = written[]
+        @test n > 0 && report_text(j) == join("line $k\n" for k in 1:n)
+        close_session!(s)
+    end
+
+    @testset "job warnings are kept in the job record" begin
+        mktempdir() do dir
+            folder = joinpath(dir, "p")
+            s = new_session(folder, "P")
+            j = wait_job(start_job!(s, "test.warns", Dict{String,Any}(), (p, io) -> begin
+                job_warning!("first thing to check")
+                job_warning!("second thing to check")
+                ProjectItem[]
+            end))
+            @test status(j) == JOB_DONE
+            @test job_warnings(j) == ["first thing to check", "second thing to check"]
+            @test occursin("first thing to check", report_text(j))
+            # Outside a job it does nothing.
+            @test job_warning!("nobody hears this") === nothing
+            close_session!(s)
+            s = open_session(folder)
+            @test job_warnings(only(jobs(s))) == ["first thing to check", "second thing to check"]
+            close_session!(s)
+            # An older record has no warnings field: it loads with none.
+            path = joinpath(folder, "jobs", "$(j.id).json")
+            rec = JSON3.read(read(path, String), Dict{String,Any})
+            delete!(rec, "warnings")
+            write(path, JSON3.write(rec))
+            s = open_session(folder)
+            @test isempty(job_warnings(only(jobs(s))))
+            close_session!(s)
+        end
+    end
+
+    @testset "a failed append that an export blocks keeps its undo" begin
+        mktempdir() do dir
+            folder = joinpath(dir, "p")
+            s = new_session(folder, "P")
+            a = joinpath(dir, "a.xyz"); write_synthetic_xyz(a; lines = 2, ties = 0, rows_per_line = 50)
+            b = joinpath(dir, "b.xyz"); write_synthetic_xyz(b; lines = 3, ties = 0, rows_per_line = 40, seed = 5)
+            j1 = wait_job(import_file(s, a))
+            id = only(j1.outputs)
+            rows0 = database(s.project, id).rows_written
+            # The append is done; then an export starts to read the database, and
+            # then the work of the job fails.
+            appended, release = Channel{Bool}(1), Channel{Bool}(1)
+            j = start_job!(s, "test.failed_append", Dict{String,Any}(), (p, io) -> begin
+                import_xyz(s, b; mode = :append, target = id, record = false)
+                put!(appended, true)
+                take!(release)
+                error("the work failed after the append")
+            end)
+            @test take!(appended)
+            JuliaMagCore.mark_reading!(s, id)
+            put!(release, true)
+            wait_job(j)
+            text = "the rows this job appended to $id could not be removed while an export reads it; " *
+                   "use Undo when the export ends"
+            @test status(j) == JOB_FAILED && j.error == "the work failed after the append"
+            @test job_warnings(j) == [text]
+            @test occursin(text, report_text(j))
+            @test database(s.project, id).rows_written == rows0 + 120
+            @test s.undo_stack[end].label == "remove rows of failed $(j.id)"
+            rec = JSON3.read(read(joinpath(folder, "jobs", "$(j.id).json"), String))
+            @test rec["warnings"] == [text]
+            # While the export reads, undo is refused; after it, undo removes the rows.
+            @test_throws ItemBusyError undo!(s)
+            JuliaMagCore.unmark_reading!(s, id)
+            @test undo!(s)
+            db = database(s.project, id)
+            @test db.rows_written == rows0 && length(db.lines) == 2
+            # The failed job is not in the history, so its undo is not either:
+            # a script must not undo another step in its place.
+            @test all(h -> !(h.command in ("session.undo", "test.failed_append")), s.history)
+            @test s.undo_stack[end].label == "import.geosoft_xyz ($(j1.id))"
+            close_session!(s)
+        end
+    end
+
+    @testset "an append in another coordinate system warns" begin
+        mktempdir() do dir
+            s = new_session(joinpath(dir, "p"), "P")
+            a = joinpath(dir, "a.xyz"); write_synthetic_xyz(a; lines = 2, ties = 0, rows_per_line = 20)
+            b = joinpath(dir, "b.xyz"); write_synthetic_xyz(b; lines = 1, ties = 0, rows_per_line = 20, seed = 3)
+            id = only(wait_job(import_file(s, a; crs = "EPSG:4283")).outputs)
+            j = wait_job(import_file(s, b; mode = "append", target = id, crs = "EPSG:4326"))
+            @test status(j) == JOB_DONE
+            w = job_warnings(j)
+            @test length(w) == 1
+            @test occursin("X,Y", w[1]) && occursin("EPSG:4283", w[1]) && occursin("EPSG:4326", w[1])
+            @test only(database(s.project, id).pairs).crs == "EPSG:4283"
+            # The same system, or none given, does not warn.
+            j = wait_job(import_file(s, b; mode = "append", target = id, crs = "EPSG:4283"))
+            @test status(j) == JOB_DONE && isempty(job_warnings(j))
+            j = wait_job(import_file(s, b; mode = "append", target = id))
+            @test status(j) == JOB_DONE && isempty(job_warnings(j))
+            close_session!(s)
+        end
+    end
+
+    @testset "PROJ messages reach the caller" begin
+        msgs = String[]
+        @test JuliaMagCore.with_crs(_ -> true, "EPSG:999999"; messages = msgs) === nothing
+        @test msgs == ["proj_create: crs not found: EPSG:999999"]
+        # Each call collects its own lines, also on many threads at once.
+        codes = ["EPSG:99999$k" for k in 0:7]
+        tasks = [Threads.@spawn begin
+                     got = String[]
+                     for _ in 1:50
+                         lines = String[]
+                         JuliaMagCore.with_crs(_ -> true, c; messages = lines)
+                         append!(got, lines)
+                     end
+                     got
+                 end for c in codes]
+        @test [fetch(t) for t in tasks] == [fill("proj_create: crs not found: $c", 50) for c in codes]
+        # PROJ itself logs nothing for a ballpark transformation; the reprojector asks
+        # which operation it used.
+        r = JuliaMagCore.Reprojector("EPSG:4326", "EPSG:4610")
+        ox, oy = zeros(2), zeros(2)
+        JuliaMagCore.reproject!(r, [110.0, 110.1], [30.0, 30.1], ox, oy)
+        said = JuliaMagCore.proj_messages(r)
+        close(r)
+        @test length(said) == 1 && occursin("Ballpark geographic offset from WGS 84 to Xian 1980", said[1])
+        r = JuliaMagCore.Reprojector("EPSG:4326", "EPSG:32755")
+        JuliaMagCore.reproject!(r, [147.1, 147.2], [-19.5, -19.6], ox, oy)
+        @test isempty(JuliaMagCore.proj_messages(r))
+        close(r)
+    end
+
+    @testset "a ballpark reprojection says so in the job report" begin
+        (; s, id) = make_db_with(LON = [110.0, 110.1, 110.2], LAT = [30.0, 30.1, 30.2])
+        db = database(s.project, id)
+        push!(db.pairs, PositionPair("LON", "LAT", "EPSG:4326"))
+        db.current_pair = 1
+        save_meta(db)
+        job = wait_job(run_tool(s, "coordinates.reproject"; inputs = Dict("database" => id), pair = "LON,LAT",
+                                crs = "EPSG:4610"))
+        @test status(job) == JOB_DONE
+        @test occursin("Ballpark geographic offset from WGS 84 to Xian 1980", report_text(job))
+        @test length(job_warnings(job)) == 1
+        job = wait_job(run_tool(s, "coordinates.reproject"; inputs = Dict("database" => id), pair = "LON,LAT",
+                                crs = "EPSG:32649"))
+        @test status(job) == JOB_DONE && !occursin("allpark", report_text(job)) && isempty(job_warnings(job))
+        close_session!(s)
+    end
+
+    @testset "a held history entry that cannot be saved warns its job" begin
+        s = fresh_session()
+        j = wait_job(start_job!(s, "test.held", Dict{String,Any}(), (p, io) -> ProjectItem[]; undoable = false))
+        path = joinpath(s.project.folder, "jobs", "history.jsonl")
+        rm(path; force = true)
+        mkpath(path)                                     # a folder: the line cannot be written
+        e = JuliaMagCore.HistoryEntry(JuliaMagCore.now_text(), "test.held", Dict{String,Any}(), j.id)
+        lock(() -> JuliaMagCore.add_held!(s, e), s.lock)
+        @test length(job_warnings(j)) == 1
+        @test startswith(only(job_warnings(j)), "the history entry of this job could not be saved")
+        @test any(w -> occursin("test.held", w), s.warnings)
+        close_session!(s)
     end
 
     try

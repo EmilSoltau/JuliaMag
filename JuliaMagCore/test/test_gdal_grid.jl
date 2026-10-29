@@ -134,7 +134,6 @@ end
 
 @testset "GDAL grid import" begin
     importing(s) = filter(startswith(".importing-"), readdir(joinpath(s.project.folder, "grids")))
-    report_text(job) = String(take!(copy(job.report)))
 
     # The reference grid: 4 by 3, north up, value 7 in the north-west cell, one nodata cell.
     north = Float32[7 1 2; 3 -9999 4; 5 6 8; 9 10 11]        # file order: column 1 holds the north row

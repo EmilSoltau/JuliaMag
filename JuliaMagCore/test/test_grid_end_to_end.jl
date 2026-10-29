@@ -101,7 +101,7 @@ const E2E_GRIDS = joinpath(@__DIR__, "data", "grids")
                 f = joinpath(tmp, "$tag$ext")
                 job = wait_job(export_file(s, id, f))
                 @test status(job) == JOB_DONE
-                report = String(take!(copy(job.report)))
+                report = report_text(job)
                 @test occursin("has no name for the coordinate system", report) == (ext == ".ers" && ers_crs != crs)
                 _, g, C = load(s, f)
                 @test isequal(C, B)

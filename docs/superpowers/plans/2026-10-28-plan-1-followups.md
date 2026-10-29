@@ -7,16 +7,10 @@ These are the open points from the reviews that later plans must handle.
 
 ## Must be done before the UI depends on it (plan 2 to 4)
 
-- A job that fails after a finished append, while a reader (export, Statistics, Guess UTM) holds the item, keeps the appended rows and has no undo.
-  Record it as a job warning and offer the undo once the reader ends.
 - Saved scripts use literal item ids, so they only replay on a copy of the starting project.
   Bind outputs to variables before the Run Script UI exists.
 - `rerun!` with `replace = true` is not in the history, so replay keeps both outputs.
-- A job report (`IOBuffer`) is read while the worker writes it.
-  This is a data race once the Jobs tab shows live reports.
 - `Session.warnings` is stored but not shown.
-- An append with a coordinate system that differs from the existing pair gives no warning.
-- PROJ warnings (for example a ballpark transformation) are dropped.
 - Session API gaps: remove an item with undo, undoable channel property edits (unprotect, rename, delete), a setter for the marked range, an item-picker setting type for importer targets.
 
 ## Done in plan 2
@@ -31,6 +25,19 @@ These are the open points from the reviews that later plans must handle.
   Done in the same commit: `open_session` removes `.undo-*` and `.importing-*` folders, each with a warning.
 - Settings are remembered before a quick tool runs, so a failed run still changes them.
   Done in the same commit: a quick tool remembers its settings only after it ran without error.
+- A job that fails after a finished append, while a reader (export, Statistics, Guess UTM) holds the item, kept the appended rows and had no undo.
+  Done in the commit "Make job reports thread safe and show job warnings".
+  The job gets a warning, and an undo step "remove rows of failed <job id>" that works once the reader ends.
+  The failed job is not in the history, so the undo of that step is not recorded either.
+- A job report (`IOBuffer`) was read while the worker wrote it.
+  Done in the same commit: the report is a `JobReport` with a lock, and `report_text(job)` is safe from any thread.
+- An append with a coordinate system that differs from the existing pair gave no warning.
+  Done in the same commit: the job gets a warning, and the pair keeps its own coordinate system.
+- PROJ warnings were dropped.
+  Done in the same commit: the lines PROJ logs reach `with_crs` and `Reprojector`, and a reprojection job shows them as warnings.
+  PROJ logs nothing for a ballpark transformation, so the reprojector asks PROJ which operation it used and adds a line for a ballpark one.
+- Jobs have warnings now (`job_warning!`, `job_warnings`), saved in the job record.
+  A job that finishes during an undo, and whose held history entry then cannot be written, gets such a warning.
 
 ## Checks on real systems
 

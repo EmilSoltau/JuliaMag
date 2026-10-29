@@ -67,8 +67,9 @@ end
     # missing in, missing out; the other points are fine
     x, y = reproject_xy([147.0, NaN, 147.0], [-19.0, -19.0, NaN], "EPSG:4326", "EPSG:32755")
     @test isfinite(x[1]) && isnan(x[2]) && isnan(y[2]) && isnan(x[3]) && isnan(y[3])
-    # a point that PROJ cannot transform becomes NaN and is counted; nothing throws
-    x, y = @test_logs (:warn, r"1 point could not be transformed") reproject_xy(
+    # a point that PROJ cannot transform becomes NaN and is counted; nothing throws.
+    # What PROJ logged about it comes first.
+    x, y = @test_logs (:warn, "utm: Invalid latitude") (:warn, r"1 point could not be transformed") reproject_xy(
         [147.0, 147.0], [-19.0, 95.0], "EPSG:4326", "EPSG:32755")
     @test isfinite(x[1]) && isnan(x[2]) && isnan(y[2])
     # back again
@@ -206,7 +207,7 @@ end
     ex, ey = reproject_xy([147.1, 147.2, 147.3], [-19.5, -19.6, -19.7], "EPSG:4326", "EPSG:32755")
     @test read_channel(db, L, "X_32755") == ex && read_channel(db, L, "Y_32755") == ey
     @test channel(db, "X_32755").units == "m"
-    @test occursin("X_32755", String(take!(copy(job.report))))
+    @test occursin("X_32755", report_text(job))
     # undo removes the channels and the pair; redo puts them back
     @test undo!(s)
     db = database(s.project, id)
@@ -253,7 +254,7 @@ end
     ins = Dict("database" => id)
     job = wait_job(run_tool(s, "coordinates.reproject"; inputs = ins, pair = "LON,LAT", crs = "EPSG:32755"))
     @test status(job) == JOB_DONE
-    @test occursin("1 point could not be transformed from EPSG:4326 to EPSG:32755.", String(take!(copy(job.report))))
+    @test occursin("1 point could not be transformed from EPSG:4326 to EPSG:32755.", report_text(job))
     x = read_channel(database(s.project, id), LineId(LINE, 1001, 0), "X_32755")
     @test isfinite(x[1]) && isnan(x[2])
     # a cancelled run leaves the database as it was and not busy

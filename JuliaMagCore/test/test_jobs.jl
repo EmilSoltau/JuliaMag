@@ -30,7 +30,7 @@ end
         @test !isempty(j.started) && !isempty(j.finished) && isempty(j.error)
         it = only(s.project.items)
         @test j.outputs == [it.id] && it.made_by == j.id
-        @test occursin("100 rows", String(take!(copy(j.report))))
+        @test occursin("100 rows", report_text(j))
         # Recorded once, with the job id.
         @test count(e -> e.command == "import.geosoft_xyz", s.history) == 1
         e = s.history[end]
@@ -54,7 +54,7 @@ end
         s2 = open_session(s.project.folder)
         @test [x.id for x in jobs(s2)] == ["job-1"]
         @test status(only(jobs(s2))) == JOB_DONE
-        @test occursin("100 rows", String(take!(copy(only(jobs(s2)).report))))
+        @test occursin("100 rows", report_text(only(jobs(s2))))
         j3 = start_job!(s2, "test.ok", Dict{String,Any}(), (p, r) -> ProjectItem[]); wait_job(j3)
         @test j3.id == "job-3"
         @test [x.id for x in jobs(s2)] == ["job-3", "job-1"]       # newest first
@@ -406,7 +406,7 @@ end
         j3 = rerun!(s, j1; replace = true); wait_job(j3)
         @test status(j3) == JOB_DONE
         @test any(i -> i.id == id, s.project.items)               # kept
-        @test occursin("$id is busy", String(take!(copy(j3.report))))
+        @test occursin("$id is busy", report_text(j3))
         @test status(j1) == JOB_DONE
         gate[] = true
         wait_job(j2)

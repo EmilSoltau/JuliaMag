@@ -79,7 +79,6 @@ end
 
 @testset "Geosoft grid import" begin
     importing(s) = filter(startswith(".importing-"), readdir(joinpath(s.project.folder, "grids")))
-    report_text(job) = String(take!(copy(job.report)))
     run_grd(s, f) = start_job!(s, "import.test_grd", Dict{String,Any}("path" => f), (p, io) -> begin
         r = read_geosoft_grd(s, f, Dict{String,Any}(), p)
         println(io, r.summary)
@@ -364,7 +363,6 @@ end
 le(::Type{T}, b, off) where {T} = ltoh(only(reinterpret(T, b[off + 1:off + sizeof(T)])))
 
 @testset "Geosoft grid export" begin
-    report_text(job) = String(take!(copy(job.report)))
     temps(dir) = filter(f -> occursin(".tmp", f), readdir(dir))
     function load(s, f)
         job = wait_job(import_file(s, f))

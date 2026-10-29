@@ -48,7 +48,8 @@ The step runs without `s.lock` (see `UndoStep`). Its items are busy meanwhile,
 with reason `"undo is running"`. A second `undo!` or `redo!` waits for it.
 If the step throws, it stays on the stack and the error is thrown. So does a
 step whose items are busy (`ItemBusyError`), before it runs.
-The undo is recorded as `"session.undo"` so the script repeats it.
+The undo is recorded as `"session.undo"` so the script repeats it, unless the
+step's change is not in the history (`recorded = false`).
 Do not call it while holding `s.lock` (see `Session` for the order of locks).
 """
 undo!(s::Session)::Bool = run_step!(s, true)
@@ -83,7 +84,7 @@ function run_step!(s::Session, undo::Bool)::Bool
                 s.held_edits = nothing
                 try
                     push!(ok ? to() : from(), step)
-                    ok && record!(s, undo ? "session.undo" : "session.redo", Dict{String,Any}())
+                    ok && step.recorded && record!(s, undo ? "session.undo" : "session.redo", Dict{String,Any}())
                 finally
                     foreach(x -> add_held!(s, x), held)
                 end
@@ -93,14 +94,21 @@ function run_step!(s::Session, undo::Bool)::Bool
     end
 end
 
-"Push or record a change that was held while an undo or redo step ran. Call it under `s.lock`."
+"""
+Push or record a change that was held while an undo or redo step ran. Call it under `s.lock`.
+A history entry that cannot be written is a warning, not an error: the change
+is done. The entry of a job warns that job too, since a script will not repeat it.
+"""
 function add_held!(s::Session, x::Union{UndoStep,HistoryEntry})
     x isa UndoStep && return (push_undo!(s, x); nothing)
     try
         write_history!(s, x)
     catch e
         e isa InterruptException && rethrow()
-        session_warning!(s, "the history entry \"$(x.command)\" could not be saved: $(sprint(showerror, e))")
+        why = sprint(showerror, e)
+        session_warning!(s, "the history entry \"$(x.command)\" could not be saved: $why")
+        isempty(x.job) || warn_job!(s, x.job, "the history entry of this job could not be saved, " *
+                                              "so a script will not repeat it: $why")
     end
     return nothing
 end

@@ -146,7 +146,6 @@ end
 
 @testset ".grd importer" begin
     importing(s) = filter(startswith(".importing-"), readdir(joinpath(s.project.folder, "grids")))
-    report_text(job) = String(take!(copy(job.report)))
     first_line(job) = first(split(report_text(job), '\n'))
     function load(s, f)
         job = wait_job(import_file(s, f))

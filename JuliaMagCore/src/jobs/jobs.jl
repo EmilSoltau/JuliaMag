@@ -18,6 +18,11 @@
 # - Status and progress are atomics. Project changes happen under `s.lock`, held
 #   only for short times. The job list, the counter and the job records are
 #   guarded by `s.jobs_lock`, so they never wait for project work.
+# - The report and the warnings of a job have their own lock (see `JobReport`),
+#   so other threads can read them while the job runs.
+# - A failed job whose noted undo is refused because a reader (an export) holds
+#   the item keeps that change: it gets a warning, and an undo step for it is
+#   pushed, so the user can undo it once the reader ends (see `undo_noted!`).
 
 using JSON3
 
@@ -48,6 +53,7 @@ end
 Run `work(progress::Progress, report::IO)` on a worker thread and return the job at once.
 `work` returns a vector of the new `ProjectItem`s it made (it may add them to the
 project itself). It should check `is_cancelled(progress)` now and then.
+`report` is the job's `JobReport`. The work adds a warning with `job_warning!`.
 
 When the work is done, its new items are in the project, the job is recorded in
 the history as `command` with `args`, and an undo step takes the items out again.
@@ -66,7 +72,7 @@ function start_job!(s::Session, command::AbstractString, args::AbstractDict, wor
     lock(s.jobs_lock) do
         job = Job(reserve_job_id!(s), String(command), a, Threads.Atomic{Int}(Int(JOB_RUNNING)),
                   Threads.Atomic{Float64}(0.0), Threads.Atomic{Bool}(false), now_text(), "",
-                  IOBuffer(), String[], "", nothing)
+                  JobReport(), String[], String[], "", nothing)
         push!(s.jobs, job)
         save_job_quietly(s, job)
         job.task = Threads.@spawn run_job!(s, job, work, before, replaces, undoable)
@@ -104,7 +110,19 @@ function wait_job(job::Job)::Job
     return job
 end
 
-"The jobs of the session, newest first."
+"Add a warning to the job with id `id`, if the session has it, and save its record."
+function warn_job!(s::Session, id::AbstractString, text::AbstractString)
+    job = lock(s.jobs_lock) do
+        k = findfirst(j -> j.id == id, s.jobs)
+        k === nothing ? nothing : s.jobs[k]
+    end
+    job === nothing && return nothing
+    add_job_warning!(job, text)
+    save_job_quietly(s, job)
+    return nothing
+end
+
+"The jobs of the session, newest first. Each job shows its warnings (`job_warnings`) and report (`report_text`)."
 function jobs(s::Session)::Vector{Job}
     lock(s.jobs_lock) do
         return sort(s.jobs; by = j -> something(job_number(j.id), 0), rev = true)
@@ -115,7 +133,7 @@ end
 
 function run_job!(s::Session, job::Job, work::Function, before::Set{String}, replaces::Union{Nothing,Job},
                   undoable::Bool)
-    ctx = JobContext()
+    ctx = JobContext(job)
     try
         progress = Progress(f -> (job.progress[] = clamp(Float64(f), 0.0, 1.0); nothing), () -> job.cancel[])
         result = task_local_storage(JOB_CONTEXT_KEY, ctx) do
@@ -141,6 +159,10 @@ end
 Add the outputs, record the job and push its undo step (when `undoable`).
 Undoes its own changes on error. Ends the busy marks of the work last, so no
 edit can land between the work and its undo step.
+
+A job that finishes while an undo or redo step runs has its history entry held
+until the step ends (see `record!`). If writing it fails then, the job keeps
+its changes and gets a warning (see `add_held!`); it is not undone.
 """
 function finish_job!(s::Session, job::Job, items::Vector{ProjectItem}, before::Set{String},
                      replaces::Union{Nothing,Job}, ctx::JobContext, undoable::Bool)
@@ -184,7 +206,7 @@ function finish_locked!(s::Session, job::Job, items::Vector{ProjectItem}, before
         quietly(() -> swap_items!(p, new, old))
         foreach(it -> quietly(() -> rm(item_path(p, it); recursive = true, force = true)), new)
         end_job_marks!(s, ctx)          # the noted undos refuse busy items
-        undo_noted!(ctx)
+        undo_noted!(s, job, ctx)
         rethrow()
     end
     old_status = replaces === nothing ? JOB_DONE : status(replaces)
@@ -204,7 +226,7 @@ function finish_locked!(s::Session, job::Job, items::Vector{ProjectItem}, before
     # The steps run without `s.lock` (see `UndoStep`). The noted steps may copy
     # large files; the change of the item list takes the lock.
     undo = () -> begin
-        foreach(u -> u[1](), reverse(noted))
+        foreach(u -> u.undo(), reverse(noted))
         lock(s.lock) do
             swap_items!(p, new, old)
             set_job_status!(s, job, JOB_UNDONE)
@@ -213,7 +235,7 @@ function finish_locked!(s::Session, job::Job, items::Vector{ProjectItem}, before
         nothing
     end
     redo = () -> begin
-        foreach(u -> u[2](), noted)
+        foreach(u -> u.redo(), noted)
         lock(s.lock) do
             swap_items!(p, old, new)
             set_job_status!(s, job, JOB_DONE)
@@ -225,7 +247,7 @@ function finish_locked!(s::Session, job::Job, items::Vector{ProjectItem}, before
     # Redo is no longer possible: free what the noted steps kept, and delete the
     # files of outputs that undo took out of the project.
     drop = () -> begin
-        foreach(u -> u[3](), noted)
+        foreach(u -> u.drop(), noted)
         remove_unused_folders!(p, vcat(new, old))
         nothing
     end
@@ -263,14 +285,48 @@ function quietly(f::Function)
     return nothing
 end
 
-"Undo, then drop, the changes the work noted with `note_job_undo!`, newest first."
-function undo_noted!(ctx::JobContext)
+"""
+Undo, then drop, the changes the work of a failed job noted with
+`note_job_undo!`, newest first. Call it under `s.lock`.
+
+An undo that a busy item refuses (`ItemBusyError`), such as rows appended to a
+database that an export reads, changed nothing. The job keeps that change: it
+gets a warning, and an undo step `"remove rows of failed <job id>"` is pushed,
+so the user can undo the change once the item is free.
+Other errors are dropped; the first error of the job counts.
+"""
+function undo_noted!(s::Session, job::Job, ctx::JobContext)
+    kept = NotedUndo[]                  # newest first
     for u in reverse(ctx.undos)
-        quietly(u[1])
-        quietly(u[3])
+        try
+            u.undo()
+        catch e
+            e isa InterruptException && rethrow()
+            if e isa ItemBusyError
+                push!(kept, u)
+                add_job_warning!(job, kept_rows_text(e))
+                continue
+            end
+        end
+        quietly(u.drop)
     end
     empty!(ctx.undos)
+    isempty(kept) && return nothing
+    items = unique!(reduce(vcat, (u.items for u in kept); init = String[]))
+    undo = () -> (foreach(u -> u.undo(), kept); nothing)
+    redo = () -> (foreach(u -> u.redo(), reverse(kept)); nothing)
+    drop = () -> (foreach(u -> u.drop(), kept); nothing)
+    # A failed job is not in the history, so neither is the undo of what it kept.
+    push_undo!(s, UndoStep("remove rows of failed $(job.id)", undo, redo, drop, items, false))
     return nothing
+end
+
+"The warning for appended rows that a failed job could not remove, since the item was busy."
+function kept_rows_text(e::ItemBusyError)::String
+    e.reason == READING && return "the rows this job appended to $(e.item) could not be " *
+                                                 "removed while an export reads it; use Undo when the export ends"
+    return "the rows this job appended to $(e.item) could not be removed while it is busy " *
+           "($(e.reason)); use Undo when it is free"
 end
 
 """
@@ -306,7 +362,7 @@ function fail_job!(s::Session, job::Job, e, ctx::JobContext)
     try
         lock(s.lock) do
             end_job_marks!(s, ctx)      # the noted undos refuse busy items
-            undo_noted!(ctx)
+            undo_noted!(s, job, ctx)
             # Take out the items the work added, and delete their files.
             p = s.project
             gone = filter(it -> it.id in ctx.items, p.items)
@@ -334,9 +390,14 @@ end
 
 # ---- saving and loading ----------------------------------------------------
 
-"The report text to save: at most `MAX_REPORT_BYTES`, with a note when cut."
+"""
+    report_text(job)::String
+
+The report text of a job: at most `MAX_REPORT_BYTES`, with a note when cut.
+Safe from any thread while the job runs.
+"""
 function report_text(job::Job)::String
-    bytes = take!(copy(job.report))
+    bytes = @lock job.report.lock take!(copy(job.report.buf))
     n = length(bytes)
     n <= MAX_REPORT_BYTES && return String(bytes)
     k = MAX_REPORT_BYTES
@@ -351,7 +412,8 @@ function save_job(s::Session, job::Job)
     rec = Dict{String,Any}("id" => job.id, "command" => job.command, "args" => job.args,
                            "status" => string(status(job)), "progress" => job.progress[],
                            "started" => job.started, "finished" => job.finished,
-                           "outputs" => job.outputs, "error" => job.error, "report" => report_text(job))
+                           "outputs" => job.outputs, "error" => job.error, "report" => report_text(job),
+                           "warnings" => job_warnings(job))
     write_json_atomic(job_path(s, job.id), rec; allow_inf = true)
     return nothing
 end
@@ -429,11 +491,12 @@ function read_job(path::String, id::String)::Job
     d = plain(JSON3.read(read(path, String); allow_inf = true))::Dict{String,Any}
     d["id"] == id || throw(ArgumentError("the record has id $(repr(d["id"])), not $id"))
     st = JOB_STATUS_NAMES[d["status"]]
-    report = IOBuffer()
-    write(report, d["report"]::String)
+    # Records from before job warnings have none.
+    warnings = String[x for x in get(d, "warnings", String[])]
     return Job(id, d["command"], d["args"], Threads.Atomic{Int}(Int(st)),
                Threads.Atomic{Float64}(Float64(d["progress"])), Threads.Atomic{Bool}(false),
-               d["started"], d["finished"], report, String[x for x in d["outputs"]], d["error"], nothing)
+               d["started"], d["finished"], JobReport(d["report"]::String), warnings,
+               String[x for x in d["outputs"]], d["error"], nothing)
 end
 
 # ---- imports and running again ---------------------------------------------

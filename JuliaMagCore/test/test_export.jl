@@ -297,7 +297,7 @@ end
     @test e.command == "export.csv" && e.job == j.id
     @test e.args == Dict{String,Any}("item" => id, "path" => path, "channels" => ["MAG"], "delimiter" => ";")
     @test count(h -> h.job == j.id, s.history) == 1
-    @test occursin("rows in 6 lines", String(take!(copy(j.report))))
+    @test occursin("rows in 6 lines", report_text(j))
 
     # The script waits for the export, and the line runs again.
     line = split(script_text(s), '\n')[end-1]
