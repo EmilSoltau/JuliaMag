@@ -40,6 +40,16 @@ using Test, JuliaMagCore
             @test isempty(importing(s))
         end
 
+        @testset "columns do not allocate per cell" begin
+            n = 400
+            h = GridHeader(n, n, 1.0, 1.0, 0.0, 0.0, 0.0, "", "", Float32, GridSource("", "test", "float32", ""))
+            B = rand(Float32, n, n)
+            r = import_grid(sink -> put_columns!(sink, 1, B), s, "warm", h)   # warm up
+            bytes = Ref(0)
+            import_grid(sink -> (bytes[] = @allocated put_columns!(sink, 1, B)), s, "cols", h)
+            @test bytes[] < 4 * sizeof(B)          # the copy and stats, not 85 bytes per cell
+        end
+
         @testset "short file" begin
             n = length(s.project.items)
             job = wait_job(run_import(s, sink -> put_rows!(sink, 1, A[:, 1:2])))

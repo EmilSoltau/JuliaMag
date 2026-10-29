@@ -243,6 +243,35 @@ function write_rows!(g::Grid, j1::Integer, block::Matrix{T}) where {T}
 end
 
 """
+    map_values(g; write = false) -> Matrix
+
+Map the value file of `g` as a `Matrix` of size `(nx, ny)`.
+Give the result to `unmap_values!` when done. Both are used by
+`with_grid_values` and by the grid import sink, so the unmap lives in one place.
+"""
+function map_values(g::Grid; write::Bool = false)::Matrix
+    return open(values_path(g), write ? "r+" : "r") do io
+        Mmap.mmap(io, Matrix{g.eltype}, (g.nx, g.ny); shared = write)
+    end
+end
+
+"""
+    unmap_values!(A; write = false)
+
+Close a map made by `map_values`. With `write = true` it is synced first.
+The map is closed also when the sync fails. Close every map before the file
+is renamed or removed (needed on Windows).
+"""
+function unmap_values!(A::Matrix; write::Bool = false)
+    try
+        write && Mmap.sync!(A)
+    finally
+        finalize(A)
+    end
+    return nothing
+end
+
+"""
     with_grid_values(f, g; write = false)
 
 Map the values as a `Matrix` of size `(nx, ny)` and call `f(A)`.
@@ -250,15 +279,13 @@ With `write = true` the map can be changed and is synced after `f`.
 The map is closed before this returns, also on error.
 """
 function with_grid_values(f, g::Grid; write::Bool = false)
-    A = open(values_path(g), write ? "r+" : "r") do io
-        Mmap.mmap(io, Matrix{g.eltype}, (g.nx, g.ny); shared = write)
-    end
+    A = map_values(g; write)
     try
         r = f(A)
         write && Mmap.sync!(A)
         return r
     finally
-        finalize(A)
+        unmap_values!(A)
     end
 end
 

@@ -29,6 +29,9 @@ end
 """
 Where a reader puts the values of a grid.
 Rows and columns are not mixed in one sink, and each is put once.
+Rows are written with `write_rows!`. The value file is mapped lazily on the
+first column block (row-only readers never map it) and released before the
+folder is moved.
 """
 mutable struct GridSink
     grid::Grid
@@ -41,7 +44,7 @@ mutable struct GridSink
     vmin::Float64
     vmax::Float64
     count::Int
-    "The map of the value file, held for columns until `close_map!`."
+    "The map of the value file. Opened lazily on the first column block, released by `close_map!`."
     map::Union{Nothing,Matrix}
 end
 
@@ -108,6 +111,14 @@ function put_rows!(sink::GridSink, j1::Integer, block::AbstractMatrix)
     return nothing
 end
 
+"Copy `B` (`ny` by `k`) into columns `i1` on of `A`. A function barrier, so the loop is type stable."
+function write_columns!(A::Matrix{T}, i1::Integer, B::Matrix{T}) where {T}
+    for j in 1:size(B, 1), c in 1:size(B, 2)
+        @inbounds A[i1 + c - 1, j] = B[j, c]
+    end
+    return nothing
+end
+
 """
     put_columns!(sink, i1, block)
 
@@ -123,15 +134,8 @@ function put_columns!(sink::GridSink, i1::Integer, block::AbstractMatrix)
     set_mode!(sink, :columns)
     claim!(sink, "columns", i1, size(block, 2))
     B = Matrix{g.eltype}(block)
-    if sink.map === nothing
-        sink.map = open(values_path(g), "r+") do io
-            Mmap.mmap(io, Matrix{g.eltype}, (g.nx, g.ny); shared = true)
-        end
-    end
-    A = sink.map::Matrix{g.eltype}
-    for c in 1:size(B, 2), j in 1:g.ny
-        A[i1 + c - 1, j] = B[j, c]
-    end
+    sink.map === nothing && (sink.map = map_values(g; write = true))
+    write_columns!(sink.map::Matrix{g.eltype}, i1, B)
     after_put!(sink, B)
     return nothing
 end
@@ -141,11 +145,7 @@ function close_map!(sink::GridSink)
     A = sink.map
     A === nothing && return nothing
     sink.map = nothing
-    try
-        Mmap.sync!(A)
-    finally
-        finalize(A)
-    end
+    unmap_values!(A; write = true)
     return nothing
 end
 
