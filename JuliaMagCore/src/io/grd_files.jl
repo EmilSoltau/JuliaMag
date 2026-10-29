@@ -9,6 +9,9 @@
 # `<file>.grd.xml` (Geosoft XML metadata) and `<file>.grd.gi` (a compound file
 # with an `ipj` stream). The `.xml` is tried first, then the `.gi`. A side file
 # that cannot be read gives a warning, never a failed import.
+#
+# The Geosoft exporter writes only the `.grd.xml` (`write_grd_xml`), not the
+# `.gi`, whose layout is not documented.
 
 import EzXML
 
@@ -213,5 +216,102 @@ none or Proj does not know the name. Throws `GridError` when the file is damaged
 """
 crs_from_grd_gi(path::AbstractString)::Union{Nothing,String} = first(grd_gi_projection(String(path)))
 
+# ---- writing the .grd.xml ----------------------------------------------------
+
+"`s` with the five XML special characters escaped, for text or an attribute value."
+xml_escape(s::AbstractString)::String =
+    replace(s, '&' => "&amp;", '<' => "&lt;", '>' => "&gt;", '"' => "&quot;", '\'' => "&apos;")
+
+"""
+A number as Oasis writes it in `.grd.xml`: `1` for a whole number, else the
+shortest digits that read back the same, without an exponent where
+`plain_decimal` can do that (`7000000.5`, not `7.0000005e6`).
+"""
+xml_number(x::Float64)::String = isinteger(x) && abs(x) < 1e15 ? string(Int(x)) : plain_decimal(string(x))
+
+"""
+The Geosoft `units` of coordinate system `code`, as `(name, unit_scale)`:
+`("dega", 1.0)` for degrees as in Oasis files, `("m", 1.0)` for metres, else
+the name of the unit and its size in metres. `nothing` when Proj cannot tell.
+"""
+function grd_xml_units(code::String)::Union{Nothing,Tuple{String,Float64}}
+    is_geographic(code) && return ("dega", 1.0)
+    u = crs_axis_unit(code)
+    u === nothing && return nothing
+    name, factor = u
+    return name == "metre" && factor == 1 ? ("m", 1.0) : (name, factor)
+end
+
+"""
+The `<projection>` element of the grid's coordinate system `crs`, and a note for
+the report or `nothing`. An `"EPSG:n"` code gives `wellknown_epsg` with the
+name, the type (`GEOGRAPHIC` or `PROJECTED`) and the units. Any other
+coordinate system, or none, gives `type="UNKNOWN"`.
+"""
+function grd_xml_projection_element(crs::String, file::String)::Tuple{String,Union{Nothing,String}}
+    m = match(r"^EPSG:(\d+)$", crs)
+    if m === nothing || !valid_crs(crs)
+        why = isempty(crs) ? "The grid has no coordinate system" : "The coordinate system of the grid has no EPSG code"
+        return ("<projection type=\"UNKNOWN\"/>",
+                "$why, so $file says the coordinate system is unknown. Set it in Oasis montaj.")
+    end
+    type = is_geographic(crs) ? "GEOGRAPHIC" : "PROJECTED"
+    head = "<projection type=\"$type\" name=\"$(xml_escape(crs_name(crs)))\" wellknown_epsg=\"$(something(m[1]))\""
+    units = grd_xml_units(crs)
+    units === nothing && return (head * "/>", nothing)
+    name, scale = units
+    return (head * ">\n\t\t\t\t\t<units name=\"$(xml_escape(name))\" unit_scale=\"$(xml_number(scale))\"/>\n" *
+            "\t\t\t\t</projection>", nothing)
+end
+
+"""
+    write_grd_xml(io, x::GridExport)::Vector{String}
+
+Write the `.grd.xml` of the Geosoft grid export `x` to `io`, and return the
+notes for the report. The structure is that of a real Oasis file
+(`test/data/grids/template.grd.xml`, from Loop3D), cut to what a reader of the
+grid needs: the title, the file format, `extent2d` with the node extents of
+the grid (the range of the cell centres, with rotation) and `<projection>`
+(see `grd_xml_projection_element`). `crs_from_grd_xml` reads it back.
+"""
+function write_grd_xml(io::IO, x::GridExport)::Vector{String}
+    g = x.grid
+    file = basename(x.path) * ".xml"
+    title = basename(x.path)
+    lowercase(file_extension(title)) == ".grd" && (title = String(chop(title; tail = 4)))
+    nodes = [cell_centre(g, i, j) for i in (1, g.nx), j in (1, g.ny)]
+    minx, maxx = extrema(first, nodes)
+    miny, maxy = extrema(last, nodes)
+    projection, note = grd_xml_projection_element(g.crs, file)
+    print(io, """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <gmd:MD_Metadata xmlns:gmd="http://www.isotc211.org/2005/gmd">
+        	<geosoft xmlns="http://www.geosoft.com/schema/geo">
+        		<dataset version="1">
+        			<title>$(xml_escape(title))</title>
+        			<file_format>Geosoft Grid</file_format>
+        			<georeference>
+        				<dataextents>
+        					<extent2d minx="$(xml_number(minx))" miny="$(xml_number(miny))" maxx="$(xml_number(maxx))" maxy="$(xml_number(maxy))"/>
+        				</dataextents>
+        				$projection
+        			</georeference>
+        		</dataset>
+        	</geosoft>
+        </gmd:MD_Metadata>
+        """)
+    return note === nothing ? String[] : [note]
+end
+
 register_importer!(ImporterSpec("import.grd", "Geosoft or Surfer grid", [".grd"], ITEM_GRID,
                                 SettingSpec[], run_grd_importer))
+
+"Run the Geosoft grid exporter. It has no settings. Not recorded: the job that runs it records it."
+function run_geosoft_grd_exporter(s::Session, item_id::String, path::String, settings::AbstractDict,
+                                  progress::Progress)::ExportResult
+    spec_values(SettingSpec[], settings, "Geosoft grid export")
+    return export_geosoft_grd(s, item_id, path; progress, record = false)
+end
+
+register_exporter!(ExporterSpec("export.geosoft_grd", "Geosoft grid", ".grd", ITEM_GRID, SettingSpec[],
+                                run_geosoft_grd_exporter))

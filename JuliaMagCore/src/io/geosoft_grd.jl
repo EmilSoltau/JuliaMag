@@ -9,6 +9,9 @@
 # Real value = stored / ZMULT + ZBASE. A dummy is masked before the scaling.
 # Compressed grids (ES > 1024) are read by `read_geosoft_grd_compressed`, from
 # section 4.
+#
+# `export_geosoft_grd` writes an uncompressed grid of the grid's own type, by
+# rows (KX = 1), with its `.grd.xml` (see `grd_files.jl`).
 
 using CodecZlib: ZlibDecompressorStream, ZlibError
 
@@ -32,6 +35,16 @@ end
 
 const GRD_HEADER_BYTES = 512
 const GRD_COMPRESSED = 1024
+
+"""
+The byte offset (from 0) of each header field that JuliaMag reads or writes
+(research section 1). `IZMIN` to `IZMEA` are `Float32` in a float grid.
+"""
+const GRD_FIELDS = (es = 0, sf = 4, ne = 8, nv = 12, kx = 16, de = 20, dv = 28, x0 = 36, y0 = 44, rot = 52,
+                    zbase = 60, zmult = 68, label = 76, nvpts = 156, izmin = 160, izmax = 164, izmed = 168,
+                    izmea = 172, zvar = 176, prcs = 184)
+"The length of the `LABEL` field."
+const GRD_LABEL_BYTES = 48
 
 "The element type of size `es` (1, 2, 4 or 8) and sign flag `sf`, or `nothing` when the format has none."
 function grd_type(es::Int, sf::Int)::Union{Nothing,DataType}
@@ -91,8 +104,10 @@ function read_grd_header(io::IO)::GrdHeader
         throw(GridError("the file is $n bytes, shorter than the 512-byte header of a Geosoft grid"))
     i32(off) = Int(grd_field(Int32, b, off))
     f64(off) = grd_field(Float64, b, off)
-    es, sf, ne, nv, kx = i32(0), i32(4), i32(8), i32(12), i32(16)
-    de, dv, x0, y0, rot, zbase, zmult = f64(20), f64(28), f64(36), f64(44), f64(52), f64(60), f64(68)
+    o = GRD_FIELDS
+    es, sf, ne, nv, kx = i32(o.es), i32(o.sf), i32(o.ne), i32(o.nv), i32(o.kx)
+    de, dv, x0, y0, rot = f64(o.de), f64(o.dv), f64(o.x0), f64(o.y0), f64(o.rot)
+    zbase, zmult = f64(o.zbase), f64(o.zmult)
     compressed = es & GRD_COMPRESSED != 0
     bytes = es & ~GRD_COMPRESSED
     es in (1, 2, 4, 8, 1025, 1026, 1028, 1032) ||
@@ -113,7 +128,7 @@ function read_grd_header(io::IO)::GrdHeader
     zmult == 0 && throw(GridError("the header gives ZMULT = 0, so the values cannot be scaled"))
     all(isfinite, (de, dv, x0, y0, rot, zbase, zmult)) ||
         throw(GridError("the header gives a spacing, position, rotation or scaling that is not a finite number"))
-    label = grd_text(view(b, 77:124))
+    label = grd_text(view(b, o.label + 1:o.label + GRD_LABEL_BYTES))
     return GrdHeader(es, sf, ne, nv, kx, de, dv, x0, y0, rot, zbase, zmult, label, compressed)
 end
 
@@ -325,4 +340,146 @@ function grd_values(::Type{O}, stored::AbstractVector{T}, ne::Int, nv::Int, zbas
         out[k] = is_grd_dummy(v) ? O(NaN) : O(Float64(v) / zmult + zbase)
     end
     return out
+end
+
+# ---- writing -----------------------------------------------------------------
+
+"""
+`text` as the bytes of the 48-byte `LABEL` field: cut to 48 bytes, never inside a character.
+"""
+function grd_label_bytes(text::AbstractString)::Vector{UInt8}
+    out = UInt8[]
+    for c in text
+        b = codeunits(string(c))
+        length(out) + length(b) <= GRD_LABEL_BYTES || break
+        append!(out, b)
+    end
+    return out
+end
+
+"""
+    grd_header_bytes(h::GrdHeader; nvpts = 0, izmin = 0f0, izmax = 0f0, izmed = 0f0, izmea = 0f0, zvar = 0.0)
+
+The 512-byte header of a Geosoft grid, little-endian. The fields of `h` and the
+statistics are written; every other byte is 0. `IZMIN` to `IZMEA` are written
+as `Float32`, as in a float grid.
+"""
+function grd_header_bytes(h::GrdHeader; nvpts::Integer = 0, izmin::Float32 = 0.0f0, izmax::Float32 = 0.0f0,
+                          izmed::Float32 = 0.0f0, izmea::Float32 = 0.0f0, zvar::Float64 = 0.0)::Vector{UInt8}
+    b = zeros(UInt8, GRD_HEADER_BYTES)
+    field!(off, v) = copyto!(b, off + 1, reinterpret(UInt8, [htol(v)]))
+    o = GRD_FIELDS
+    for (off, v) in ((o.es, h.es), (o.sf, h.sf), (o.ne, h.ne), (o.nv, h.nv), (o.kx, h.kx), (o.nvpts, nvpts))
+        field!(off, Int32(v))
+    end
+    for (off, v) in ((o.de, h.de), (o.dv, h.dv), (o.x0, h.x0), (o.y0, h.y0), (o.rot, h.rot), (o.zbase, h.zbase),
+                     (o.zmult, h.zmult), (o.zvar, zvar))
+        field!(off, Float64(v))
+    end
+    for (off, v) in ((o.izmin, izmin), (o.izmax, izmax), (o.izmed, izmed), (o.izmea, izmea))
+        field!(off, v)
+    end
+    label = grd_label_bytes(h.label)
+    copyto!(b, o.label + 1, label)
+    return b
+end
+
+"The count, mean, variance and range of the values of a grid, added up one block at a time."
+mutable struct GrdStats
+    n::Int
+    mean::Float64
+    "The sum of the squared differences from the mean (Welford's method)."
+    m2::Float64
+    min::Float64
+    max::Float64
+end
+
+GrdStats() = GrdStats(0, 0.0, 0.0, Inf, -Inf)
+
+function add_value!(t::GrdStats, v::Float64)
+    t.n += 1
+    d = v - t.mean
+    t.mean += d / t.n
+    t.m2 += d * (v - t.mean)
+    t.min = min(t.min, v)
+    t.max = max(t.max, v)
+    return nothing
+end
+
+"The variance with `n - 1`, as Oasis writes it in ZVAR (checked on `om_float.grd`). 0 for fewer than 2 values."
+grd_variance(t::GrdStats)::Float64 = t.n < 2 ? 0.0 : t.m2 / (t.n - 1)
+
+"""
+The header of an uncompressed Geosoft grid of `g`, by rows, with label `label`
+and the statistics `t` of its values. `IZMED` is the `Float32` dummy, since the
+median is not computed. A `Float64` grid has the `Float32` dummy in all four
+`IZ` fields, as the format spec says; so has a grid with no values.
+"""
+function grd_export_header(g::Grid, label::String, t::GrdStats)::Vector{UInt8}
+    T = g.eltype
+    h = GrdHeader(sizeof(T), 2, g.nx, g.ny, 1, g.dx, g.dy, g.x0, g.y0, g.rotation, 0.0, 1.0, label, false)
+    dummy = grd_dummy(Float32)
+    stats = T === Float32 && t.n > 0
+    return grd_header_bytes(h; nvpts = t.n, izmin = stats ? Float32(t.min) : dummy,
+                            izmax = stats ? Float32(t.max) : dummy, izmed = dummy,
+                            izmea = stats ? Float32(t.mean) : dummy, zvar = grd_variance(t))
+end
+
+"""
+Write the grid of `x` to `io` as an uncompressed Geosoft grid: the header, then
+the rows, south row first. `NaN` becomes `-1.0e32`. The header is written last,
+once the statistics of all values are known, so the values are read once.
+"""
+function write_grd!(io::IO, x::GridExport)
+    g = x.grid
+    T = g.eltype
+    dummy = grd_dummy(T)
+    t = GrdStats()
+    write(io, zeros(UInt8, GRD_HEADER_BYTES))
+    each_row_block(x) do _, block
+        @inbounds for k in eachindex(block)
+            v = block[k]
+            if isnan(v)
+                block[k] = dummy
+            else
+                add_value!(t, Float64(v))
+            end
+            block[k] = htol(block[k])
+        end
+        write(io, block)
+    end
+    seek(io, 0)
+    write(io, grd_export_header(g, x.name, t))
+    return nothing
+end
+
+"""
+    export_geosoft_grd(s, item_id, path; progress = NO_PROGRESS, record = true)::ExportResult
+
+Write grid `item_id` to a Geosoft grid file (spec 7), and its coordinate
+system to `<path>.xml` (that is `name.grd.xml`, see `write_grd_xml`). No `.gi`
+file is written. An old `<path>.gi` is removed, since it holds the
+coordinate system of the grid that was there before.
+
+The file is uncompressed and keeps the grid's type: `ES = 4` for a `Float32`
+grid and `ES = 8` for a `Float64` grid, `SF = 2`. It holds rows (`KX = 1`),
+south row first, with `ZBASE = 0` and `ZMULT = 1`. `NaN` is written as
+`-1.0e32`. `X0`, `Y0`, `DE`, `DV` and `ROT` come from the grid, and `LABEL`
+from the item name, cut to 48 bytes. `NVPTS`, `IZMIN`, `IZMAX`, `IZMEA` and
+`ZVAR` (the variance with `n - 1`) hold the statistics of the values; see
+`grd_export_header` for the dummies.
+
+The grid is busy for reading while the export runs (ruling R12). Progress is by
+rows; cancel is checked once per block of rows. Both files are written to temp
+names and renamed only when both are complete, so a cancel or a failure leaves
+no new file. Recorded as `"export.geosoft_grd"` unless `record` is false.
+"""
+function export_geosoft_grd(s::Session, item_id::AbstractString, path::AbstractString;
+                            progress::Progress = NO_PROGRESS, record::Bool = true)::ExportResult
+    return run_grid_export(s, "export.geosoft_grd", item_id, path, progress, record) do x
+        write_output(io -> write_grd!(io, x), x, x.path)
+        notes = write_output(io -> write_grd_xml(io, x), x, x.path * ".xml")
+        remove_after!(x, x.path * ".gi", "it held the coordinate system of the grid that was there before")
+        return notes
+    end
 end

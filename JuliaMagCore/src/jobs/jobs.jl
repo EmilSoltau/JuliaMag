@@ -517,9 +517,9 @@ end
     export_file(s, item_id, path; exporter = "", settings...)::Job
 
 Export item `item_id` to the file `path` as a job (spec 7). `exporter` is an
-exporter id, such as `"export.csv"`; blank picks the exporter by the extension
-of `path` (see `exporter_for`). The settings go to the exporter, such as
-`lines`, `channels` or `delimiter`.
+exporter id, such as `"export.csv"`; blank picks the exporter for the kind of
+the item by the extension of `path` (see `exporter_for`). The settings go to
+the exporter, such as `lines`, `channels` or `delimiter`.
 
 The job reports progress by rows and can be cancelled. The file is written to
 `path * ".tmp"` and renamed at the end; on cancel or failure the temp file is
@@ -531,9 +531,20 @@ function export_file(s::Session, item_id::AbstractString, path::AbstractString; 
                      kwargs...)::Job
     settings = Dict{String,Any}(String(k) => plain_arg(v) for (k, v) in kwargs)
     args = merge(settings, Dict{String,Any}("item" => String(item_id), "path" => String(path)))
-    spec = exporter_for(isempty(exporter) ? path : exporter)
+    kind = lock(s.lock) do
+        k = findfirst(i -> i.id == item_id, s.project.items)
+        k === nothing ? nothing : s.project.items[k].kind
+    end
+    # An unknown item fails in the exporter, with its message.
+    spec = !isempty(exporter) ? exporter_for(exporter) : kind === nothing ? exporter_for(path) : exporter_for(path, kind)
     if spec === nothing || (!isempty(exporter) && spec.id != exporter)
-        what = isempty(exporter) ? "no exporter for the file type of $path" : "no exporter with id \"$exporter\""
+        what = if !isempty(exporter)
+            "no exporter with id \"$exporter\""
+        elseif kind !== nothing && exporter_for(path) !== nothing
+            "no exporter writes a $(KIND_NAMES[kind]) to a $(lowercase(file_extension(path))) file"
+        else
+            "no exporter for the file type of $path"
+        end
         return start_job!(s, "export", args, (_, _) -> throw(ArgumentError(what)); undoable = false)
     end
     return start_job!(s, spec.id, args, export_work(s, spec, String(item_id), String(path), settings);
@@ -543,7 +554,8 @@ end
 function export_work(s::Session, spec::ExporterSpec, item_id::String, path::String, settings::Dict{String,Any})
     return (progress::Progress, io::IO) -> begin
         r = spec.run(s, item_id, path, settings, progress)::ExportResult
-        println(io, spec.name, " export of ", item_id, " to ", r.path, ": ", r.rows, " rows in ", r.lines, " lines")
+        what = spec.kind == ITEM_GRID ? "$(r.rows) cells" : "$(r.rows) rows in $(r.lines) lines"
+        println(io, spec.name, " export of ", item_id, " to ", r.path, ": ", what)
         foreach(n -> println(io, n), r.notes)
         return ProjectItem[]
     end

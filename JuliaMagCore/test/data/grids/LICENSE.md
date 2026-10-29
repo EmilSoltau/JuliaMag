@@ -60,6 +60,8 @@ The repository says the data comes from CPRM (the Geological Survey of Brazil).
 Files:
 - `test_compressed.grd`, `test_compressed.grd.gi`, `test_compressed.grd.xml`
 - `test_uncompressed.grd`, `test_uncompressed.grd.gi`, `test_uncompressed.grd.xml`
+- `template.grd.xml`, a byte for byte copy of `test_uncompressed.grd.xml`.
+  The tests use it as the model of a real Oasis `.grd.xml` for the files that JuliaMag writes.
 
 Licence (from https://raw.githubusercontent.com/Loop3D/geosoft_grid/HEAD/LICENSE):
 

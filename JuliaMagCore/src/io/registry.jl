@@ -198,3 +198,17 @@ function exporter_for(path_or_id::AbstractString)::Union{Nothing,ExporterSpec}
     k = findfirst(e -> e.extension == ext, list)
     return k === nothing ? nothing : list[k]
 end
+
+"""
+    exporter_for(path, kind) -> Union{Nothing,ExporterSpec}
+
+The exporter that writes items of `kind` to a file such as `path`, picked by
+its extension (case is ignored). `nothing` when there is none.
+"""
+function exporter_for(path::AbstractString, kind::ItemKind)::Union{Nothing,ExporterSpec}
+    ext = lowercase(file_extension(path))
+    isempty(ext) && return nothing
+    list = exporters(kind)
+    k = findfirst(e -> e.extension == ext, list)
+    return k === nothing ? nothing : list[k]
+end

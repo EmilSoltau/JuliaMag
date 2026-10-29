@@ -25,10 +25,16 @@ These are the open points from the reviews that later plans must handle.
 - Settings are remembered before a quick tool runs, so a failed run still changes them.
 - Session API gaps: remove an item with undo, undoable channel property edits (unprotect, rename, delete), a setter for the marked range, an item-picker setting type for importer targets.
 
-## Windows
+## Checks on real systems
 
 - Windows is the main platform, but no test has run there yet.
 - The memory-map release before undo, the file-cut order in undo, and readers during an append need a Windows CI job in the packaging plan.
+- Open a `.grd` written by JuliaMag in Oasis montaj.
+  Check that the values, the position and the coordinate system (from `.grd.xml` alone, without `.gi`) are right.
+  The research could not confirm that Oasis reads the coordinate system from `.xml` alone.
+  Check a rotated grid too: Oasis adds a `<warp>` for the rotation to its own `.grd.xml`, and JuliaMag does not.
+- Open a rotated ER Mapper `.ers` (from Oasis or ER Mapper) in JuliaMag and check that the rotation direction is right.
+  JuliaMag reads the `Rotation` field itself as degrees counter-clockwise; no rotated sample file was available to confirm the sign.
 
 ## Can wait
 

@@ -337,3 +337,218 @@ end
         end
     end
 end
+
+# ---- export ------------------------------------------------------------------
+
+import EzXML
+
+"The element paths (local names from the root) and the attribute names of each, in an XML file."
+function xml_structure(path)
+    out = Dict{String,Set{String}}()
+    walk(n, prefix) = for e in EzXML.eachelement(n)
+        p = prefix * "/" * EzXML.nodename(e)
+        union!(get!(out, p, Set{String}()), (EzXML.nodename(a) for a in EzXML.attributes(e)))
+        walk(e, p)
+    end
+    root = EzXML.root(EzXML.readxml(path))
+    walk(root, "/" * EzXML.nodename(root))
+    return out
+end
+
+"The attributes of the first element with this local name in an XML file."
+function xml_attributes(path, name)
+    e = findfirst("//*[local-name()='$name']", EzXML.readxml(path))
+    return Dict(EzXML.nodename(a) => EzXML.nodecontent(a) for a in EzXML.attributes(e))
+end
+
+le(::Type{T}, b, off) where {T} = ltoh(only(reinterpret(T, b[off + 1:off + sizeof(T)])))
+
+@testset "Geosoft grid export" begin
+    report_text(job) = String(take!(copy(job.report)))
+    temps(dir) = filter(f -> occursin(".tmp", f), readdir(dir))
+    function load(s, f)
+        job = wait_job(import_file(s, f))
+        status(job) == JOB_DONE || error("import of $f failed: $(job.error)")
+        g = grid(s.project, only(job.outputs))
+        return g, read_rows(g, 1, g.ny), only(job.outputs)
+    end
+    # A 5 by 4 grid with value 10 * column + row, one NaN, rotated 15 degrees.
+    A = Float64[10i + j for i in 1:5, j in 1:4]
+    A[2, 3] = NaN
+    function make(s, T; name = "Mag 5x4", crs = "EPSG:32633")
+        h = GridHeader(5, 4, 25.0, 50.0, 500000.25, 7000000.5, 15.0, crs, "nT", T, GridSource())
+        return import_grid(sink -> put_rows!(sink, 1, T.(A)), s, name, h).item.id
+    end
+    same_place(g, h) = all(isapprox.((g.x0, g.y0, g.dx, g.dy, g.rotation),
+                                     (h.x0, h.y0, h.dx, h.dy, h.rotation); rtol = 1e-12))
+
+    mktempdir() do tmp
+        s = new_session(joinpath(tmp, "p"), "p")
+
+        @testset "round trip of a $T grid" for T in (Float32, Float64)
+            id = make(s, T)
+            f = joinpath(tmp, "rt_$T.grd")
+            job = wait_job(export_file(s, id, f))
+            @test status(job) == JOB_DONE
+            @test job.command == "export.geosoft_grd"
+            @test occursin("Geosoft grid export of $id to $f: 20 cells", report_text(job))
+            @test isfile(f) && isfile(f * ".xml") && !isfile(f * ".gi") && isempty(temps(tmp))
+            @test crs_from_grd_xml(f * ".xml") == "EPSG:32633"
+            g, B, _ = load(s, f)
+            src = grid(s.project, id)
+            @test isequal(B, T.(A)) && g.eltype == T
+            @test same_place(g, src)
+            @test g.crs == "EPSG:32633"
+            # Corner values stay at the same ground position.
+            @test cell_centre(g, 5, 4) == cell_centre(src, 5, 4) && B[5, 4] == 54
+        end
+
+        @testset "the header" begin
+            for T in (Float32, Float64)
+                id = make(s, T)
+                f = joinpath(tmp, "h_$T.grd")
+                @test status(wait_job(export_file(s, id, f))) == JOB_DONE
+                es = sizeof(T)
+                @test filesize(f) == 512 + es * 5 * 4
+                h = open(read_grd_header, f)
+                @test (h.es, h.sf, h.ne, h.nv, h.kx) == (es, 2, 5, 4, 1)
+                @test (h.de, h.dv, h.x0, h.y0, h.rot) == (25.0, 50.0, 500000.25, 7000000.5, 15.0)
+                @test (h.zbase, h.zmult, h.label, h.compressed) == (0.0, 1.0, "Mag 5x4", false)
+                b = read(f)
+                v = Float64.(filter(!isnan, vec(T.(A))))
+                @test le(Int32, b, 156) == 19                       # NVPTS
+                dummy = Float32(-1.0e32)
+                iz = [le(Float32, b, off) for off in (160, 164, 168, 172)]
+                if T == Float32
+                    @test iz == Float32[minimum(v), maximum(v), dummy, sum(v) / 19]
+                else
+                    @test iz == fill(dummy, 4)                      # the format spec for double grids
+                end
+                @test le(Float64, b, 176) ≈ sum(abs2, v .- sum(v) / 19) / 18 rtol = 1e-12   # ZVAR
+                @test le(Int32, b, 184) == 0                         # PRCS
+                @test all(==(0), b[125:156]) && all(==(0), b[189:512])   # MAPNO, PROJ, UNITX-Z, user area
+                # The NaN cell (column 2, row 3) holds the dummy.
+                @test le(T, b, 512 + es * (2 * 5 + 1)) == T(-1.0e32)
+                @test le(T, b, 512 + es * (3 * 5 + 4)) == 54          # the north-east corner is last
+            end
+        end
+
+        @testset "the label is cut to 48 bytes" begin
+            name = "a"^46 * "ÅÅ"                                  # 50 bytes; a cut must not split Å
+            f = joinpath(tmp, "label.grd")
+            @test status(wait_job(export_file(s, make(s, Float32; name), f))) == JOB_DONE
+            @test open(read_grd_header, f).label == "a"^46 * "Å"
+        end
+
+        @testset "the .grd.xml" begin
+            id = make(s, Float32)
+            f = joinpath(tmp, "x.grd")
+            @test status(wait_job(export_file(s, id, f))) == JOB_DONE
+            x = f * ".xml"
+            # Every element and attribute is one a real Oasis file has.
+            mine, model = xml_structure(x), xml_structure(grid_file("template.grd.xml"))
+            @test all(p -> haskey(model, p) && issubset(mine[p], model[p]), keys(mine))
+            @test any(endswith("/georeference/dataextents/extent2d"), keys(mine))
+            # extent2d holds the node extents of the rotated grid.
+            g = grid(s.project, id)
+            nodes = [cell_centre(g, i, j) for i in (1, 5), j in (1, 4)]
+            e = xml_attributes(x, "extent2d")
+            @test parse.(Float64, (e["minx"], e["miny"], e["maxx"], e["maxy"])) ==
+                  (minimum(first, nodes), minimum(last, nodes), maximum(first, nodes), maximum(last, nodes))
+            p = xml_attributes(x, "projection")
+            @test p["wellknown_epsg"] == "32633" && p["type"] == "PROJECTED"
+            @test p["name"] == "WGS 84 / UTM zone 33N"
+            @test xml_attributes(x, "units") == Dict("name" => "m", "unit_scale" => "1")
+
+            # A geographic grid.
+            f = joinpath(tmp, "geo.grd")
+            @test status(wait_job(export_file(s, make(s, Float32; crs = "EPSG:4326"), f))) == JOB_DONE
+            p = xml_attributes(f * ".xml", "projection")
+            @test p["type"] == "GEOGRAPHIC" && p["wellknown_epsg"] == "4326"
+            @test xml_attributes(f * ".xml", "units") == Dict("name" => "dega", "unit_scale" => "1")
+
+            # No coordinate system, or one with no EPSG code, gives type="UNKNOWN".
+            wkt = "+proj=tmerc +lat_0=0 +lon_0=17 +k=0.9996 +x_0=500000 +y_0=0 +ellps=GRS80 +units=m +type=crs"
+            for (crs, note) in (("", "The grid has no coordinate system"),
+                                (wkt, "The coordinate system of the grid has no EPSG code"))
+                f = joinpath(tmp, "unknown.grd")
+                job = wait_job(export_file(s, make(s, Float32; crs), f))
+                @test status(job) == JOB_DONE && occursin(note, report_text(job))
+                @test xml_attributes(f * ".xml", "projection") == Dict("type" => "UNKNOWN")
+                @test crs_from_grd_xml(f * ".xml") === nothing
+            end
+        end
+
+        @testset "om_float.grd exports and imports the same" begin
+            g, A1, id = load(s, grid_file("om_float.grd"))
+            f = joinpath(tmp, "om_float.grd")
+            job = wait_job(export_file(s, id, f))
+            @test status(job) == JOB_DONE
+            h, A2, _ = load(s, f)
+            @test isequal(A2, A1) && h.eltype == g.eltype
+            @test (h.x0, h.y0, h.dx, h.dy, h.rotation, h.crs) == (g.x0, g.y0, g.dx, g.dy, g.rotation, g.crs)
+            # The statistics match those Oasis wrote.
+            o, b = read(grid_file("om_float.grd")), read(f)
+            @test le(Int32, b, 156) == le(Int32, o, 156)
+            @test [le(Float32, b, k) for k in (160, 164, 172)] == [le(Float32, o, k) for k in (160, 164, 172)]
+            @test le(Float64, b, 176) ≈ le(Float64, o, 176) rtol = 1e-9
+        end
+
+        @testset "an old .gi next to the target is removed" begin
+            f = joinpath(tmp, "old.grd")
+            write(f * ".gi", "stale")
+            job = wait_job(export_file(s, make(s, Float32), f))
+            @test status(job) == JOB_DONE && !isfile(f * ".gi")
+            @test occursin("Removed old.grd.gi: it held the coordinate system of the grid that was there before.",
+                                       report_text(job))
+        end
+
+        @testset "a cancelled or failed export leaves no files" begin
+            id = make(s, Float32)
+            d = mkpath(joinpath(tmp, "cancel"))
+            f = joinpath(d, "c.grd")
+            # A test exporter that cancels its own job, then writes: the cancel is seen after the first block.
+            register_exporter!(ExporterSpec("export.test_grd_cancel", "Cancel test", ".grd_cancel_test", ITEM_GRID,
+                SettingSpec[], (s, item_id, path, settings, progress) -> begin
+                    cancel!(only(filter(j -> j.command == "export.test_grd_cancel" && status(j) == JOB_RUNNING,
+                                        jobs(s))))
+                    export_geosoft_grd(s, item_id, path; progress, record = false)
+                end))
+            n = length(s.history)
+            j = wait_job(export_file(s, id, f; exporter = "export.test_grd_cancel"))
+            @test status(j) == JOB_CANCELLED
+            @test isempty(readdir(d))
+            # An old target and its .xml are kept as they were.
+            write(f, "old"); write(f * ".xml", "old xml")
+            j = wait_job(export_file(s, id, f; exporter = "export.test_grd_cancel"))
+            @test status(j) == JOB_CANCELLED
+            @test sort(readdir(d)) == ["c.grd", "c.grd.xml"] && read(f, String) == "old"
+            @test length(s.history) == n
+            # The .xml target is a folder: the export fails and leaves no temp files.
+            rm(f * ".xml"); mkdir(f * ".xml")
+            j = wait_job(export_file(s, id, f))
+            @test status(j) == JOB_FAILED && occursin("c.grd.xml is a folder", j.error)
+            @test sort(readdir(d)) == ["c.grd", "c.grd.xml"] && read(f, String) == "old"
+        end
+
+        @testset "a database is not exported to .grd" begin
+            @test exporter_for("x.grd").id == "export.geosoft_grd"
+            @test isempty(exporter_for("export.geosoft_grd").settings)
+            a = joinpath(tmp, "a.xyz")
+            write_synthetic_xyz(a; lines = 1, ties = 0, rows_per_line = 5)
+            r = import_xyz(s, a)
+            j = wait_job(export_file(s, r.item.id, joinpath(tmp, "db.grd")))
+            @test status(j) == JOB_FAILED && occursin("no exporter writes a database to a .grd file", j.error)
+            j = wait_job(export_file(s, "grid-999", joinpath(tmp, "none.grd")))
+            @test status(j) == JOB_FAILED && occursin("grid-999", j.error)
+        end
+
+        @testset "a direct call records the export" begin
+            id = make(s, Float32)
+            n = length(s.history)
+            r = export_geosoft_grd(s, id, joinpath(tmp, "direct.grd"))
+            @test (r.rows, r.lines) == (20, 0) && r.path == joinpath(tmp, "direct.grd")
+            @test length(s.history) == n + 1 && s.history[end].command == "export.geosoft_grd"
+        end
+    end
+end

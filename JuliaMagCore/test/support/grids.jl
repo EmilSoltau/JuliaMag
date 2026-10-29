@@ -10,18 +10,14 @@ end
 using CodecZlib: ZlibCompressor
 
 """
-The 512-byte header of a Geosoft grid with the given fields, little-endian.
-The statistics fields stay zero; readers ignore them.
+The 512-byte header of a Geosoft grid with the given fields, little-endian,
+made by the header writer of the exporter. The statistics fields stay zero;
+readers ignore them.
 """
 function grd_header_bytes(; es = 4, sf = 2, ne = 3, nv = 2, kx = 1, de = 1.0, dv = 1.0, x0 = 0.0, y0 = 0.0,
                           rot = 0.0, zbase = 0.0, zmult = 1.0, label = "")
-    h = zeros(UInt8, 512)
-    field!(off, v) = (b = reinterpret(UInt8, [htol(v)]); h[off + 1:off + length(b)] .= b)
-    field!(0, Int32(es)); field!(4, Int32(sf)); field!(8, Int32(ne)); field!(12, Int32(nv)); field!(16, Int32(kx))
-    field!(20, Float64(de)); field!(28, Float64(dv)); field!(36, Float64(x0)); field!(44, Float64(y0))
-    field!(52, Float64(rot)); field!(60, Float64(zbase)); field!(68, Float64(zmult))
-    h[77:76 + ncodeunits(label)] .= codeunits(label)
-    return h
+    h = GrdHeader(es, sf, ne, nv, kx, de, dv, x0, y0, rot, zbase, zmult, label, es & 1024 != 0)
+    return JuliaMagCore.grd_header_bytes(h)
 end
 
 "The 16-byte header Oasis writes before each compressed block (research section 4)."

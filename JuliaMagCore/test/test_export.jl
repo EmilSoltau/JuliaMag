@@ -53,11 +53,11 @@ const CANCELLED = Progress(_ -> nothing, () -> true)
 
 @testset "export registry" begin
     @test [e.id for e in exporters(ITEM_DATABASE)] == ["export.geosoft_xyz", "export.csv", "export.parquet"]
-    @test isempty(exporters(ITEM_GRID))
+    @test "export.geosoft_grd" in [e.id for e in exporters(ITEM_GRID)]
     @test exporter_for("out/x.CSV").id == "export.csv"
     @test exporter_for("x.parquet").id == "export.parquet"
     @test exporter_for("export.geosoft_xyz").extension == ".xyz"
-    @test exporter_for("x.grd") === nothing
+    @test exporter_for("x.grd").id == "export.geosoft_grd"
     @test default_settings(exporter_for("x.csv")) ==
           Dict{String,Any}("lines" => "all", "channels" => String[], "delimiter" => ",", "decimal" => ".")
 end

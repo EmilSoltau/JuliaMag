@@ -81,6 +81,29 @@ function is_geographic(code::AbstractString)::Bool
 end
 
 """
+    crs_axis_unit(code)::Union{Nothing,Tuple{String,Float64}}
+
+The unit of the first axis of a coordinate system: its name, such as
+`"metre"`, and its size in metres (radians for an angle). `nothing` when PROJ
+cannot tell, such as for a compound coordinate system.
+"""
+function crs_axis_unit(code::AbstractString)::Union{Nothing,Tuple{String,Float64}}
+    r = with_crs_context(code) do pj, ctx
+        cs = Proj.proj_crs_get_coordinate_system(pj, ctx)
+        cs == C_NULL && return nothing
+        try
+            factor, name = Ref{Cdouble}(0.0), Ref{Cstring}(C_NULL)
+            ok = Proj.proj_cs_get_axis_info(cs, 0, C_NULL, C_NULL, C_NULL, factor, name, C_NULL, C_NULL, ctx)
+            (ok == 0 || name[] == C_NULL) && return nothing
+            return (unsafe_string(name[]), Float64(factor[]))
+        finally
+            Proj.proj_destroy(cs)
+        end
+    end
+    return r isa Tuple{String,Float64} ? r : nothing
+end
+
+"""
     crs_from_wkt(wkt)::String
 
 The code of a coordinate system given as WKT text, such as one read from a
