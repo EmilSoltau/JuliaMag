@@ -5,6 +5,7 @@ using Test
     include("test_model.jl")
     include("test_database.jl")
     include("test_project.jl")
+    include("test_grid.jl")
     include("support/synthetic.jl")
     include("test_session.jl")
     include("test_xyz.jl")

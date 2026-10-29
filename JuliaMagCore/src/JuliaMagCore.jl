@@ -10,6 +10,7 @@ include("model/missing.jl")
 include("storage/columns.jl")
 include("storage/atomic.jl")
 include("storage/database.jl")
+include("storage/grid.jl")
 include("project/project.jl")
 include("jobs/job.jl")
 include("session/session.jl")
@@ -43,8 +44,10 @@ export add_channel!, add_line!, channel, line, total_rows
 export ColumnAppender, open_appenders, append_value!, end_line!, close_appenders!
 export ItemKind, ITEM_DATABASE, ITEM_GRID, ITEM_MAP, ProjectItem, Project, ProjectError
 export create_project, open_project, save_project, add_item!, remove_item!, item, item_missing
-export new_item_id, database
+export new_item_id, database, grid
 export read_channel, write_value!, write_channel!
+export GridError, GridStyle, GridSource, Grid, GRID_BLOCK_BYTES, create_grid, open_grid, save_grid_meta
+export values_path, block_rows, read_rows, write_rows!, with_grid_values, cell_centre, grid_corners
 export UndoStep, HistoryEntry, Cursor, Session, ProtectedError, ItemBusyError
 export open_session, new_session, check_not_busy, push_undo!, undo!, redo!, can_undo, can_redo
 export record!, set_cell!, set_line_selected!, set_cursor!, script_text

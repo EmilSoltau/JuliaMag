@@ -213,3 +213,11 @@ function database(p::Project, id::AbstractString)::LineDatabase
     item_missing(p, it) && throw(ProjectError("the folder of database \"$id\" is missing: $(item_path(p, it))"))
     return open_database(item_path(p, it))
 end
+
+"Open the grid of item `id`. Throws `ProjectError` if it cannot."
+function grid(p::Project, id::AbstractString)::Grid
+    it = item(p, id)
+    it.kind == ITEM_GRID || throw(ProjectError("item \"$id\" is not a grid"))
+    item_missing(p, it) && throw(ProjectError("the folder of grid \"$id\" is missing: $(item_path(p, it))"))
+    return open_grid(item_path(p, it))
+end
