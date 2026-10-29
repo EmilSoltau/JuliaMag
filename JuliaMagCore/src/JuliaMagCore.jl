@@ -21,6 +21,7 @@ include("tools/settings.jl")
 include("io/registry.jl")
 include("io/line_import.jl")
 include("io/xyz_import.jl")
+include("io/grid_import.jl")
 include("io/csv_fields.jl")
 include("io/csv_import.jl")
 include("io/csv_templates.jl")
@@ -52,6 +53,7 @@ export UndoStep, HistoryEntry, Cursor, Session, ProtectedError, ItemBusyError
 export open_session, new_session, check_not_busy, push_undo!, undo!, redo!, can_undo, can_redo
 export record!, set_cell!, set_line_selected!, set_cursor!, script_text
 export eachfileline, ImportWarning, ImportResult, Progress, report, is_cancelled, NO_PROGRESS
+export GridHeader, GridSink, put_rows!, put_columns!, import_grid
 export ImporterSpec, register_importer!, importers, importer_for, import_xyz
 export CsvColumn, CsvLayout, sniff_csv, preview_rows, import_csv
 export save_template, load_template, list_templates, layout_json

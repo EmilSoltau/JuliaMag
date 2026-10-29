@@ -457,7 +457,11 @@ end
 function import_work(s::Session, spec::ImporterSpec, path::String, settings::Dict{String,Any})
     return (progress::Progress, io::IO) -> begin
         r = spec.run(s, path, settings, progress)::ImportResult
-        println(io, spec.name, " import of ", path, ": ", r.rows, " rows in ", r.lines, " lines")
+        if isempty(r.summary)
+            println(io, spec.name, " import of ", path, ": ", r.rows, " rows in ", r.lines, " lines")
+        else
+            println(io, spec.name, " import of ", path, ": ", r.summary)
+        end
         for w in r.warnings
             println(io, w.file_line > 0 ? "line $(w.file_line): " : "", w.message)
         end

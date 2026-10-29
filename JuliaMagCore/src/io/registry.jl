@@ -12,13 +12,18 @@ end
 """
 What an import made. `item` is the new or appended database item,
 `rows` and `lines` count what this import added.
+`summary` is one line for the job report. When it is empty, the report says
+how many rows in how many lines were added.
 """
 struct ImportResult
     item::Union{Nothing,ProjectItem}
     warnings::Vector{ImportWarning}
     rows::Int
     lines::Int
+    summary::String
 end
+
+ImportResult(item, warnings, rows, lines) = ImportResult(item, warnings, rows, lines, "")
 
 """
     Progress(done, cancelled)
