@@ -84,29 +84,50 @@ end
 cancel!(job::Job) = (job.cancel[] = true; nothing)
 
 """
-    wait_job(job)::Job
-    wait_job(result::Tuple)
+Thrown by `wait_job(job; check = true)` for a job that failed or was cancelled.
+The message names the job, its command and its error.
+"""
+struct JobFailedError <: Exception
+    job::String
+    command::String
+    message::String
+end
 
-Wait until the job has ended. Never throws. Returns the job.
+Base.showerror(io::IO, e::JobFailedError) =
+    print(io, "JobFailedError: ", e.job, " (", e.command, ") ", e.message)
+
+"""
+    wait_job(job; check = false)::Job
+    wait_job(result::Tuple; check = false)
+
+Wait until the job has ended. Returns the job. With `check = false` it never throws.
+With `check = true` it throws a `JobFailedError` when the job failed or was
+cancelled, so a script stops there. Every job line of `script_text` uses it.
 
 `run_tool` returns a tuple `(ok, message, outputs)`, not a job, for a `:quick`
 tool and for a tool it refused. `wait_job` returns such a tuple when `ok`, and
-throws a `ToolError` with the message when not. So a script line
-`wait_job(run_tool(...))` stops the script at a tool that did not run.
+throws a `ToolError` with the message when not (also with `check = false`). So
+a script line `wait_job(run_tool(...); check = true)` stops the script at a
+tool that did not run.
 """
-function wait_job(r::Tuple{Bool,AbstractString,Any})
+function wait_job(r::Tuple{Bool,AbstractString,Any}; check::Bool = false)
     r[1] || throw(ToolError(String(r[2])))
     return r
 end
 
-function wait_job(job::Job)::Job
+function wait_job(job::Job; check::Bool = false)::Job
     t = job.task
-    t === nothing && return job
-    try
-        wait(t)
-    catch
-        # `run_job!` catches everything; this is only a safety net.
+    if t !== nothing
+        try
+            wait(t)
+        catch
+            # `run_job!` catches everything; this is only a safety net.
+        end
     end
+    check || return job
+    st = status(job)
+    st == JOB_FAILED && throw(JobFailedError(job.id, job.command, "failed: " * job.error))
+    st == JOB_CANCELLED && throw(JobFailedError(job.id, job.command, "was cancelled"))
     return job
 end
 

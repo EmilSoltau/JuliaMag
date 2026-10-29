@@ -76,7 +76,7 @@ using JuliaMagCore
             txt = script_text(s2)
             @test startswith(txt, "using JuliaMagCore\ns = open_session(")
             @test occursin("set_cell!(s, \"$id\", LineId(LINE, 1001, 0), \"MAG\", 2, 0.30000000000000004)", txt)
-            @test occursin("wait_job(run_tool(s, \"tool.demo\"; var\"bad key\" = 1.5, list = [1, 2], n = 3, name = \"a\\\"b\"))", txt)
+            @test occursin("wait_job(run_tool(s, \"tool.demo\"; var\"bad key\" = 1.5, list = [1, 2], n = 3, name = \"a\\\"b\"); check = true)", txt)
             @test Meta.parseall(txt) isa Expr
             # run the script (without run_tool) on a copy: same data as the original
             copy_dir = joinpath(dir, "copy")

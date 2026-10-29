@@ -830,7 +830,7 @@ end
         @test occursin("\nset_grid_crs!(s, $(var(gid)), $(repr(code)))\n", text)
         @test !occursin(repr(id), text) && !occursin(repr(gid), text)
         @test occursin("\nrename_item!(s, $(repr(pre)), \"Before\")\n", text)    # older items stay literal
-        @test endswith(text, "\nclose_session!(s)\n")
+        @test endswith(text, "\nfinally\n    close_session!(s)\nend\n")
         close_session!(s)
         include_string(Module(), text)
         include_string(Module(), text)       # the script closed its session, so the project is free
@@ -944,7 +944,7 @@ end
         text = script_text(s)
         @test occursin("\nset_grid_crs!(s, $(repr(gid)), $(repr(code)))\n", text)
         @test occursin("\nwait_job(run_tool(s, \"grid.set_crs\"; crs = \"\", " *
-                       "inputs = Dict(\"grid\" => $(repr(gid)))))\n", text)
+                       "inputs = Dict(\"grid\" => $(repr(gid)))); check = true)\n", text)
         close_session!(s)
         # a history line from before this change
         old = Dict("time" => "t", "command" => "grid.set_crs", "args" => Dict("item" => gid, "crs" => code),
@@ -952,5 +952,82 @@ end
         open(io -> println(io, JSON3.write(old)), joinpath(s.project.folder, "jobs", "history.jsonl"), "a")
         text = with_session(script_text, s.project.folder)
         @test count("\nset_grid_crs!(s, $(repr(gid)), $(repr(code)))\n", text) == 2
+    end
+
+    # True when `ex` assigns to `name` anywhere.
+    assigns(ex, name) = ex isa Expr && ((ex.head == :(=) && ex.args[1] == name) || any(x -> assigns(x, name), ex.args))
+
+    @testset "a crafted history file cannot add code to the script" begin
+        s = fresh_session()
+        id = add_test_database!(s, ["A" => [1.0]])
+        folder = s.project.folder
+        close_session!(s)
+        evil = "\npwned = true\n"
+        entry(cmd, args; time = "t", job = "") = Dict("time" => time, "command" => cmd, "args" => args, "job" => job)
+        rename = Dict("item" => id, "name" => "B")
+        lines = [entry("project.rename_item", rename; time = "t$evil"),
+                 entry("project.rename_item", rename; job = "job-9\r\u2028pwned = true"),
+                 entry("grid.set_georef", Dict("item" => id, "x0 = 1); pwned = true; (y" => 1.0)),
+                 entry("database.set_channel_info", Dict("item" => id, "channel" => "A", "units = 1); pwned = true; (" => "x")),
+                 entry("project.rename_item$evil", rename)]
+        path = joinpath(folder, "jobs", "history.jsonl")
+        mkpath(dirname(path))
+        write(path, join((JSON3.write(l) for l in lines), "\n") * "\n")
+        text = with_session(script_text, folder)
+        @test occursin("\n# t pwned = true  project.rename_item\n", text)
+        @test occursin("\n# t project.rename_item (job job-9  pwned = true)\n", text)
+        @test occursin("\n# t project.rename_item pwned = true \n", text)
+        @test !assigns(Meta.parseall(text), :pwned)
+        m = Module()
+        @test_throws LoadError include_string(m, text)     # the line of the job entry fails
+        @test !isdefined(m, :pwned)
+        @test with_session(s2 -> item(s2.project, id).name, folder) == "B"     # the first line ran; not locked
+
+        # a line type that is not a LineType name is refused, with the entry named
+        bad = entry("database.set_cell", Dict("item" => id, "channel" => "A", "row" => 1, "value" => 2.0,
+                    "line" => Dict("type" => "LINE); pwned = true; (", "number" => 1001, "version" => 0)))
+        write(path, JSON3.write(bad) * "\n")
+        err = try
+            with_session(script_text, folder); nothing
+        catch e
+            e
+        end
+        @test err isa ArgumentError
+        @test startswith(err.msg, "history entry 1 (\"database.set_cell\") cannot be written as a script line: " *
+                                  "the line type \"LINE); pwned = true; (\" is not one of LINE, ")
+    end
+
+    @testset "a replay stops at a failed job, and the project is left free" begin
+        root = mktempdir()
+        folder = joinpath(root, "p")
+        a, b = joinpath(root, "a.xyz"), joinpath(root, "b.xyz")
+        foreach(f -> write_synthetic_xyz(f; lines = 1, ties = 0, rows_per_line = 5, channels = ["X", "Y", "MAG"]), (a, b))
+        s = new_session(folder, "P")
+        wait_job(import_file(s, a))
+        wait_job(import_file(s, b))
+        text = script_text(s)
+        @test occursin("; check = true).outputs)\n", text)
+        # without `check`, a failed job is returned; with it, it throws
+        gone = joinpath(root, "gone.xyz")
+        @test status(wait_job(import_file(s, gone))) == JOB_FAILED
+        j = import_file(s, gone)
+        err = try
+            wait_job(j; check = true); nothing
+        catch e
+            e
+        end
+        @test err isa JobFailedError && err.job == j.id && err.command == "import.geosoft_xyz"
+        @test sprint(showerror, err) == "JobFailedError: $(j.id) (import.geosoft_xyz) failed: $(j.error)"
+        close_session!(s)
+        rm(b)
+        err = try
+            include_string(Module(), text); nothing
+        catch e
+            e
+        end
+        @test err isa LoadError && err.error isa JobFailedError
+        @test err.error.command == "import.geosoft_xyz" && occursin(") failed: ", sprint(showerror, err.error))
+        # the first import ran, and the script closed its session
+        @test with_session(s2 -> count(i -> i.kind == ITEM_DATABASE, s2.project.items), folder) == 3
     end
 end

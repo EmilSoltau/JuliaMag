@@ -329,7 +329,7 @@ end
         L = first(database(s.project, id).lines).id
         set_line_selected!(s, id, L, false)             # depends on the import (imported channels are protected)
         txt = script_text(s)
-        @test occursin("wait_job(import_file(s, $(repr(f))))", txt)
+        @test occursin("wait_job(import_file(s, $(repr(f))); check = true)", txt)
         @test occursin("\nset_line_selected!(s, ", txt)
         # replay on a copy of the starting project, in a module of its own
         body = replace(txt, "open_session($(repr(folder)))" => "open_session($(repr(start)))")

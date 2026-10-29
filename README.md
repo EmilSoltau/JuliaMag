@@ -50,12 +50,13 @@ The tests check the readers on public sample files in `JuliaMagCore/test/data/gr
 ## Saved scripts
 
 `script_text(s)` turns the history of a session into a Julia script.
-The script keeps the items each job makes in variables named after their ids, such as `db_1 = only(wait_job(import_file(s, "..."; ...)).outputs)`.
+The script keeps the items each job makes in variables named after their ids, such as `db_1 = only(wait_job(import_file(s, "..."; ...); check = true).outputs)`.
 The lines after it name the item by the variable.
 So a script replays on the same project too, not only on a copy of the project as it was when the session started.
 Each run makes new items with new ids.
 Items that were in the project before the first history entry are named by their ids, such as `"db-1"`.
 A job run again with `rerun!(...; replace = true)` replays as its command, followed by `remove_item!` for each item it replaced.
-The script ends with `close_session!(s)`, so it does not leave the project locked.
+`check = true` makes the script stop with a plain message at a job that failed or was cancelled.
+The lines run inside `try ... finally close_session!(s) end`, so the script does not leave the project locked, also when it stops part-way.
 
 `docs/bench.md` has the import and export speed and memory numbers for big files and grids.

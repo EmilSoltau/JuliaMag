@@ -51,7 +51,8 @@ These are the open points from the reviews that later plans must handle.
   The script runs the command and then removes those items with `remove_item!`.
   An undo or redo of that job becomes one `undo!(s)` or `redo!(s)` per script step.
 - A saved script opened its project and did not close it, so it kept the project locked until Julia exited.
-  Done in the same commit: the script ends with `close_session!(s)`.
+  Done in the same commit: the script lines run inside `try ... finally close_session!(s) end`.
+  A job line waits with `wait_job(...; check = true)`, so the script stops with a plain message at a failed job.
 - A direct `set_grid_crs!` and the tool `grid.set_crs` were told apart in the script only by an `"item"` argument.
   Done in the same commit: a direct call is recorded as `"grid.set_grid_crs"`; old history files still replay.
 - A script made from a reopened session could differ from the live one, since JSON reads `3.0` back as `3`.

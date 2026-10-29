@@ -20,9 +20,26 @@ function var_name(id::AbstractString)::String
     return Base.isidentifier(v) && v != "s" ? v : "item_" * v
 end
 
+"""
+A line id as Julia source. The line type must be one of the `LineType` names,
+since it is written as a name, not as text. Throws `ArgumentError` otherwise.
+"""
 function line_expr(d)::String
-    return "LineId($(d["type"]), $(literal(d["number"])), $(literal(d["version"])))"
+    d isa AbstractDict || throw(ArgumentError("the line is not an object"))
+    ty = get(d, "type", nothing)
+    names = [string(x) for x in instances(LineType)]
+    (ty isa AbstractString && ty in names) ||
+        throw(ArgumentError("the line type $(repr(ty)) is not one of $(join(names, ", "))"))
+    return "LineId($ty, $(literal(get(d, "number", nothing))), $(literal(get(d, "version", nothing))))"
 end
+
+"""
+History text for a comment line of the script. Control characters (such as a
+newline, which would end the comment) and line or paragraph separators become
+spaces, and bytes that are not valid text become U+FFFD.
+"""
+comment_text(x::AbstractString)::String =
+    map(c -> !isvalid(c) ? '\ufffd' : iscntrl(c) || c in ('\u2028', '\u2029') ? ' ' : c, String(x))
 
 # Keyword name for `run_tool`. Names that are not identifiers are quoted with var"...".
 kwname(k::AbstractString) = Base.isidentifier(k) ? String(k) : "var" * repr(String(k))
@@ -93,10 +110,11 @@ is_export(c::String, a::AbstractDict) =
 # Imports and exports always run as jobs in the script, even when they were called
 # directly. `run_tool` lines are wrapped too: for a quick tool or a refused one,
 # `wait_job` throws a `ToolError` when the tool did not run, so the script stops there.
+# `check = true` makes a failed or cancelled job throw, so the script stops there too.
 function call_text(e::HistoryEntry, vars::AbstractDict = Dict{String,String}())::String
     c, a = e.command, e.args
     wrap = !isempty(e.job) || is_import(c, a) || is_export(c, a) || is_tool_call(c, a)
-    return wrap ? "wait_job($(command_text(e, vars)))" : command_text(e, vars)
+    return wrap ? "wait_job($(command_text(e, vars)); check = true)" : command_text(e, vars)
 end
 
 # Commands that `command_text` writes as a call of their core function.
@@ -150,7 +168,8 @@ function command_text(e::HistoryEntry, vars::AbstractDict = Dict{String,String}(
         return "set_grid_crs!(s, $(literal(a["item"])), $(literal(a["crs"])))"
     elseif c == "grid.set_georef"
         # JSON reads a whole number back as an integer: write each value as a Float64.
-        kw = join(("$k = $(repr(Float64(a[k])))" for k in sort!([String(k) for k in keys(a) if k != "item"])), ", ")
+        kw = join(("$(kwname(k)) = $(repr(Float64(a[k])))" for k in sort!([String(k) for k in keys(a) if k != "item"])),
+                  ", ")
         return "set_grid_georef!(s, $(literal(a["item"])); $kw)"
     elseif c == "grid.set_style"
         return "set_grid_style!(s, $(literal(a["item"])), $(style_text(a)))"
@@ -184,26 +203,28 @@ end
 "The keywords of a `\"database.set_channel_info\"` entry, sorted. `format` is written as a symbol."
 function channel_info_text(a::AbstractDict)::String
     ks = sort!([String(k) for k in keys(a) if !(k in ("item", "channel"))])
-    return join(("$k = $(k == "format" ? repr(Symbol(a[k])) : literal(a[k]))" for k in ks), ", ")
+    return join(("$(kwname(k)) = $(k == "format" ? repr(Symbol(a[k])) : literal(a[k]))" for k in ks), ", ")
 end
 
 """
     script_text(s)::String
 
 The history as a Julia script. It starts with `using JuliaMagCore` and
-`s = open_session(<project folder>)`, and ends with `close_session!(s)`, so the
-project is not left locked. Each entry is one call.
+`s = open_session(<project folder>)`. The lines after it run inside
+`try ... finally close_session!(s) end`, so the project is not left locked,
+also when a line fails. Each entry is one call, after a comment with its time,
+command and job.
 Commands that have a core function become that call. Imports become
 `import_file(s, path; <settings>...)`. Exports become
 `export_file(s, item, path; exporter = "<id>", <settings>...)`. Other commands become
 `run_tool(s, "<command>"; <args>...)`, with tool inputs as `inputs = Dict(...)`.
 Every import, export and tool call, and every entry that ran as a job, is
-wrapped in `wait_job(...)`. So the script waits for each job before the next
-line, and stops at a tool that did not run.
+wrapped in `wait_job(...; check = true)`. So the script waits for each job
+before the next line, and stops at a job that failed or a tool that did not run.
 
 The outputs of an entry (the items a job or a direct import made) are bound to
 variables named after their ids:
-`db_1 = only(wait_job(import_file(s, "..."; ...)).outputs)`. Later lines name the
+`db_1 = only(wait_job(import_file(s, "..."; ...); check = true).outputs)`. Later lines name the
 item by the variable. So the script replays on the same project as well as on a
 copy: each run makes new items. Items that existed before the first history
 entry are named by their ids.
@@ -211,6 +232,11 @@ entry are named by their ids.
 A job run again with `replace = true` becomes its command, then
 `remove_item!(s, <variable>)` for each item it took out. Undo and redo of that
 job become one `undo!(s)` or `redo!(s)` per script step.
+
+Every history value is written as a Julia value (`repr`), never as code, and
+comment text has its control characters replaced. So a crafted history file
+cannot add code to the script. A history entry that cannot be written that way,
+such as one with an unknown line type, throws an `ArgumentError` that names it.
 """
 function script_text(s::Session)::String
     lock(s.lock) do
@@ -220,15 +246,23 @@ function script_text(s::Session)::String
         io = IOBuffer()
         println(io, "using JuliaMagCore")
         println(io, "s = open_session(", repr(s.project.folder), ")")
-        for e in s.history
-            println(io, "# ", e.time, " ", e.command, isempty(e.job) ? "" : " (job " * e.job * ")")
+        println(io, "try")
+        for (n, e) in enumerate(s.history)
+            println(io, "# ", comment_text(e.time), " ", comment_text(e.command),
+                    isempty(e.job) ? "" : " (job " * comment_text(e.job) * ")")
             if e.command in ("session.undo", "session.redo")
                 step = get(e.args, "step", "")
-                n = step isa AbstractString ? get(steps, step, 1) : 1
-                foreach(_ -> println(io, e.command == "session.undo" ? "undo!(s)" : "redo!(s)"), 1:n)
+                times = step isa AbstractString ? get(steps, step, 1) : 1
+                foreach(_ -> println(io, e.command == "session.undo" ? "undo!(s)" : "redo!(s)"), 1:times)
                 continue
             end
-            line = call_text(e, vars)
+            line = try
+                call_text(e, vars)
+            catch err
+                err isa Union{ArgumentError,KeyError,MethodError,InexactError} || rethrow()
+                why = err isa ArgumentError ? err.msg : sprint(showerror, err)
+                throw(ArgumentError("history entry $n ($(repr(e.command))) cannot be written as a script line: $why"))
+            end
             # History lines from before entries kept their outputs: take them from the job.
             made = !isempty(e.outputs) || isempty(e.job) ? e.outputs : get(outputs, e.job, String[])
             if isempty(made)
@@ -244,7 +278,9 @@ function script_text(s::Session)::String
             end
             isempty(e.replaces) || (steps[job_step_label(e.command, e.job)] = 1 + length(e.replaced))
         end
-        println(io, "close_session!(s)")
+        println(io, "finally")
+        println(io, "    close_session!(s)")
+        println(io, "end")
         return String(take!(io))
     end
 end

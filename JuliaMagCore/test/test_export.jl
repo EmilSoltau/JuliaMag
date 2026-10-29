@@ -302,9 +302,9 @@ end
     # The script waits for the export, and the line runs again. The database came
     # from an import earlier in the history, so the script names it by a variable.
     v = JuliaMagCore.var_name(id)
-    line = split(script_text(s), '\n')[end-2]       # the last line closes the session
+    line = split(script_text(s), '\n')[end-4]       # the last lines close the session
     @test line == "wait_job(export_file(s, $v, $(repr(path)); exporter = \"export.csv\", " *
-                  "channels = [\"MAG\"], delimiter = \";\"))"
+                  "channels = [\"MAG\"], delimiter = \";\"); check = true)"
     rm(path)
     m = Module()
     Core.eval(m, :(using JuliaMagCore))
@@ -316,7 +316,7 @@ end
     # A direct call is recorded and becomes a job in the script too.
     export_xyz(s, id, joinpath(dir, "direct.xyz"); channels = ["X"])
     @test s.history[end].command == "export.geosoft_xyz" && isempty(s.history[end].job)
-    @test startswith(split(script_text(s), '\n')[end-2], "wait_job(export_file(s, $v, ")
+    @test startswith(split(script_text(s), '\n')[end-4], "wait_job(export_file(s, $v, ")
 
     # Run again.
     rm(path)
