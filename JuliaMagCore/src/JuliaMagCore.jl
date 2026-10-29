@@ -71,4 +71,11 @@ export default_settings, validate, last_settings, reset_settings!, run_tool
 export valid_crs, crs_name, crs_from_wkt, crs_wkt, guess_utm, reproject_xy
 export parse_channel_expr, ChannelStats, channel_stats
 
+# The one `__init__` of the package. Each part that needs setup when the
+# package loads gets a named function, called from here.
+function __init__()
+    quiet_gdal!()
+    return nothing
+end
+
 end # module

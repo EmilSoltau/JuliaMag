@@ -58,6 +58,12 @@ pixel_centre(gt, col, row) = (gt[1] + (col - 0.5) * gt[2] + (row - 0.5) * gt[3],
     end
 end
 
+@testset "GDAL is quiet" begin
+    # The package's `__init__` sets JuliaMag's quiet error handler.
+    @test JuliaMagCore.QUIET_GDAL_HANDLER[] != C_NULL
+    @test AG.GDAL.cplgeterrorhandler(C_NULL) == JuliaMagCore.QUIET_GDAL_HANDLER[]
+end
+
 @testset "coordinate system text" begin
     @test crs_from_wkt("") == ""
     @test crs_wkt("") == ""
@@ -135,19 +141,28 @@ end
         end
 
         @testset "integer bands with scale and offset" begin
-            raw = Int16[0 10; -20 -32768]
+            # A scaled 16-bit value such as 50000.1 does not fit a Float32
+            # exactly, so a scaled band becomes a Float64 grid with exact values.
+            raw = Int16[1 10; -20 -32768]
             f = write_gdal(joinpath(tmp, "int.tif"), raw, gt_north; nodata = -32768, scale = 0.1, offset = 50000)
             job = wait_job(import_file(s, f))
             @test status(job) == JOB_DONE
             g = grid(s.project, only(job.outputs))
-            @test g.eltype == Float32 && g.source.eltype == "int16"
+            @test g.eltype == Float64 && g.source.eltype == "int16"
             A = read_rows(g, 1, 2)
-            want = Float32[50000 + 0.1 * raw[i, 3 - j] for i in 1:2, j in 1:2]
-            @test isnan(A[2, 1]) && count(isnan, A) == 1
-            @test all(A[k] ≈ want[k] for k in eachindex(A) if !isnan(A[k]))
-            @test A[1, 2] == 50000f0
+            want = [50000 + 0.1 * raw[i, 3 - j] for i in 1:2, j in 1:2]
+            want[2, 1] = NaN
+            @test isequal(A, want)
+            @test A[1, 1] == 50001.0 && A[2, 2] == 49998.0 && A[1, 2] == 50000 + 0.1
 
-            # Each band type becomes the grid type of the rule.
+            # A scaled Float32 band becomes Float64 too.
+            f = write_gdal(joinpath(tmp, "f32.tif"), Float32[1 2; 3 4], gt_north; scale = 0.1)
+            job = wait_job(import_file(s, f))
+            @test status(job) == JOB_DONE
+            g = grid(s.project, only(job.outputs))
+            @test g.eltype == Float64 && read_rows(g, 1, 2) == [0.1 * 2 0.1 * 1; 0.1 * 4 0.1 * 3]
+
+            # Each unscaled band type becomes the grid type of the rule.
             for (T, G) in ((UInt8, Float32), (Int8, Float32), (UInt16, Float32), (Int16, Float32),
                            (Int32, Float64), (UInt32, Float64), (Float32, Float32), (Float64, Float64))
                 f = write_gdal(joinpath(tmp, "t_$T.tif"), T[1 2; 3 4], gt_north)

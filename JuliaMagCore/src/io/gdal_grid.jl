@@ -16,8 +16,13 @@ const GDAL = ArchGDAL.GDAL
 # last error from GDAL after each call and throws it as `GDALError`.
 quiet_gdal_error(::GDAL.CPLErr, ::Cint, ::Cstring)::Cvoid = nothing
 
-function __init__()
-    GDAL.cplseterrorhandler(@cfunction(quiet_gdal_error, Cvoid, (GDAL.CPLErr, Cint, Cstring)))
+"The handler `quiet_gdal!` gave GDAL, so a test can check it is still in place."
+const QUIET_GDAL_HANDLER = Ref{Ptr{Cvoid}}(C_NULL)
+
+"Set the quiet GDAL error handler. Called once by the module's `__init__`."
+function quiet_gdal!()
+    QUIET_GDAL_HANDLER[] = @cfunction(quiet_gdal_error, Cvoid, (GDAL.CPLErr, Cint, Cstring))
+    GDAL.cplseterrorhandler(QUIET_GDAL_HANDLER[])
     return nothing
 end
 
@@ -44,9 +49,10 @@ Import one band of a raster file through GDAL as a grid item named after the fil
 - `driver` is a GDAL short driver name, such as `"GSBG"`; `""` lets GDAL pick.
 - `format_name` names the format in setting messages.
 
-Nodata becomes `NaN`, and the band scale and offset are applied. `Byte`,
-`Int8`, `UInt16` and `Int16` bands become `Float32`; `Int32`, `UInt32` and
-`Float64` become `Float64`; `Float32` stays. The grid source records the GDAL
+Nodata becomes `NaN`, and the band scale and offset are applied. The grid is
+`Float32` only when every value fits it exactly: a `Byte`, `Int8`, `UInt16`,
+`Int16` or `Float32` band with scale 1 and offset 0. Every other band, and every
+band with a scale or an offset, gives a `Float64` grid. The grid source records the GDAL
 driver's long name, the band type and the `COMPRESSION` of the file.
 GDAL errors are thrown as `GridError`. Pass the job's progress, so the import
 can be cancelled.
@@ -76,8 +82,13 @@ function open_gdal(path::String, driver::String)::ArchGDAL.Dataset
     return ds
 end
 
-"The grid type of a band type: `Float32` when every value fits exactly, else `Float64`."
-grid_eltype(T::Type)::DataType = T in (UInt8, Int8, UInt16, Int16, Float16, Float32) ? Float32 : Float64
+"""
+The grid type of a band of type `T`: `Float32` when every value fits it exactly,
+else `Float64`. A scale or an offset (`scaled`) makes values such as 50000.1
+that a `Float32` cannot hold, so a scaled band is always `Float64`.
+"""
+grid_eltype(T::Type, scaled::Bool)::DataType =
+    !scaled && T in (UInt8, Int8, UInt16, Int16, Float16, Float32) ? Float32 : Float64
 
 function import_gdal_band(s::Session, ds::ArchGDAL.Dataset, path::String, n::Int, progress::Progress)::ImportResult
     m = ArchGDAL.nraster(ds)
@@ -98,13 +109,13 @@ function import_gdal_band(s::Session, ds::ArchGDAL.Dataset, path::String, n::Int
     geo = georef_from_affine(gt, nx, ny)
     T = ArchGDAL.pixeltype(band)
     T <: Real || throw(GridError("band $n of $path holds $T values. JuliaMag grids hold real numbers only."))
-    O = grid_eltype(T)
     # GDAL converts while it reads. Float32 is read as it is; every other type
     # is read as Float64, which holds all of them exactly up to 32 bits.
     W = T === Float32 ? Float32 : Float64
     nodata = ArchGDAL.getnodatavalue(band)
     scale = Float64(ArchGDAL.getscale(band))
     offset = Float64(ArchGDAL.getoffset(band))
+    O = grid_eltype(T, scale != 1 || offset != 0)
     compression = ArchGDAL.metadataitem(ds, "COMPRESSION"; domain = "IMAGE_STRUCTURE")
     source = GridSource(path, ArchGDAL.longname(drv), lowercase(string(T)), compression)
     header = GridHeader(nx, ny, geo.dx, geo.dy, geo.x0, geo.y0, geo.rotation,
