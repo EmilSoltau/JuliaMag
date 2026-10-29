@@ -7,7 +7,10 @@
 # the west column. Either way the first value sits at (X0, Y0).
 #
 # Real value = stored / ZMULT + ZBASE. A dummy is masked before the scaling.
-# Compressed grids (ES > 1024) are read by `read_geosoft_grd_compressed`.
+# Compressed grids (ES > 1024) are read by `read_geosoft_grd_compressed`, from
+# section 4.
+
+using CodecZlib: ZlibDecompressorStream, ZlibError
 
 "The 512-byte header of a Geosoft grid. `es` keeps the compression flag (1024, bit 0x400)."
 struct GrdHeader
@@ -139,13 +142,110 @@ function read_geosoft_grd(s::Session, path::AbstractString, settings::AbstractDi
     end
 end
 
+"The signature at the start of the compression header (bytes `c7 d8 e7 f8`)."
+const GRD_SIGNATURE = 0xF8E7D8C7
+"The size of the header before each compressed block."
+const GRD_BLOCK_HEADER_BYTES = 16
+
 """
     read_geosoft_grd_compressed(s, path, settings, progress, header) -> ImportResult
 
-Import a compressed Geosoft grid. Not supported yet.
+Import a compressed Geosoft grid (research section 4). After the 512-byte header
+comes a 16-byte compression header (signature, compression type, block count
+`NB`, vectors per block `VPB`), then `NB` 8-byte block offsets and `NB` 4-byte
+block sizes. Each block is a 16-byte block header and then its payload. Block
+`k` holds vectors `(k - 1) * VPB + 1` on, and the last block may hold fewer.
+
+The codec is picked by the payload, not by the type fields, whose labels look
+swapped in real files: a payload that starts with a zlib header (`0x78`) is
+inflated, any other fails. One block is read at a time, and its values are put
+a block of vectors at a time. Every offset and size in the file is checked
+against the file size before it is used.
 """
-read_geosoft_grd_compressed(::Session, ::String, ::AbstractDict, ::Progress, ::GrdHeader)::ImportResult =
-    throw(GridError("compressed Geosoft grids are not supported yet"))
+function read_geosoft_grd_compressed(s::Session, path::String, ::AbstractDict, progress::Progress,
+                                     header::GrdHeader)::ImportResult
+    blocks = open(io -> read_grd_block_table(io, header, filesize(path)), path)
+    return import_grd(s, path, header, "zlib", progress) do sink, h
+        open(io -> read_grd_blocks!(sink, io, h, grd_eltype(h), blocks), path)
+    end
+end
+
+"""
+Read and check the compression header and block table of the grid `h` from
+`io`, a file of `fsize` bytes. Returns the `(offset, size)` of each block that
+holds vectors, and the number of vectors per block.
+"""
+function read_grd_block_table(io::IO, h::GrdHeader, fsize::Int)::Tuple{Vector{Tuple{Int,Int}},Int}
+    seek(io, GRD_HEADER_BYTES)
+    b = read(io, 16)
+    length(b) == 16 || throw(GridError("the file ends before the 16-byte compression header"))
+    sig = grd_field(UInt32, b, 0)
+    sig == GRD_SIGNATURE ||
+        throw(GridError("the compressed data does not start with the Geosoft compression signature " *
+                        "(found 0x$(string(sig; base = 16, pad = 8))). The file is damaged or not a Geosoft grid."))
+    nb, vpb = Int(grd_field(Int32, b, 8)), Int(grd_field(Int32, b, 12))
+    nb >= 1 && vpb >= 1 ||
+        throw(GridError("the compression header gives NB = $nb blocks of VPB = $vpb vectors; both must be at least 1"))
+    first_block = GRD_HEADER_BYTES + 16 + 12nb
+    first_block <= fsize || throw(GridError("the table of $nb blocks goes past the end of the file ($fsize bytes)"))
+    nb * vpb >= h.nv ||
+        throw(GridError("the $nb blocks of $vpb vectors hold $(nb * vpb) vectors, fewer than the $(h.nv) of the grid"))
+    t = read(io, 12nb)
+    blocks = Tuple{Int,Int}[]
+    for k in 1:cld(h.nv, vpb)              # blocks past the last vector are not read
+        o = Int(grd_field(Int64, t, 8(k - 1)))
+        c = Int(grd_field(Int32, t, 8nb + 4(k - 1)))
+        o >= first_block ||
+            throw(GridError("block $k starts at byte $o, inside the header or the block table"))
+        c >= GRD_BLOCK_HEADER_BYTES ||
+            throw(GridError("block $k is $c bytes, less than its $GRD_BLOCK_HEADER_BYTES-byte header"))
+        c <= fsize - o ||
+            throw(GridError("block $k starts at byte $o and is $c bytes long, past the end of the file ($fsize bytes)"))
+        push!(blocks, (o, c))
+    end
+    return blocks, vpb
+end
+
+"""
+Read the blocks of a compressed grid from `io` into the sink, one block at a
+time. `T` is the stored type; `blocks` is from `read_grd_block_table`.
+"""
+function read_grd_blocks!(sink::GridSink, io::IO, h::GrdHeader, ::Type{T},
+                          (blocks, vpb)::Tuple{Vector{Tuple{Int,Int}},Int}) where {T}
+    payload = UInt8[]
+    for (k, (o, c)) in enumerate(blocks)
+        seek(io, o + GRD_BLOCK_HEADER_BYTES)
+        resize!(payload, c - GRD_BLOCK_HEADER_BYTES)
+        got = readbytes!(io, payload, length(payload))
+        got == length(payload) || throw(GridError("the file ends inside block $k"))
+        isempty(payload) && throw(GridError("block $k holds no data"))
+        payload[1] == 0x78 ||
+            throw(GridError("block $k uses a compression JuliaMag cannot read yet (probably LZRW1, Oasis \"COMP=SPEED\"). " *
+                            "Save the grid again in Oasis with size compression or no compression."))
+        v1 = (k - 1) * vpb + 1
+        nv = min(vpb, h.nv - v1 + 1)
+        want = nv * h.ne * sizeof(T)
+        z = ZlibDecompressorStream(IOBuffer(payload); stop_on_end = true)
+        try
+            put_grd_vectors!(sink, z, h, T, v1, nv,
+                             n -> "block $k inflates to $n of the $want bytes it must hold")
+            # Read to the end of the stream, so its checksum is checked. Any
+            # values after the grid's own are dummy padding, up to VPB vectors.
+            pad = (vpb - nv) * h.ne * sizeof(T)
+            while !eof(z)
+                pad -= bytesavailable(z)
+                pad >= 0 || throw(GridError("block $k inflates to more than its $vpb vectors of $(h.ne) values"))
+                skip(z, bytesavailable(z))
+            end
+        catch e
+            e isa ZlibError || rethrow()
+            throw(GridError("block $k is damaged: its zlib data cannot be inflated ($(e.msg))"))
+        finally
+            close(z)
+        end
+    end
+    return nothing
+end
 
 """
 Import the grid of header `h` with `fill_grid!(sink, h)`, which puts every vector.
@@ -173,20 +273,30 @@ into the sink, a block of whole vectors at a time. `T` is the stored type.
 """
 function read_grd_vectors!(sink::GridSink, io::IO, h::GrdHeader, ::Type{T}) where {T}
     seek(io, GRD_HEADER_BYTES)
+    total = h.ne * h.nv * sizeof(T)
+    put_grd_vectors!(sink, io, h, T, 1, h.nv, n -> "the file ends after $n of $total data bytes")
+    return nothing
+end
+
+"""
+Read `nv` vectors of stored type `T` from `io` and put them into the sink as
+vectors `v1` on, a block of whole vectors at a time. When `io` ends early, fail
+with `short(n)`, the message for `n` bytes read.
+"""
+function put_grd_vectors!(sink::GridSink, io::IO, h::GrdHeader, ::Type{T}, v1::Int, nv::Int,
+                          short::F) where {T,F}
     O = sink.grid.eltype
     k = max(1, GRID_BLOCK_BYTES ÷ (h.ne * max(sizeof(T), sizeof(O))))
-    raw = Vector{UInt8}(undef, h.ne * min(k, h.nv) * sizeof(T))
-    total = h.ne * h.nv * sizeof(T)
-    v1 = 1
-    while v1 <= h.nv
-        nv = min(k, h.nv - v1 + 1)
-        nb = h.ne * nv * sizeof(T)
+    raw = Vector{UInt8}(undef, h.ne * min(k, nv) * sizeof(T))
+    done = 0
+    while done < nv
+        n = min(k, nv - done)
+        nb = h.ne * n * sizeof(T)
         got = readbytes!(io, raw, nb)
-        got == nb || throw(GridError("the file ends after $((v1 - 1) * h.ne * sizeof(T) + got) of $total data bytes"))
-        stored = reinterpret(T, view(raw, 1:nb))
-        out = grd_values(O, stored, h.ne, nv, h.zbase, h.zmult)
-        h.kx == 1 ? put_rows!(sink, v1, out) : put_columns!(sink, v1, out)
-        v1 += nv
+        got == nb || throw(GridError(short(done * h.ne * sizeof(T) + got)))
+        out = grd_values(O, reinterpret(T, view(raw, 1:nb)), h.ne, n, h.zbase, h.zmult)
+        h.kx == 1 ? put_rows!(sink, v1 + done, out) : put_columns!(sink, v1 + done, out)
+        done += n
     end
     return nothing
 end

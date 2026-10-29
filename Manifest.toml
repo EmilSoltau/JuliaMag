@@ -2,7 +2,7 @@
 
 julia_version = "1.12.7"
 manifest_format = "2.0"
-project_hash = "09599fe70862b21dc20303b4091da25455f8d17e"
+project_hash = "413a64b143287cf6b9f086bb0865a1388b64af59"
 
 [[deps.AbstractTrees]]
 git-tree-sha1 = "2d9c9a55f9c93e8887ad391fbae72f8ef55e1177"
@@ -166,6 +166,12 @@ deps = ["ChunkCodecCore", "Zstd_jll"]
 git-tree-sha1 = "34d9873079e4cb3d0c62926a225136824677073f"
 uuid = "55437552-ac27-4d47-9aa3-63184e8fd398"
 version = "1.0.0"
+
+[[deps.CodecZlib]]
+deps = ["TranscodingStreams", "Zlib_jll"]
+git-tree-sha1 = "970758a3d591a2a5c2a907c53f2e2f8c1b1d3537"
+uuid = "944b1d66-785c-5afd-91f1-9de20f533193"
+version = "0.7.9"
 
 [[deps.ColorTypes]]
 deps = ["FixedPointNumbers", "Random"]
@@ -521,7 +527,7 @@ uuid = "aacddb02-875f-59d6-b918-886e6ef4fbf8"
 version = "3.2.1+0"
 
 [[deps.JuliaMagCore]]
-deps = ["ArchGDAL", "JSON3", "Mmap", "Parquet2", "Parsers", "Printf", "Proj", "StructTypes", "Tables"]
+deps = ["ArchGDAL", "CodecZlib", "JSON3", "Mmap", "Parquet2", "Parsers", "Printf", "Proj", "StructTypes", "Tables"]
 path = "JuliaMagCore"
 uuid = "133f1fd6-5f53-418f-9a68-c205e5f9c1d6"
 version = "0.1.0"
@@ -1071,6 +1077,11 @@ deps = ["Artifacts", "JLLWrappers", "Libdl", "boost_jll"]
 git-tree-sha1 = "4d16a4b4eab80099c19342b10d0bdb252c39bea6"
 uuid = "e0b8ae26-5307-5830-91fd-398402328850"
 version = "0.21.1+0"
+
+[[deps.TranscodingStreams]]
+git-tree-sha1 = "0c45878dcfdcfa8480052b6ab162cdd138781742"
+uuid = "3bb67fe8-82b1-5028-8e26-92a6c54297fa"
+version = "0.11.3"
 
 [[deps.Transducers]]
 deps = ["Accessors", "ArgCheck", "BangBang", "Baselet", "CompositionsBase", "ConstructionBase", "DefineSingletons", "Distributed", "InitialValues", "Logging", "Markdown", "MicroCollections", "SplittablesBase", "Tables"]

@@ -6,22 +6,24 @@ const GRID_DATA = joinpath(@__DIR__, "data", "grids")
 Write a Geosoft grid file: a 512-byte header with the given fields, then `data`
 (any array, written as its raw bytes). Little-endian, as the format says.
 """
-function write_grd(path; es = 4, sf = 2, ne = 3, nv = 2, kx = 1, de = 1.0, dv = 1.0, x0 = 0.0, y0 = 0.0,
-                   rot = 0.0, zbase = 0.0, zmult = 1.0, label = "", data = Float32[])
-    h = zeros(UInt8, 512)
-    field!(off, v) = (b = reinterpret(UInt8, [htol(v)]); h[off + 1:off + length(b)] .= b)
-    field!(0, Int32(es)); field!(4, Int32(sf)); field!(8, Int32(ne)); field!(12, Int32(nv)); field!(16, Int32(kx))
-    field!(20, Float64(de)); field!(28, Float64(dv)); field!(36, Float64(x0)); field!(44, Float64(y0))
-    field!(52, Float64(rot)); field!(60, Float64(zbase)); field!(68, Float64(zmult))
-    h[77:76 + ncodeunits(label)] .= codeunits(label)
+function write_grd(path; data = Float32[], fields...)
     open(path, "w") do io
-        write(io, h)
+        write(io, grd_header_bytes(; fields...))
         write(io, data)
     end
     return path
 end
 
 grid_file(name) = joinpath(GRID_DATA, name)
+
+"The block offsets and sizes in the table of a compressed Geosoft grid."
+function grd_blocks(path)
+    b = read(path)
+    nb = Int(ltoh(only(reinterpret(Int32, b[521:524]))))
+    offsets = Int.(ltoh.(reinterpret(Int64, b[529:528 + 8nb])))
+    sizes = Int.(ltoh.(reinterpret(Int32, b[529 + 8nb:528 + 12nb])))
+    return offsets, sizes
+end
 
 header_error(f) = try
     open(read_grd_header, f)
@@ -178,11 +180,100 @@ end
             @test length(s.project.items) == n && isempty(importing(s))
         end
 
-        @testset "a compressed grid is not read yet" begin
+        @testset "compressed Oasis grids equal their uncompressed twins" begin
+            g, C, _ = load(s, grid_file("om_compress.grd"))
+            _, F, _ = load(s, grid_file("om_float.grd"))
+            @test isequal(C, F)
+            @test g.source.compression == "zlib" && g.source.eltype == "float32" && g.eltype == Float32
+
+            @test length(first(grd_blocks(grid_file("test_compressed.grd")))) == 5
+            _, C, _ = load(s, grid_file("test_compressed.grd"))
+            _, U, _ = load(s, grid_file("test_uncompressed.grd"))
+            @test size(C) == (286, 251) && isequal(C, U)
+
+            g, A, _ = load(s, grid_file("mag_4126.grd"))
+            @test g.count == count(!isnan, A) && 0 < g.count < length(A)
+            @test g.source.compression == "zlib"
+            @test isempty(importing(s))
+        end
+
+        @testset "written compressed grids read back" begin
+            A = [Float64(i + 1000j) for i in 1:300, j in 1:700]
+            A[7, 3] = NaN
+            A[300, 700] = NaN
+            for kx in (1, -1)
+                f = joinpath(tmp, "w$kx.grd")
+                write_test_grd(f, A; kx, compress = true, x0 = 10.0, y0 = 20.0, de = 2.0, dv = 3.0)
+                offsets, sizes = grd_blocks(f)
+                # Rows: 1200 bytes, 54 per block, 13 blocks. Columns: 2800 bytes, 23 per block, 14 blocks.
+                @test length(offsets) == (kx == 1 ? 13 : 14)
+                g, B, _ = load(s, f)
+                @test g.eltype == Float32 && g.source.compression == "zlib"
+                @test isequal(B, Float32.(A))
+                @test g.count == length(A) - 2
+                @test (g.x0, g.y0) == (10, 20) && (g.dx, g.dy) == (kx == 1 ? (2, 3) : (3, 2))
+            end
+
+            # A scaled integer grid: the stored values are dummy-masked, then scaled.
+            Q = [i - 2.5j for i in 1:40, j in 1:30]
+            Q[1, 1] = NaN
+            f = write_test_grd(joinpath(tmp, "i16.grd"), Q; T = Int16, compress = true, x0 = 0.0, y0 = 0.0,
+                               de = 1.0, dv = 1.0, zbase = 100.0, zmult = 2.0)
+            g, B, _ = load(s, f)
+            @test g.eltype == Float64 && g.source.eltype == "int16" && isequal(B, Q)
+
+            # One vector is more than 65,536 bytes, so each block holds one vector.
+            W = [Float64(i * j) for i in 1:9000, j in 1:3]
+            f = write_test_grd(joinpath(tmp, "wide.grd"), W; T = Float64, compress = true, x0 = 0.0, y0 = 0.0,
+                               de = 1.0, dv = 1.0)
+            @test length(first(grd_blocks(f))) == 3
+            _, B, _ = load(s, f)
+            @test B == W
+            @test isempty(importing(s))
+        end
+
+        @testset "a damaged compressed grid fails with a plain message" begin
+            A = [Float64(i + j) for i in 1:300, j in 1:700]
+            good = write_test_grd(joinpath(tmp, "good.grd"), A; compress = true, x0 = 0.0, y0 = 0.0, de = 1.0, dv = 1.0)
+            offsets, sizes = grd_blocks(good)
+            nb = length(offsets)
             n = length(s.project.items)
-            job = wait_job(run_grd(s, grid_file("om_compress.grd")))
-            @test status(job) == JOB_FAILED && occursin("compressed Geosoft grids are not supported yet", job.error)
+            function fails(edit!, want)
+                b = read(good)
+                edit!(b)
+                f = joinpath(tmp, "bad.grd")
+                write(f, b)
+                job = wait_job(run_grd(s, f))
+                ok = status(job) == JOB_FAILED && occursin(want, job.error)
+                ok || @info "unexpected result" status(job) job.error
+                return ok
+            end
+            # A changed byte in the middle of block 2's payload.
+            @test fails(b -> (k = offsets[2] + 16 + sizes[2] ÷ 2 + 1; b[k] ⊻= 0xff), "block 2 is damaged")
+            # The block table points past the end of the file.
+            @test fails(b -> (b[528 + 8 * (nb - 1) + 1:528 + 8nb] .= reinterpret(UInt8, [htol(Int64(10^9))])),
+                        "block $nb starts at byte 1000000000")
+            @test fails(b -> (b[528 + 8nb + 1:528 + 8nb + 4] .= reinterpret(UInt8, [htol(Int32(10^8))])),
+                        "block 1 starts at byte $(offsets[1]) and is 100000000 bytes long, past the end of the file")
+            # A payload that is not zlib (LZRW1).
+            @test fails(b -> (b[offsets[1] + 17] = 0x00),
+                        "block 1 uses a compression JuliaMag cannot read yet (probably LZRW1, Oasis \"COMP=SPEED\"). " *
+                        "Save the grid again in Oasis with size compression or no compression.")
+            # A bad signature.
+            @test fails(b -> (b[513] = 0x00), "does not start with the Geosoft compression signature")
+            # The header asks for more vectors than the blocks hold.
+            nv!(b, nv) = (b[13:16] .= reinterpret(UInt8, [htol(Int32(nv))]))
+            @test fails(b -> nv!(b, 702), "block 13 inflates to 62400 of the 64800 bytes it must hold")
+            @test fails(b -> nv!(b, 800), "the 13 blocks of 54 vectors hold 702 vectors, fewer than the 800 of the grid")
+            # A block that holds more than VPB vectors.
+            vpb!(b, v) = (b[525:528] .= reinterpret(UInt8, [htol(Int32(v))]))
+            @test fails(b -> (nv!(b, 300); vpb!(b, 27)), "block 1 inflates to more than its 27 vectors of 300 values")
             @test length(s.project.items) == n && isempty(importing(s))
+            # Dummy padding at the end of the last block is fine.
+            f = joinpath(tmp, "pad.grd")
+            write(f, (b = read(good); nv!(b, 699); b))
+            _, B, _ = load(s, f)
+            @test isequal(B, Float32.(A[:, 1:699]))
         end
 
         @testset "scaling, dummies and padding" begin
