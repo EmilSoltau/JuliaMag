@@ -32,12 +32,20 @@ is_export(c::String, a::AbstractDict) =
 # `wait_job` throws a `ToolError` when the tool did not run, so the script stops there.
 function call_text(e::HistoryEntry)::String
     c, a = e.command, e.args
-    wrap = !isempty(e.job) || is_import(c, a) || is_export(c, a) || is_tool_call(c)
+    wrap = !isempty(e.job) || is_import(c, a) || is_export(c, a) || is_tool_call(c, a)
     return wrap ? "wait_job($(command_text(e)))" : command_text(e)
 end
 
+# Commands that `command_text` writes as a call of their core function.
+const CORE_COMMANDS = ("database.set_cell", "database.set_line_selected", "session.undo", "session.redo",
+                       "grid.set_georef", "grid.set_style")
+
+# True for a `"grid.set_crs"` entry of `set_grid_crs!`. The tool of the same id
+# is recorded with its inputs instead, and replays with `run_tool`.
+is_grid_crs_call(c::String, a::AbstractDict) = c == "grid.set_crs" && haskey(a, "item")
+
 # True when `command_text` writes the entry as a `run_tool` call.
-is_tool_call(c::String) = !(c in ("database.set_cell", "database.set_line_selected", "session.undo", "session.redo"))
+is_tool_call(c::String, a::AbstractDict) = !(c in CORE_COMMANDS || is_grid_crs_call(c, a))
 
 function command_text(e::HistoryEntry)::String
     a = e.args
@@ -51,6 +59,14 @@ function command_text(e::HistoryEntry)::String
         return "undo!(s)"
     elseif c == "session.redo"
         return "redo!(s)"
+    elseif is_grid_crs_call(c, a)
+        return "set_grid_crs!(s, $(repr(a["item"])), $(repr(a["crs"])))"
+    elseif c == "grid.set_georef"
+        # JSON reads a whole number back as an integer: write each value as a Float64.
+        kw = join(("$k = $(repr(Float64(a[k])))" for k in sort!([String(k) for k in keys(a) if k != "item"])), ", ")
+        return "set_grid_georef!(s, $(repr(a["item"])); $kw)"
+    elseif c == "grid.set_style"
+        return "set_grid_style!(s, $(repr(a["item"])), $(style_text(a)))"
     end
     if is_import(c, a)
         kw = kwtext(a, filter(!=("path"), collect(keys(a))))

@@ -74,3 +74,29 @@ function write_test_grd(path, A::Matrix; T::Type = Float32, kx = 1, compress = f
     end
     return path
 end
+
+"""
+    make_grid(A; folder = <a new temp folder>) -> Grid
+
+A grid that holds `A` as it is stored: `A[i, j]` is column `i` and row `j`,
+so `A` has size `nx` by `ny` and row 1 is `A[:, 1]`. The value type is that of `A`.
+"""
+function make_grid(A::Matrix{T}; folder = joinpath(mktempdir(), "g")) where {T<:Union{Float32,Float64}}
+    g = create_grid(folder, "Mag", T, size(A)...; dx = 10.0, dy = 20.0, x0 = 100.0, y0 = 200.0)
+    write_rows!(g, 1, A)
+    return g
+end
+
+"""
+    add_test_grid!(s, A; name = "Mag") -> String
+
+Add a grid item that holds `A` (see `make_grid`) to the project of `s`. Returns its id.
+"""
+function add_test_grid!(s::Session, A::Matrix; name = "Mag")
+    p = s.project
+    id = new_item_id(p, ITEM_GRID)
+    make_grid(A; folder = joinpath(p.folder, "grids", id))
+    add_item!(p, ProjectItem(id, ITEM_GRID, name, "grids/$id", "", ""))
+    save_project(p)
+    return id
+end

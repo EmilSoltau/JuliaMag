@@ -39,6 +39,7 @@ include("tools/registry.jl")
 include("crs/crs.jl")
 include("builtin/coordinates.jl")
 include("builtin/channel_math.jl")
+include("builtin/grid_properties.jl")
 include("builtin/statistics.jl")
 
 export LineType, LINE, TIE, BASE, TEST, TREND, SPECIAL, RANDOM
@@ -76,7 +77,8 @@ export SettingSpec, NumberSetting, TextSetting, ExprSetting, ChoiceSetting, Bool
 export Place, ToolSpec, ToolError, register_tool!, unregister_tool!, tools, tool, tabs
 export default_settings, validate, last_settings, reset_settings!, run_tool
 export valid_crs, crs_name, crs_from_wkt, crs_from_name, crs_wkt, guess_utm, reproject_xy
-export parse_channel_expr, ChannelStats, channel_stats
+export parse_channel_expr, ChannelStats, channel_stats, grid_stats
+export set_grid_crs!, set_grid_georef!, set_grid_style!
 
 # The one `__init__` of the package. Each part that needs setup when the
 # package loads gets a named function, called from here.

@@ -1,7 +1,10 @@
-# Channel statistics (spec 9.3, "Statistics pane").
+# Channel and grid statistics (spec 9.3, "Statistics pane").
 #
-# `channel_stats` reads the channel in blocks with a `block_reader`, so memory
-# stays flat however long the lines are. It reads the data at least three times:
+# The passes read from a value source: any object with `foreach_block(f, src)`,
+# which calls `f(block::AbstractVector{Float64})` for each block of values.
+# `LineValues` reads a channel on some lines with a `block_reader`, and
+# `GridValues` reads a grid a block of rows at a time. So memory stays flat
+# however long the lines or large the grid. The data is read at least three times:
 #
 # 1. Count, missing, min, max, and the sum for the mean (a compensated sum,
 #    so the mean is as exact as one division allows).
@@ -18,12 +21,12 @@
 # the ends of that range, which is then about 1024^64 times narrower than max - min.)
 #
 # Values that are missing or not finite (NaN, Inf, -Inf) count as missing.
-# Every value of an array channel counts as one value.
+# Every value of an array channel, and every cell of a grid, counts as one value.
 
 using Printf
 
 """
-Statistics of one channel. `count` is the number of values used and `missing`
+Statistics of one channel or grid. `count` is the number of values used and `missing`
 the number of missing (or not finite) values. `std` is the sample standard
 deviation (divided by `count - 1`). `histogram` has one count per bin, between
 `edges` (one more than the bins, from `min` to `max`). With no values, the
@@ -113,23 +116,76 @@ function add_value!(p::SecondPass, x::Float64)
     return nothing
 end
 
-"Feed every value of the channel on `lines` to `pass`, one block at a time."
-function read_pass!(pass, db::LineDatabase, name::AbstractString, lines::Vector{LineInfo})
-    r = block_reader(db, name)
+# ---- value sources ---------------------------------------------------------
+
+"The values of a channel of numbers on some lines, as a value source."
+struct LineValues
+    db::LineDatabase
+    name::String
+    lines::Vector{LineInfo}
+end
+
+"""
+    foreach_block(f, src)
+
+Call `f(block::AbstractVector{Float64})` for each block of values of the value
+source `src`. Missing values are `NaN`. The block is a buffer that the next call
+may overwrite, so `f` must not keep it.
+"""
+function foreach_block(f::F, src::LineValues) where {F}
+    r = block_reader(src.db, src.name)
+    buf = Float64[]
     try
-        for l in lines, a in 1:STATS_BLOCK:l.nrows
-            add_block!(pass, read_block(r, l, a:min(a + STATS_BLOCK - 1, l.nrows)))
+        for l in src.lines, a in 1:STATS_BLOCK:l.nrows
+            f(as_floats!(buf, read_block(r, l, a:min(a + STATS_BLOCK - 1, l.nrows))))
         end
     finally
         close(r)
     end
-    return pass
+    return nothing
 end
 
 # A function barrier: the loop is compiled for the block's element type.
-function add_block!(pass, block::AbstractArray)
+function as_floats!(buf::Vector{Float64}, block::AbstractArray)::Vector{Float64}
+    resize!(buf, length(block))
+    for (k, x) in enumerate(block)
+        @inbounds buf[k] = as_float(x)
+    end
+    return buf
+end
+
+"""
+The values of a grid, as a value source: `rows` rows at a time, so at most
+`GRID_BLOCK_BYTES` are read at once with the default of `block_rows`.
+"""
+struct GridValues
+    grid::Grid
+    rows::Int
+    function GridValues(g::Grid, rows::Integer = block_rows(g))
+        rows >= 1 || throw(ArgumentError("a block needs at least 1 row, not $rows"))
+        return new(g, Int(rows))
+    end
+end
+
+function foreach_block(f::F, src::GridValues) where {F}
+    g = src.grid
+    buf = Float64[]
+    for j1 in 1:src.rows:g.ny
+        block = read_rows(g, j1, min(src.rows, g.ny - j1 + 1))
+        f(block isa Matrix{Float64} ? vec(block) : as_floats!(buf, block))
+    end
+    return nothing
+end
+
+"Feed every value of the source to `pass`, one block at a time."
+function read_pass!(pass, src)
+    foreach_block(block -> add_block!(pass, block), src)
+    return pass
+end
+
+function add_block!(pass, block::AbstractVector{Float64})
     for x in block
-        add_value!(pass, as_float(x))
+        add_value!(pass, x)
     end
     return nothing
 end
@@ -222,12 +278,14 @@ function prepare!(r::RankSearch)
     return nothing
 end
 
-changed_error() = DatabaseError("the channel changed while its statistics were read")
+"The error when the values changed between the passes over them."
+changed_error(src::LineValues) = DatabaseError("channel $(src.name) changed while its statistics were read")
+changed_error(::GridValues) = GridError("the grid changed while its statistics were read")
 
-"After a pass: find the value, or narrow the range. With `last`, the value must be found now."
-function settle!(r::RankSearch, last::Bool)
+"After a pass over `src`: find the value, or narrow the range. With `last`, the value must be found now."
+function settle!(r::RankSearch, last::Bool, src)
     if collecting(r)
-        length(r.values) == r.count || throw(changed_error())
+        length(r.values) == r.count || throw(changed_error(src))
         r.value, r.done = partialsort!(r.values, r.rank), true
         r.values = Float64[]
         return nothing
@@ -251,7 +309,7 @@ function settle!(r::RankSearch, last::Bool)
         end
         seen += c
     end
-    throw(changed_error())
+    throw(changed_error(src))
 end
 
 """
@@ -259,15 +317,14 @@ The values of the ranks `ranks` (from 1) among the `n` finite values, which lie
 from `lo` to `hi`. Exact (see above). Memory stays below `STATS_COLLECT` values
 per rank.
 """
-function values_of_ranks(db::LineDatabase, name::AbstractString, ls::Vector{LineInfo}, lo::Float64,
-                         hi::Float64, n::Int, ranks::Vector{Int})::Dict{Int,Float64}
+function values_of_ranks(src, lo::Float64, hi::Float64, n::Int, ranks::Vector{Int})::Dict{Int,Float64}
     searches = Dict{Int,RankSearch}(r => RankSearch(lo, hi, n, r) for r in unique(ranks))
     for pass in 1:STATS_MAX_PASSES
         open = RankSearch[r for r in values(searches) if !r.done]
         isempty(open) && break
         foreach(prepare!, open)
-        read_pass!(RefinePass(open), db, name, ls)
-        foreach(r -> settle!(r, pass == STATS_MAX_PASSES), open)
+        read_pass!(RefinePass(open), src)
+        foreach(r -> settle!(r, pass == STATS_MAX_PASSES, src), open)
     end
     return Dict{Int,Float64}(k => r.value for (k, r) in searches)
 end
@@ -292,29 +349,45 @@ function channel_stats(db::LineDatabase, name::AbstractString;
     bins >= 1 || throw(ArgumentError("statistics need at least 1 bin, not $bins"))
     c = channel(db, name)
     c.eltype <: Real || throw(ArgumentError("channel $(c.name) holds text; statistics need numbers"))
-    ls = LineInfo[line(db, id) for id in lines]
-    p1 = read_pass!(FirstPass(0, 0, Inf, -Inf, 0.0, 0.0), db, name, ls)
+    return value_stats(LineValues(db, c.name, LineInfo[line(db, id) for id in lines]), Int(bins))
+end
+
+"""
+    grid_stats(g; bins = 64)::ChannelStats
+
+Statistics of the cells of grid `g`, like `channel_stats`: `NaN` cells count as
+missing, and median, p5 and p95 are exact. Reads the grid in blocks of rows, so
+memory stays flat however large the grid is. Throws `ArgumentError` for fewer
+than 1 bin.
+"""
+function grid_stats(g::Grid; bins::Integer = 64)::ChannelStats
+    bins >= 1 || throw(ArgumentError("statistics need at least 1 bin, not $bins"))
+    return value_stats(GridValues(g), Int(bins))
+end
+
+"The statistics of a value source (see `foreach_block`), with `bins` histogram bins."
+function value_stats(src, bins::Int)::ChannelStats
+    p1 = read_pass!(FirstPass(0, 0, Inf, -Inf, 0.0, 0.0), src)
     n = p1.count
     n == 0 && return ChannelStats(0, p1.missing, NaN, NaN, NaN, NaN, NaN, NaN, NaN, Int[], Float64[])
     mean = (p1.sum + p1.comp) / n
-    b = bins_between(p1.min, p1.max, Int(bins))
-    p2 = read_pass!(SecondPass(b, mean, zeros(Int, b.n), 0.0, 0.0), db, name, ls)
+    b = bins_between(p1.min, p1.max, bins)
+    p2 = read_pass!(SecondPass(b, mean, zeros(Int, b.n), 0.0, 0.0), src)
     std = n == 1 ? NaN : sqrt(max(p2.ss - p2.sd^2 / n, 0.0) / (n - 1))
     edges = Float64[b.min + k * b.width for k in 0:b.n]
     edges[end] = p1.max
     qs = if p1.min == p1.max
         fill(p1.min, length(STATS_QUANTILES))
     else
-        quantiles(db, name, ls, p1.min, p1.max, n)
+        quantiles(src, p1.min, p1.max, n)
     end
     return ChannelStats(n, p1.missing, p1.min, p1.max, mean, std, qs[1], qs[2], qs[3], p2.hist, edges)
 end
 
 "The values of `STATS_QUANTILES`, exact (see `values_of_ranks`)."
-function quantiles(db::LineDatabase, name::AbstractString, ls::Vector{LineInfo}, lo::Float64, hi::Float64,
-                   n::Int)::Vector{Float64}
+function quantiles(src, lo::Float64, hi::Float64, n::Int)::Vector{Float64}
     ranks = [quantile_ranks(n, q) for q in STATS_QUANTILES]
-    v = values_of_ranks(db, name, ls, lo, hi, n, Int[r for (a, b, _) in ranks for r in (a, b)])
+    v = values_of_ranks(src, lo, hi, n, Int[r for (a, b, _) in ranks for r in (a, b)])
     return Float64[w == 0 ? v[a] : v[a] + w * (v[b] - v[a]) for (a, b, w) in ranks]
 end
 
@@ -323,10 +396,10 @@ end
 "A number for the statistics message, with up to 6 significant digits."
 stat_text(x::Float64)::String = @sprintf("%.6g", x)
 
-"The statistics as a short message."
-function stats_message(name::String, nlines::Int, st::ChannelStats)::String
+"The statistics as a short message, after the first line `title`."
+function stats_message(title::String, st::ChannelStats)::String
     io = IOBuffer()
-    println(io, "Statistics of ", name, " on ", nlines, nlines == 1 ? " line:" : " lines:")
+    println(io, title)
     println(io, "Count ", st.count, ", missing ", st.missing, ".")
     if st.count == 0
         print(io, "There are no values to describe.")
@@ -357,7 +430,8 @@ function run_statistics(s::Session, ins::Dict{String,String}, st::Dict{String,An
     finally
         unmark_reading!(s, id)
     end
-    print(report, stats_message(name, length(lines), stats))
+    n = length(lines)
+    print(report, stats_message("Statistics of $name on $n $(n == 1 ? "line" : "lines"):", stats))
     return nothing
 end
 
@@ -369,3 +443,27 @@ register_tool!(ToolSpec("database.statistics", "Statistics",
                 NumberSetting("bins", "Histogram bins"; default = 64, min = 1, max = 100_000, integer = true,
                               advanced = true)],
     :quick, run_statistics))
+
+function run_grid_statistics(s::Session, ins::Dict{String,String}, st::Dict{String,Any}, _, report::IO)
+    id = ins["grid"]
+    # Open the grid and mark it as read under the lock; read without it.
+    g, name = lock(s.lock) do
+        g = tool_grid(s, id; allow_readers = true)
+        mark_reading!(s, id)
+        return g, item(s.project, id).name
+    end
+    stats = try
+        grid_stats(g; bins = st["bins"])
+    finally
+        unmark_reading!(s, id)
+    end
+    print(report, stats_message("Statistics of grid $name:", stats))
+    return nothing
+end
+
+register_tool!(ToolSpec("grid.statistics", "Grid statistics",
+    "Count, min, max, mean, standard deviation, median and percentiles of a grid, with a histogram.",
+    "statistics", [Place("Grid and Image", "Properties")], GRID_INPUT,
+    SettingSpec[NumberSetting("bins", "Histogram bins"; default = 64, min = 1, max = 100_000, integer = true,
+                              advanced = true)],
+    :quick, run_grid_statistics))
