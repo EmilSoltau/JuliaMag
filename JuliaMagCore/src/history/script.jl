@@ -224,7 +224,9 @@ before the next line, and stops at a job that failed or a tool that did not run.
 
 The outputs of an entry (the items a job or a direct import made) are bound to
 variables named after their ids:
-`db_1 = only(wait_job(import_file(s, "..."; ...); check = true).outputs)`. Later lines name the
+`db_1 = only(wait_job(import_file(s, "..."; ...); check = true).outputs)`, or
+`grid_1 = only(wait_job(run_tool(s, "..."; ...); check = true)[3])` for a quick
+tool, which returns `(ok, message, outputs)`. Later lines name the
 item by the variable. So the script replays on the same project as well as on a
 copy: each run makes new items. Items that existed before the first history
 entry are named by their ids.
@@ -270,8 +272,11 @@ function script_text(s::Session)::String
             else
                 names = String[var_name(id) for id in made]
                 foreach((id, v) -> vars[id] = v, made, names)
-                println(io, length(names) == 1 ? "$(only(names)) = only($line.outputs)" :
-                            "$(join(names, ", ")) = $line.outputs")
+                # A quick tool returns `(ok, message, outputs)`, not a job.
+                quick = isempty(e.job) && is_tool_call(e.command, e.args) && !is_import(e.command, e.args) &&
+                        !is_export(e.command, e.args)
+                outs = quick ? "$line[3]" : "$line.outputs"
+                println(io, length(names) == 1 ? "$(only(names)) = only($outs)" : "$(join(names, ", ")) = $outs")
             end
             for id in e.replaced
                 println(io, "remove_item!(s, ", haskey(vars, id) ? vars[id] : repr(id), ")")

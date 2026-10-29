@@ -347,3 +347,26 @@ end
         close_session!(c)
     end
 end
+
+@testset "a quick tool records its outputs" begin
+    try
+        register_tool!(ToolSpec("test.make_item", "Make item", "", "", Place[], Pair{String,ItemKind}[],
+                                SettingSpec[], :quick, (s, i, st, p, r) -> begin
+            it = ProjectItem(new_item_id(s.project, ITEM_GRID), ITEM_GRID, "made", "grids/made", "", "")
+            lock(() -> (add_item!(s.project, it); save_project(s.project)), s.lock)
+            ProjectItem[it]
+        end))
+        s = fresh_session()
+        ok, _, out = run_tool(s, "test.make_item")
+        @test ok && length(out) == 1
+        @test s.history[end].command == "test.make_item" && s.history[end].outputs == [only(out).id]
+        # The script binds the output, and replays on the same project.
+        text = script_text(s)
+        @test occursin("grid_1 = only(wait_job(run_tool(s, \"test.make_item\"); check = true)[3])", text)
+        close_session!(s)
+        include_string(Module(), text)
+        @test with_session(s2 -> [i.id for i in s2.project.items], s.project.folder) == ["grid-1", "grid-2"]
+    finally
+        unregister_tool!("test.make_item")
+    end
+end

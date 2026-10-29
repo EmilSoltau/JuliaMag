@@ -180,7 +180,7 @@ function import_gdal_band(s::Session, ds::ArchGDAL.Dataset, path::String, n::Int
     # ER Mapper names coordinate systems its own way, such as NUTM33 (see `crs_from_wkt`).
     ers = ArchGDAL.shortname(drv) == "ERS"
     if gt === nothing && ers
-        gt = ers_meters_transform(path)
+        gt = ers_meters_transform(path)      # `ers_rotated` below turns this one too
     end
     if gt === nothing
         push!(warnings, ImportWarning(0, "The file has no georeference. The cells are 1 by 1, from 0, 0."))

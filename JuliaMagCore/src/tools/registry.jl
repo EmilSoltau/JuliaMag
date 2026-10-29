@@ -266,7 +266,7 @@ function run_quick(s::Session, spec::ToolSpec, ins::Dict{String,String}, values:
     end
     remember_settings!(s, spec.id, values)
     try
-        record!(s, spec.id, args)
+        record!(s, spec.id, args; outputs = String[it.id for it in outputs])
     catch e
         e isa InterruptException && rethrow()
         session_warning!(s, "the run of $(spec.id) could not be recorded: $(sprint(showerror, e))")

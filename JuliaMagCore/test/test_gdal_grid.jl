@@ -64,7 +64,23 @@ end
     @test AG.GDAL.cplgeterrorhandler(C_NULL) == JuliaMagCore.QUIET_GDAL_HANDLER[]
 end
 
-@testset "the GDAL block cache is small" begin
+# The GDAL cache tests need `GDAL_CACHEMAX` unset. When a developer set it,
+# they run without it, with a note, and the cache GDAL took from it is put back.
+function without_gdal_cachemax(f)
+    haskey(ENV, "GDAL_CACHEMAX") || return f()
+    @info "GDAL_CACHEMAX is set in this shell; the GDAL cache tests run as if it were not."
+    saved = AG.GDAL.gdalgetcachemax64()
+    try
+        return withenv("GDAL_CACHEMAX" => nothing) do
+            JuliaMagCore.set_gdal_cache!()                 # what `__init__` does without the variable
+            f()
+        end
+    finally
+        AG.GDAL.gdalsetcachemax64(saved)
+    end
+end
+
+@testset "the GDAL block cache is small" begin without_gdal_cachemax() do
     # GDAL's default cache is 5 % of the memory, so a big file would fill
     # over 1 GB of it. The package's `__init__` makes it small.
     cachemax() = AG.GDAL.gdalgetcachemax64()
@@ -98,9 +114,9 @@ end
         @test cachemax() == cap
     end
     @test cachemax() == floor
-end
+end end
 
-@testset "a GDAL_CACHEMAX the user set is kept" begin
+@testset "a GDAL_CACHEMAX the user set is kept" begin without_gdal_cachemax() do
     cachemax() = AG.GDAL.gdalgetcachemax64()
     floor = JuliaMagCore.GDAL_CACHE_FLOOR
     @test !JuliaMagCore.user_gdal_cache()                  # the test runs without the variable
@@ -120,7 +136,7 @@ end
         JuliaMagCore.set_gdal_cache!()
     end
     @test cachemax() == floor
-end
+end end
 
 @testset "coordinate system text" begin
     @test crs_from_wkt("") == ""
@@ -271,6 +287,23 @@ end
             # here the outer north-west corner (1000, 2030).
             want = (1000 + 5cosd(30) + 5sind(30), 2030 + 5sind(30) - 5cosd(30))
             @test all(cell_centre(g, 1, 3) .≈ want)
+        end
+
+        @testset "ER Mapper RAW header with MetersX, MetersY and a rotation" begin
+            data = joinpath(@__DIR__, "data", "grids")
+            f = joinpath(tmp, "rawrot.ers")
+            cp(joinpath(data, "mag4014"), joinpath(tmp, "rawrot"))
+            txt = read(joinpath(data, "mag4014.ers"), String)
+            @test occursin("CoordinateType = RAW\r\n", txt)          # the sample has Windows line ends
+            write(f, replace(txt, "CoordinateType = RAW\r\n" => "CoordinateType = RAW\r\n        Rotation = 30:0:0.0\r\n"))
+            job = wait_job(import_file(s, f))
+            @test status(job) == JOB_DONE
+            g = grid(s.project, only(job.outputs))
+            @test g.rotation ≈ 30 && g.dx ≈ 200 && g.dy ≈ 200
+            # The registration point (MetersX, MetersY) is the north-west corner of
+            # the south row, cell (0, 165). The grid turns about it.
+            want = (-301100 + 100cosd(30) + 100sind(30), -69400 + 100sind(30) - 100cosd(30))
+            @test all(cell_centre(g, 1, 1) .≈ want)
         end
 
         @testset "a skewed file fails" begin
