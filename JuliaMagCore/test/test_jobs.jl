@@ -16,7 +16,8 @@ using JSON3
         j3 = start_job!(s, "test.fail", Dict{String,Any}(), (p, r) -> error("disk full"))
         wait_job(j3)                                                     # Review Focus 3
         @test status(j3) == JOB_FAILED && occursin("disk full", j3.error)
-        @test length(jobs(open_session(s.project.folder))) == 3
+        close_session!(s)
+        @test with_session(s2 -> length(jobs(s2)), s.project.folder) == 3
     end
 end
 
@@ -49,6 +50,7 @@ end
         j2 = start_job!(s, "test.ok", Dict{String,Any}(), (p, r) -> ProjectItem[]); wait_job(j2)
         @test j2.id == "job-2" && status(j2) == JOB_DONE
         rm(joinpath(s.project.folder, "jobs", "job-2.json"))
+        close_session!(s)
         s2 = open_session(s.project.folder)
         @test [x.id for x in jobs(s2)] == ["job-1"]
         @test status(only(jobs(s2))) == JOB_DONE
@@ -56,6 +58,7 @@ end
         j3 = start_job!(s2, "test.ok", Dict{String,Any}(), (p, r) -> ProjectItem[]); wait_job(j3)
         @test j3.id == "job-3"
         @test [x.id for x in jobs(s2)] == ["job-3", "job-1"]       # newest first
+        close_session!(s2)
     end
 end
 

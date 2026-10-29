@@ -6,6 +6,16 @@ using JuliaMagCore
 "A new session in a fresh temp folder."
 fresh_session() = new_session(joinpath(mktempdir(), "p"), "p")
 
+"Open the project in `folder`, return `f(s)` and close the session again."
+function with_session(f, folder::AbstractString)
+    s = open_session(folder)
+    try
+        return f(s)
+    finally
+        close_session!(s)
+    end
+end
+
 "Path of a file under `test/data`."
 testdata(name::AbstractString) = joinpath(@__DIR__, "..", "data", name)
 

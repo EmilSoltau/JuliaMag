@@ -8,6 +8,7 @@ using Test
     include("test_grid.jl")
     include("support/synthetic.jl")
     include("test_session.jl")
+    include("test_lock.jl")
     include("test_xyz.jl")
     include("test_grid_import.jl")
     include("test_gdal_grid.jl")

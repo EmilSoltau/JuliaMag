@@ -134,8 +134,9 @@ end
         s = fresh_session()
         @test run_tool(s, "test.bins"; bins = 12.0)[1]
         @test last_settings(s, "test.bins")["bins"] === 12
-        @test last_settings(open_session(s.project.folder), "test.bins")["bins"] === 12   # an Int after JSON too
         @test occursin("run_tool(s, \"test.bins\"; bins = 12)", script_text(s))
+        close_session!(s)
+        @test with_session(s2 -> last_settings(s2, "test.bins")["bins"], s.project.folder) === 12   # an Int after JSON too
     finally
         unregister_tool!("test.bins")
     end
@@ -213,11 +214,10 @@ end
 
         # remembered settings are saved in project.jmag.json under settings.tools
         @test last_settings(s, "test.scale_data")["factor"] === 3.0
-        s2 = open_session(s.project.folder)
-        @test s2.project.settings["tools"]["test.scale_data"]["in"] == "MAG"
-        @test last_settings(s2, "test.scale_data") == Dict{String,Any}("in" => "MAG", "factor" => 3.0)
-        reset_settings!(s2, "test.scale_data")
-        @test !haskey(open_session(s.project.folder).project.settings["tools"], "test.scale_data")
+        saved() = open_project(s.project.folder).settings["tools"]
+        @test saved()["test.scale_data"] == Dict{String,Any}("in" => "MAG", "factor" => 3.0)
+        reset_settings!(s, "test.scale_data")
+        @test !haskey(saved(), "test.scale_data")
 
         # a ToolError gives its own message; a busy item gives a plain message
         ok, msg, out = run_tool(s, "test.scale_data"; inputs = Dict("database" => id), in = "NOPE")
@@ -253,12 +253,14 @@ end
     s = fresh_session()
     s.project.settings["tools"] = Dict{String,Any}("a" => 1, "b" => Dict{String,Any}("x" => 1))
     save_project(s.project)
+    close_session!(s)
     s2 = open_session(s.project.folder)
     @test s2.remembered == Dict("b" => Dict{String,Any}("x" => 1))
     @test any(w -> occursin("settings.tools.a is not an object", w), s2.warnings)
-    s.project.settings["tools"] = [1, 2]
-    save_project(s.project)
-    @test any(w -> occursin("settings.tools is not an object", w), open_session(s.project.folder).warnings)
+    s2.project.settings["tools"] = [1, 2]
+    save_project(s2.project)
+    close_session!(s2)
+    @test with_session(s3 -> any(w -> occursin("settings.tools is not an object", w), s3.warnings), s.project.folder)
 end
 
 @testset "job tools" begin
@@ -334,6 +336,7 @@ end
         @test body != txt
         m = Module()
         Core.eval(m, Meta.parseall(body))
+        Core.eval(m, :(close_session!(s)))
         c = open_session(start)
         @test only(c.project.items).id == id
         want = collect(read_channel(database(s.project, id), L, "MAG"))
@@ -341,5 +344,6 @@ end
         @test isequal(got, want) && length(got) == 20_000
         @test !line(database(c.project, id), L).selected && line(database(c.project, id), last(database(c.project, id).lines).id).selected
         @test status(only(jobs(c))) == JOB_DONE
+        close_session!(c)
     end
 end

@@ -14,8 +14,6 @@ These are the open points from the reviews that later plans must handle.
 - `rerun!` with `replace = true` is not in the history, so replay keeps both outputs.
 - A job report (`IOBuffer`) is read while the worker writes it.
   This is a data race once the Jobs tab shows live reports.
-- Two sessions on one project folder are not coordinated.
-  Add a project lock file.
 - `undo!` holds `s.lock` while it copies large files (Channel Math overwrite, append undo).
   This would freeze the UI.
 - `Session.warnings` is stored but not shown.
@@ -24,6 +22,12 @@ These are the open points from the reviews that later plans must handle.
 - `.undo-*` side folders left after a crash are never swept.
 - Settings are remembered before a quick tool runs, so a failed run still changes them.
 - Session API gaps: remove an item with undo, undoable channel property edits (unprotect, rename, delete), a setter for the marked range, an item-picker setting type for importer targets.
+
+## Done in plan 2
+
+- Two sessions on one project folder are not coordinated.
+  Add a project lock file.
+  Done in the commit "Lock a project while a session has it open".
 
 ## Checks on real systems
 
@@ -40,6 +44,9 @@ These are the open points from the reviews that later plans must handle.
 
 ## Can wait
 
+- A saved script opens its project with `open_session` and does not close it.
+  Run in a REPL, it keeps the project locked until Julia exits.
+- Two programs that open the same project at the same moment can both pass the lock check, since the lock file is written with a rename and not created exclusively.
 - A job that appends and then runs Channel Math on the same item is refused (no caller does this yet).
 - A direct `import_xyz` replays as `import_file`, which adds an undo step the original session did not have.
 - Undo of a job with several noted steps is not retryable as a unit.

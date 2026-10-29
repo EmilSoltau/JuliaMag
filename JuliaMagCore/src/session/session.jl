@@ -108,6 +108,8 @@ mutable struct Session
     jobs_lock::ReentrantLock
     "Items an import writes to or an export reads, by id. Guarded by `lock`."
     busy::Dict{String,BusyMark}
+    "The project lock file this session holds, or `nothing` once it is closed."
+    held_lock::Union{Nothing,HeldLock}
 end
 
 const HISTORY_FILE = "history.jsonl"
@@ -119,17 +121,72 @@ function Session(p::Project)
     history = load_history(p, warnings)
     s = Session(p, UndoStep[], UndoStep[], history, nothing, nothing,
                 load_remembered(p, warnings), ReentrantLock(), warnings, Job[], 1,
-                ReentrantLock(), Dict{String,BusyMark}())
+                ReentrantLock(), Dict{String,BusyMark}(), nothing)
     load_jobs!(s)
     return s
 end
 
-"Open the project in `folder` and read its saved history."
-open_session(folder::AbstractString) = Session(open_project(String(folder)))
+"""
+    open_session(folder; force = false)
 
-"Make a new project in `folder` and a session for it."
-new_session(folder::AbstractString, name::AbstractString) =
-    Session(create_project(String(folder), String(name)))
+Open the project in `folder`, lock it (see `LOCK_FILE`) and read its saved history.
+Throws `ProjectLockedError` when another session has the project open.
+With `force = true` it opens the project anyway, with a warning in `s.warnings`.
+Call `close_session!` when done.
+"""
+function open_session(folder::AbstractString; force::Bool = false)::Session
+    f = String(folder)
+    isfile(project_path(f)) || open_project(f)          # throws the ProjectError
+    return locked_session(() -> open_project(f), f, force)
+end
+
+"""
+    new_session(folder, name; force = false)
+
+Make a new project in `folder`, lock it and make a session for it.
+Throws `ProjectLockedError`, and changes nothing, when another session has a
+project in `folder` open. Call `close_session!` when done.
+"""
+function new_session(folder::AbstractString, name::AbstractString; force::Bool = false)::Session
+    f = String(folder)
+    mkpath(f)
+    return locked_session(() -> create_project(f, String(name)), f, force)
+end
+
+# Take the lock before the project is read or written, so a session that has it
+# open is never disturbed (loading marks its running jobs as failed).
+function locked_session(make::Function, folder::String, force::Bool)::Session
+    warnings = String[]
+    h = take_lock!(folder, force, warnings)
+    s = try
+        Session(make())
+    catch
+        release_lock!(h)
+        rethrow()
+    end
+    s.held_lock = h
+    prepend!(s.warnings, warnings)
+    return s
+end
+
+"""
+    close_session!(s)
+
+Cancel the running jobs of the session, wait for them to end, then remove the
+project lock. A second call does nothing.
+"""
+function close_session!(s::Session)
+    running = filter(j -> status(j) == JOB_RUNNING, jobs(s))
+    foreach(cancel!, running)
+    foreach(wait_job, running)
+    held = lock(s.jobs_lock) do
+        old = s.held_lock
+        s.held_lock = nothing
+        return old
+    end
+    held === nothing || release_lock!(held)
+    return nothing
+end
 
 # Read the remembered tool settings from `settings.tools` of the project.
 # A bad entry is skipped and reported in `warnings`.

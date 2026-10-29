@@ -68,6 +68,7 @@ using JuliaMagCore
             undo!(s)
             record!(s, "tool.demo", Dict("name" => "a\"b", "n" => 3, "list" => [1, 2], "bad key" => 1.5); job = "job-1")
             @test countlines(joinpath(folder, "jobs", "history.jsonl")) == length(s.history) == 5
+            close_session!(s)
             s2 = open_session(folder)             # history is loaded, undo stack is not
             @test [e.command for e in s2.history] == [e.command for e in s.history]
             @test s2.history[1].args["value"] == 0.1 + 0.2 && isnan(s2.history[2].args["value"])
@@ -91,6 +92,8 @@ using JuliaMagCore
             Core.eval(@__MODULE__, :(s = $s3))
             Core.eval(@__MODULE__, ex)
             @test collect(read_channel(database(s3.project, id), L, "MAG")) |> x -> (x[2] == 0.1 + 0.2 && isnan(x[3]))
+            close_session!(s2)
+            close_session!(s3)
         end
     end
 
@@ -106,16 +109,19 @@ using JuliaMagCore
             good = read(hp, String)
             # torn last line: repaired on open, later records still load
             write(hp, good * "{\"time\":")
+            close_session!(s)
             s2 = open_session(folder)
             @test length(s2.history) == 2 && length(s2.warnings) == 1
             @test endswith(read(hp, String), "\n")
             set_cell!(s2, id, L, "MAG", 3, 9.0)
+            close_session!(s2)
             s3 = open_session(folder)
             @test length(s3.history) == 3 && isempty(s3.warnings)
             @test s3.history[3].args["value"] == 9.0
+            close_session!(s3)
             # a whole file that is one torn line
             write(hp, "{\"tim")
-            @test isempty(open_session(folder).history)
+            @test with_session(s -> isempty(s.history), folder)
             # bad middle line: skipped with a warning, the others stay
             lines = split(good, '\n'; keepempty = false)
             write(hp, lines[1] * "\n{oops}\n" * lines[2] * "\n")
@@ -123,6 +129,7 @@ using JuliaMagCore
             @test length(s4.history) == 2 && length(s4.warnings) == 1
             @test occursin("line 2", s4.warnings[1])
             @test [e.args["row"] for e in s4.history] == [1, 2]
+            close_session!(s4)
         end
     end
 

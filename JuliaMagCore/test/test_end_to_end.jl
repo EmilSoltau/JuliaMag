@@ -55,16 +55,20 @@ using Test, JuliaMagCore
     write(script, script_text(s))
 
     # a new session on the same folder still has the jobs and the history
+    close_session!(s)
     s2 = open_session(folder)
     @test [j.command for j in jobs(s2)] == [j.command for j in jobs(s)]
     @test all(j -> status(j) == JOB_DONE, jobs(s2))
     @test length(s2.history) == length(s.history)
     @test [e.command for e in s2.history] == [e.command for e in s.history]
+    close_session!(s2)
 
     # replay the script on the copy of the empty project
     replay = replace(read(script, String), repr(folder) => repr(copy_folder))
     @test occursin(repr(copy_folder), replay)
-    include_string(Module(), replay)
+    m = Module()
+    include_string(m, replay)
+    close_session!(m.s)
     a = database(open_project(folder), id)
     b = database(open_project(copy_folder), id)
     @test [c.name for c in a.channels] == [c.name for c in b.channels]

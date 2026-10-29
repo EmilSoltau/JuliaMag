@@ -13,6 +13,7 @@ include("storage/database.jl")
 include("storage/grid.jl")
 include("project/project.jl")
 include("jobs/job.jl")
+include("session/lock.jl")
 include("session/session.jl")
 include("session/undo.jl")
 include("history/script.jl")
@@ -58,7 +59,8 @@ export read_channel, write_value!, write_channel!
 export GridError, GridStyle, GridSource, Grid, GRID_BLOCK_BYTES, create_grid, open_grid, save_grid_meta
 export values_path, block_rows, read_rows, write_rows!, with_grid_values, cell_centre, grid_corners
 export UndoStep, HistoryEntry, Cursor, Session, ProtectedError, ItemBusyError
-export open_session, new_session, check_not_busy, push_undo!, undo!, redo!, can_undo, can_redo
+export LOCK_FILE, ProjectLockedError
+export open_session, new_session, close_session!, check_not_busy, push_undo!, undo!, redo!, can_undo, can_redo
 export record!, set_cell!, set_line_selected!, set_cursor!, script_text
 export eachfileline, ImportWarning, ImportResult, Progress, report, is_cancelled, NO_PROGRESS
 export GridHeader, GridSink, put_rows!, put_columns!, import_grid
@@ -83,6 +85,7 @@ export set_grid_crs!, set_grid_georef!, set_grid_style!
 # The one `__init__` of the package. Each part that needs setup when the
 # package loads gets a named function, called from here.
 function __init__()
+    atexit(release_held_locks)
     quiet_gdal!()
     set_gdal_cache!()
     return nothing
