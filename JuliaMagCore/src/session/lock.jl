@@ -59,6 +59,10 @@ end
 const HELD_LOCKS = HeldLock[]
 const HELD_LOCKS_LOCK = ReentrantLock()
 
+# For tests only: runs in `take_lock!` between the check of a lock and its
+# take-over, so a test can act as another program at that moment.
+const TAKE_OVER_HOOK = Ref{Function}(() -> nothing)
+
 function user_name()::String
     try
         return Sys.username()
@@ -68,12 +72,27 @@ function user_name()::String
     end
 end
 
-"Read a lock file. `nothing` when there is none. Throws when it is broken."
-function read_lock(path::String)::Union{Nothing,LockRecord}
-    isfile(path) || return nothing
-    d = plain(JSON3.read(read(path, String)))::Dict{String,Any}
+"The record in the bytes of a lock file. Throws when they are broken."
+function parse_lock(bytes::Vector{UInt8})::LockRecord
+    d = plain(JSON3.read(String(copy(bytes))))::Dict{String,Any}
     return LockRecord(d["pid"]::Int, d["host"]::String, d["user"]::String, d["started"]::String)
 end
+
+"Read a lock file. `nothing` when there is none. Throws when it is broken."
+read_lock(path::String)::Union{Nothing,LockRecord} = isfile(path) ? parse_lock(read(path)) : nothing
+
+"A file name in the folder of `path` that no other program or call uses."
+side_name(path::String, ext::String) =
+    joinpath(dirname(path), ".$(LOCK_FILE).$(getpid()).$(string(rand(UInt64); base = 36)).$ext")
+
+# The errors of `hardlink` that mean the file system has no hard links. Linux
+# gives EPERM on FAT. On Windows, libuv turns ERROR_INVALID_FUNCTION (FAT) into
+# EISDIR and ERROR_NOT_SUPPORTED into ENOTSUP. Not checked on a real system yet.
+const NO_LINK_CODES = @static Sys.iswindows() ? (Base.UV_ENOTSUP, Base.UV_ENOSYS, Base.UV_EPERM, Base.UV_EISDIR) :
+                                                (Base.UV_EPERM, Base.UV_ENOTSUP, Base.UV_ENOSYS)
+
+"True when the error `e` of `hardlink` means the file system has no hard links."
+links_unsupported(e)::Bool = e isa Base.IOError && e.code in NO_LINK_CODES
 
 lock_dict(r::LockRecord) = Dict("pid" => r.pid, "host" => r.host, "user" => r.user, "started" => r.started)
 
@@ -85,10 +104,11 @@ write_lock(path::String, r::LockRecord) = (write_json_atomic(path, lock_dict(r))
 
 Make the lock file only when there is none: write the record to a temp file of
 its own and hard link it to `path`. False when a lock is there.
-Where hard links do not work, the lock is written the plain way, with a note in `warnings`.
+Where the file system has no hard links, the lock is written the plain way,
+with a note in `warnings`. Other errors are thrown.
 """
 function create_lock(path::String, r::LockRecord, warnings::Vector{String})::Bool
-    tmp = joinpath(dirname(path), ".$(LOCK_FILE).$(getpid()).$(string(rand(UInt64); base = 36)).tmp")
+    tmp = side_name(path, "tmp")
     try
         open(io -> JSON3.pretty(io, JSON3.write(lock_dict(r))), tmp, "w")
         try
@@ -96,7 +116,7 @@ function create_lock(path::String, r::LockRecord, warnings::Vector{String})::Boo
             return true
         catch e
             e isa Base.IOError && e.code == Base.UV_EEXIST && return false
-            e isa InterruptException && rethrow()
+            links_unsupported(e) || rethrow()
             isfile(path) && return false
             write_lock(path, r)
             push!(warnings, "$path: this file system has no hard links, so the lock was written the plain way. " *
@@ -156,6 +176,60 @@ function lock_alive(r::LockRecord, key::String)::Bool
     return pid_running(r.pid)
 end
 
+"The error for a lock that another program is making at this moment."
+lock_in_making(folder::String) = ProjectLockedError(folder, "a computer not known yet", "another program", now_text())
+
+"The error for the lock file `path`, from what it holds."
+function locked_error(folder::String, path::String)::ProjectLockedError
+    r = try
+        read_lock(path)
+    catch e
+        e isa InterruptException && rethrow()
+        nothing
+    end
+    return r === nothing ? lock_in_making(folder) : ProjectLockedError(folder, r.host, r.user, r.started)
+end
+
+"""
+    take_over!(path, raw, folder)
+
+Clear the lock file `path` for a take-over, but only while it still holds the
+bytes `raw` that were checked. It is never removed in place: it is renamed
+aside first, so a lock that another program made after the check is not lost.
+- The file is gone: another program took it over; nothing to do here.
+- The moved file holds `raw`: it is removed.
+- It holds something else: it is a new lock, so it is linked back and
+  `ProjectLockedError` is thrown.
+"""
+function take_over!(path::String, raw::Vector{UInt8}, folder::String)
+    aside = side_name(path, "old")
+    try
+        Base.rename(path, aside)
+    catch e
+        e isa Base.IOError && e.code == Base.UV_ENOENT && return nothing
+        rethrow()
+    end
+    try
+        moved = read(aside)
+        moved == raw && return nothing
+        try
+            hardlink(aside, path)
+        catch e
+            # A lock made in the meantime stays; the moved one is dropped.
+            e isa Base.IOError && e.code == Base.UV_EEXIST || rethrow()
+        end
+        r = try
+            parse_lock(moved)
+        catch e
+            e isa InterruptException && rethrow()
+            nothing
+        end
+        throw(r === nothing ? lock_in_making(folder) : ProjectLockedError(folder, r.host, r.user, r.started))
+    finally
+        rm(aside; force = true)
+    end
+end
+
 """
     take_lock!(folder, force, warnings)::Tuple{HeldLock,Union{Nothing,LockRecord}}
 
@@ -163,6 +237,11 @@ Make the lock file of the project in `folder`, or throw `ProjectLockedError`.
 Notes about a lock that was there go to `warnings`.
 Also returns the record of a live lock that `force = true` replaced, so a
 failed open can put it back (see `restore_lock!`), else `nothing`.
+
+A lock that is there is checked. When it may be taken (stale, broken, or
+`force`), `take_over!` clears it and the create runs once more. Of two
+programs that take over the same lock at once, one gets it and the other gets
+`ProjectLockedError`.
 """
 function take_lock!(folder::String, force::Bool, warnings::Vector{String})
     path = joinpath(folder, LOCK_FILE)
@@ -170,42 +249,43 @@ function take_lock!(folder::String, force::Bool, warnings::Vector{String})
     me = LockRecord(getpid(), gethostname(), user_name(), now_text())
     lock(HELD_LOCKS_LOCK) do
         replaced = nothing
-        # Two tries: a lock that is there is checked, removed when it may be
-        # taken, and the create runs once more. A program that makes a new
-        # lock in between wins.
         for attempt in 1:2
             if create_lock(path, me, warnings)
                 h = HeldLock(path, key, me)
                 push!(HELD_LOCKS, h)
                 return (h, replaced)
             end
-            old = try
-                read_lock(path)
+            attempt == 2 && break
+            raw = try
+                read(path)
             catch e
                 e isa InterruptException && rethrow()
-                attempt == 2 && break
+                continue                                   # gone again: try the create once more
+            end
+            old = try
+                parse_lock(raw)
+            catch e
+                e isa InterruptException && rethrow()
                 push!(warnings, "$path was broken; it was replaced: $(sprint(showerror, e))")
                 nothing
             end
-            attempt == 2 && old === nothing && break
             if old !== nothing
                 who = isempty(old.user) ? "another user" : old.user
-                alive = attempt == 2 || lock_alive(old, key)
-                if alive && (attempt == 2 || !force)
-                    throw(ProjectLockedError(folder, old.host, old.user, old.started))
-                elseif !alive
+                if !lock_alive(old, key)
                     push!(warnings, "$path: the session of $who on this computer (process $(old.pid)), " *
                                     "open since $(old.started), has ended; its lock was taken over")
-                else
+                elseif force
                     push!(warnings, "$path: the project is open by $who on $(old.host) since $(old.started); " *
                                     "it was opened anyway (force = true)")
                     replaced = old
+                else
+                    throw(ProjectLockedError(folder, old.host, old.user, old.started))
                 end
             end
-            rm(path; force = true)
+            TAKE_OVER_HOOK[]()
+            take_over!(path, raw, folder)
         end
-        # Another program is making its lock at this moment.
-        throw(ProjectLockedError(folder, "a computer not known yet", "another program", now_text()))
+        throw(locked_error(folder, path))
     end
 end
 

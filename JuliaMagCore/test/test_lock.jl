@@ -216,6 +216,88 @@ end
         end
     end
 
+    @testset "two takers of one stale lock, step by step: one wins" begin
+        mktempdir() do dir
+            folder = joinpath(dir, "p")
+            close_session!(new_session(folder, "P"))
+            write_lock(folder; pid = ended_pid())
+            path = lock_path(folder)
+            raw = read(path)                                    # both takers checked this lock
+            a = JuliaMagCore.LockRecord(111, gethostname(), "a", "t1")
+            b = JuliaMagCore.LockRecord(222, gethostname(), "b", "t2")
+            JuliaMagCore.take_over!(path, raw, folder)          # A clears it and makes its lock
+            @test JuliaMagCore.create_lock(path, a, String[])
+            e = try
+                JuliaMagCore.take_over!(path, raw, folder)      # B moves A's lock aside, sees it is new
+            catch err
+                err
+            end
+            @test e isa ProjectLockedError && e.user == "a"
+            @test lock_record(folder)["user"] == "a"            # A's lock is back
+            @test !JuliaMagCore.create_lock(path, b, String[])
+            rm(path)
+            @test JuliaMagCore.take_over!(path, raw, folder) === nothing   # gone: nothing to clear
+            @test readdir(folder) == sort(["databases", "grids", "jobs", "templates", "project.jmag.json"])
+        end
+    end
+
+    @testset "another program takes over between the check and the take-over" begin
+        hook = JuliaMagCore.TAKE_OVER_HOOK
+        mktempdir() do dir
+            folder = joinpath(dir, "p")
+            close_session!(new_session(folder, "P"))
+            path = lock_path(folder)
+            a = JuliaMagCore.LockRecord(111, "other-pc", "a", "t1")
+            # the other program does its whole take-over at that moment
+            other() = (JuliaMagCore.take_over!(path, read(path), folder); JuliaMagCore.create_lock(path, a, String[]))
+            try
+                for (pid, host, force) in ((ended_pid(), gethostname(), false), (12345, "other-pc", true))
+                    write_lock(folder; pid, host)
+                    hook[] = other
+                    e = try
+                        open_session(folder; force)
+                    catch err
+                        err
+                    end
+                    @test e isa ProjectLockedError && e.user == "a"
+                    @test lock_record(folder)["user"] == "a"
+                end
+                # the other program only removed it: this session gets the lock
+                write_lock(folder; pid = ended_pid())
+                hook[] = () -> rm(path)
+                s = open_session(folder)
+                @test lock_record(folder)["pid"] == getpid() && length(s.warnings) == 1
+                close_session!(s)
+            finally
+                hook[] = () -> nothing
+            end
+            @test !any(startswith(".project.lock"), readdir(folder))
+        end
+    end
+
+    @testset "only a file system without hard links gives the plain way" begin
+        unsupported = JuliaMagCore.links_unsupported
+        @test unsupported(Base.IOError("link", Base.UV_EPERM))
+        @test unsupported(Base.IOError("link", Base.UV_ENOTSUP))
+        @test unsupported(Base.IOError("link", Base.UV_ENOSYS))
+        for code in (Base.UV_EACCES, Base.UV_EIO, Base.UV_ENOSPC, Base.UV_EMLINK, Base.UV_ENAMETOOLONG)
+            @test !unsupported(Base.IOError("link", code))
+        end
+        @test !unsupported(ErrorException("x"))
+        # a folder that cannot be written: the open fails, with no lock written
+        Sys.iswindows() || mktempdir() do dir
+            folder = joinpath(dir, "p")
+            close_session!(new_session(folder, "P"))
+            chmod(folder, 0o555)
+            try
+                @test_throws SystemError open_session(folder)
+                @test !isfile(lock_path(folder))
+            finally
+                chmod(folder, 0o755)
+            end
+        end
+    end
+
     @testset "two programs open a project at the same moment: one wins" begin
         mktempdir() do dir
             folder = joinpath(dir, "p")
