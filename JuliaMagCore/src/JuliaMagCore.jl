@@ -84,6 +84,7 @@ export set_grid_crs!, set_grid_georef!, set_grid_style!
 # package loads gets a named function, called from here.
 function __init__()
     quiet_gdal!()
+    set_gdal_cache!()
     return nothing
 end
 

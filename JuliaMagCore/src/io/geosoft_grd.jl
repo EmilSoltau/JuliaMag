@@ -238,6 +238,7 @@ time. `T` is the stored type; `blocks` is from `read_grd_block_table`.
 function read_grd_blocks!(sink::GridSink, io::IO, h::GrdHeader, ::Type{T},
                           (blocks, vpb)::Tuple{Vector{Tuple{Int,Int}},Int}) where {T}
     payload = UInt8[]
+    bufs = GrdBuffers(sink.grid.eltype)
     for (k, (o, c)) in enumerate(blocks)
         seek(io, o + GRD_BLOCK_HEADER_BYTES)
         resize!(payload, c - GRD_BLOCK_HEADER_BYTES)
@@ -253,7 +254,7 @@ function read_grd_blocks!(sink::GridSink, io::IO, h::GrdHeader, ::Type{T},
         z = ZlibDecompressorStream(IOBuffer(payload); stop_on_end = true)
         try
             put_grd_vectors!(sink, z, h, T, v1, nv,
-                             n -> "block $k inflates to $n of the $want bytes it must hold")
+                             n -> "block $k inflates to $n of the $want bytes it must hold", bufs)
             # Read to the end of the stream, so its checksum is checked. Any
             # values after the grid's own are dummy padding, up to VPB vectors.
             pad = (vpb - nv) * h.ne * sizeof(T)
@@ -306,22 +307,33 @@ function read_grd_vectors!(sink::GridSink, io::IO, h::GrdHeader, ::Type{T}) wher
 end
 
 """
+The buffers of `put_grd_vectors!`. One set is kept for all the blocks of a
+file, so reading a block makes no garbage.
+"""
+mutable struct GrdBuffers{O}
+    raw::Vector{UInt8}
+    out::Matrix{O}
+end
+GrdBuffers(::Type{O}) where {O} = GrdBuffers{O}(UInt8[], Matrix{O}(undef, 0, 0))
+
+"""
 Read `nv` vectors of stored type `T` from `io` and put them into the sink as
 vectors `v1` on, a block of whole vectors at a time. When `io` ends early, fail
-with `short(n)`, the message for `n` bytes read.
+with `short(n)`, the message for `n` bytes read. `bufs` holds the buffers;
+it can be given so the next call uses them again.
 """
-function put_grd_vectors!(sink::GridSink, io::IO, h::GrdHeader, ::Type{T}, v1::Int, nv::Int,
-                          short::F) where {T,F}
-    O = sink.grid.eltype
+function put_grd_vectors!(sink::GridSink, io::IO, h::GrdHeader, ::Type{T}, v1::Int, nv::Int, short::F,
+                          bufs::GrdBuffers{O} = GrdBuffers(sink.grid.eltype)) where {T,F,O}
     k = max(1, GRID_BLOCK_BYTES ÷ (h.ne * max(sizeof(T), sizeof(O))))
-    raw = Vector{UInt8}(undef, h.ne * min(k, nv) * sizeof(T))
     done = 0
     while done < nv
         n = min(k, nv - done)
         nb = h.ne * n * sizeof(T)
-        got = readbytes!(io, raw, nb)
+        length(bufs.raw) < nb && resize!(bufs.raw, nb)
+        got = readbytes!(io, bufs.raw, nb)
         got == nb || throw(GridError(short(done * h.ne * sizeof(T) + got)))
-        out = grd_values(O, reinterpret(T, view(raw, 1:nb)), h.ne, n, h.zbase, h.zmult)
+        size(bufs.out) == (h.ne, n) || (bufs.out = Matrix{O}(undef, h.ne, n))
+        out = grd_values!(bufs.out, reinterpret(T, view(bufs.raw, 1:nb)), h.zbase, h.zmult)
         h.kx == 1 ? put_rows!(sink, v1 + done, out) : put_columns!(sink, v1 + done, out)
         done += n
     end
@@ -329,12 +341,11 @@ function put_grd_vectors!(sink::GridSink, io::IO, h::GrdHeader, ::Type{T}, v1::I
 end
 
 """
-The real values of `ne * nv` stored values as an `ne` by `nv` matrix of type
-`O`: dummies become `NaN`, the rest are scaled.
+Put the real values of the stored values into `out`, which has as many cells:
+dummies become `NaN`, the rest are scaled. Returns `out`.
 """
-function grd_values(::Type{O}, stored::AbstractVector{T}, ne::Int, nv::Int, zbase::Float64,
-                    zmult::Float64)::Matrix{O} where {O,T}
-    out = Matrix{O}(undef, ne, nv)
+function grd_values!(out::Matrix{O}, stored::AbstractVector{T}, zbase::Float64,
+                     zmult::Float64)::Matrix{O} where {O,T}
     @inbounds for k in eachindex(out, stored)
         v = ltoh(stored[k])
         out[k] = is_grd_dummy(v) ? O(NaN) : O(Float64(v) / zmult + zbase)

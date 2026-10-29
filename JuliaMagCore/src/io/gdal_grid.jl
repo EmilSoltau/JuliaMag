@@ -38,6 +38,55 @@ function gdal_errors(f::F) where {F}
     end
 end
 
+# ---- the GDAL block cache ------------------------------------------------------
+#
+# GDAL keeps the blocks it reads and writes in a cache of 5 % of the memory by
+# default, so a big file would fill over 1 GB of it. JuliaMag moves blocks of
+# rows and needs little of it: the cache is set to `GDAL_CACHE_FLOOR` when the
+# package loads, and a job raises it by what it needs while it runs.
+
+"The size of the GDAL block cache when no job needs more, in bytes."
+const GDAL_CACHE_FLOOR = 64 * 2^20
+
+# The needs of the running jobs, guarded by the lock.
+const GDAL_CACHE_NEEDS = Int[]
+const GDAL_CACHE_LOCK = ReentrantLock()
+
+"Set the GDAL cache to the needs of the running jobs, and at least `GDAL_CACHE_FLOOR`."
+set_gdal_cache!() = lock(() -> GDAL.gdalsetcachemax64(max(GDAL_CACHE_FLOOR, sum(GDAL_CACHE_NEEDS; init = 0))),
+                         GDAL_CACHE_LOCK)
+
+"""
+    gdal_cache_need(nx, block_height, T) -> Int
+
+The cache a job needs to read or write a band of `nx` cells of type `T` per
+row whose blocks are `block_height` rows high: two rows of blocks, since a block
+of rows of JuliaMag can start in one row of blocks and end in the next.
+"""
+gdal_cache_need(nx::Integer, block_height::Integer, ::Type{T}) where {T} = 2 * Int(nx) * Int(block_height) * sizeof(T)
+
+"""
+    with_gdal_cache(f, need)
+
+Call `f()` with `need` bytes more in the GDAL cache than the other running jobs
+need. The cache is set back after, also on an error.
+"""
+function with_gdal_cache(f::F, need::Integer) where {F}
+    n = Int(need)
+    lock(GDAL_CACHE_LOCK) do
+        push!(GDAL_CACHE_NEEDS, n)
+        set_gdal_cache!()
+    end
+    try
+        return f()
+    finally
+        lock(GDAL_CACHE_LOCK) do
+            deleteat!(GDAL_CACHE_NEEDS, findfirst(==(n), GDAL_CACHE_NEEDS)::Int)
+            set_gdal_cache!()
+        end
+    end
+end
+
 const GDAL_GRID_SETTINGS = SettingSpec[NumberSetting("band", "Band"; default = 1, min = 1, integer = true)]
 
 """
@@ -127,7 +176,8 @@ function import_gdal_band(s::Session, ds::ArchGDAL.Dataset, path::String, n::Int
     header = GridHeader(nx, ny, geo.dx, geo.dy, geo.x0, geo.y0, geo.rotation,
                         crs_from_wkt(ArchGDAL.getproj(ds); any_name = ers), ArchGDAL.getunittype(band), O, source)
     name = splitext(basename(path))[1]
-    fill = sink -> read_band!(sink, band, W, O, nodata, scale, offset, geo.bottom_up)
+    need = gdal_cache_need(nx, ArchGDAL.blocksize(band)[2], W)
+    fill = sink -> with_gdal_cache(() -> read_band!(sink, band, W, O, nodata, scale, offset, geo.bottom_up), need)
     return import_grid(fill, s, name, header; warnings, progress)
 end
 
@@ -268,8 +318,11 @@ end
 
 # ---- export ------------------------------------------------------------------
 
-"The GDAL creation options of a GeoTIFF export (spec 7)."
-const GEOTIFF_OPTIONS = ["COMPRESS=DEFLATE", "PREDICTOR=3", "TILED=YES", "BIGTIFF=IF_SAFER"]
+"""
+The GDAL creation options of a GeoTIFF export (spec 7). `NUM_THREADS` lets
+GDAL compress tiles in parallel: one thread managed 35 MB/s (docs/bench.md).
+"""
+const GEOTIFF_OPTIONS = ["COMPRESS=DEFLATE", "PREDICTOR=3", "TILED=YES", "BIGTIFF=IF_SAFER", "NUM_THREADS=ALL_CPUS"]
 
 "What an ER Mapper export writes for `NaN`: the Geosoft float dummy, so Oasis reads the dummies."
 const ERS_NODATA = -1.0e32
@@ -300,12 +353,14 @@ function write_gdal_grid!(x::GridExport, tmp::String, driver::String, options::V
             band = ArchGDAL.getband(ds, 1)
             ArchGDAL.setnodatavalue!(band, nodata)
             dummy = T(nodata)
-            each_row_block(x; north_first = true) do j1, block
-                isnan(dummy) || replace_nan!(block, dummy)
-                reverse!(block; dims = 2)                  # north row first, as stored
-                n = size(block, 2)
-                r1 = g.ny - (j1 + n - 1) + 1               # grid row j is stored row ny - j + 1
-                GC.@preserve block ArchGDAL.write!(band, block, r1:(r1 + n - 1), 1:g.nx)
+            with_gdal_cache(gdal_cache_need(g.nx, ArchGDAL.blocksize(band)[2], T)) do
+                each_row_block(x; north_first = true) do j1, block
+                    isnan(dummy) || replace_nan!(block, dummy)
+                    reverse!(block; dims = 2)              # north row first, as stored
+                    n = size(block, 2)
+                    r1 = g.ny - (j1 + n - 1) + 1           # grid row j is stored row ny - j + 1
+                    GC.@preserve block ArchGDAL.write!(band, block, r1:(r1 + n - 1), 1:g.nx)
+                end
             end
         finally
             ArchGDAL.destroy(ds)                           # close before the rename (Windows)

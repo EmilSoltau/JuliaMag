@@ -217,8 +217,19 @@ Read `n` rows from row `j1` on. The result has size `nx` by `n`. No map is used.
 """
 function read_rows(g::Grid, j1::Integer, n::Integer)
     check_rows(g, j1, n)
-    T = g.eltype
-    A = Matrix{T}(undef, g.nx, n)
+    return read_rows!(Matrix{g.eltype}(undef, g.nx, n), g, j1)
+end
+
+"""
+    read_rows!(A, g, j1) -> A
+
+Read rows `j1` on into `A`, which is `nx` by `n` and of the grid's type. A
+caller that reads block after block can so reuse one matrix. No map is used.
+"""
+function read_rows!(A::Matrix{T}, g::Grid, j1::Integer) where {T}
+    T === g.eltype || throw(ArgumentError("the grid holds $(g.eltype) values, not $T"))
+    size(A, 1) == g.nx || throw(ArgumentError("a block needs $(g.nx) values per row, not $(size(A, 1))"))
+    check_rows(g, j1, size(A, 2))
     open(values_path(g), "r") do io
         seek(io, (j1 - 1) * g.nx * sizeof(T))
         read!(io, A)

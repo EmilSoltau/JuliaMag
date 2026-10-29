@@ -59,6 +59,31 @@ csv = joinpath(work, "result.csv")
 job = wait_job(export_file(s, id, csv))
 println("Export: ", status(job), ", ", countlines(csv), " lines in ", csv)
 
+# Import a grid. This is a public Geosoft grid from the test data, with its
+# coordinate system in the .grd.xml and .gi files next to it.
+grd = normpath(@__DIR__, "..", "JuliaMagCore", "test", "data", "grids", "test_uncompressed.grd")
+job = wait_job(import_file(s, grd))
+gid = only(job.outputs)
+g = grid(s.project, gid)
+println("Grid import: ", status(job), ", ", g.nx, " by ", g.ny, " cells, coordinate system ", g.crs)
+
+# Describe its values.
+ok, message, _ = run_tool(s, "grid.statistics"; inputs = Dict("grid" => gid))
+println(message)
+
+# Set its coordinate system. The grid came from SIRGAS 2000 latitude and longitude.
+set_grid_crs!(s, gid, "EPSG:4674")
+println("Coordinate system: ", grid(s.project, gid).crs)
+
+# Export the grid to GeoTIFF, which keeps the coordinate system.
+tif = joinpath(work, "grid.tif")
+job = wait_job(export_file(s, gid, tif))
+println("Grid export: ", status(job), ", ", round(filesize(tif) / 1000; digits = 1), " kB in ", tif)
+
+# Undo the coordinate system change.
+undo!(s)
+println("After undo: ", grid(s.project, gid).crs)
+
 # Save the history as a Julia script. It repeats these steps on a copy of the
 # project as it was at the start. It uses the item ids of this session, such as
 # db-1, so running it on this project again would make new ids.

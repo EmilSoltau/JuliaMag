@@ -24,7 +24,7 @@ end
 const GRD_BLOCK_HEADER = UInt8[0x0f, 0x0e, 0xff, 0xfe, 0x12, 0x34, 0x56, 0x78, 0x02, 0, 0, 0, 0x01, 0, 0, 0]
 
 """
-    write_test_grd(path, A::Matrix; T = Float32, kx = 1, compress = false, rot = 0.0, x0, y0, de, dv,
+    write_test_grd(path, A::AbstractMatrix; T = Float32, kx = 1, compress = false, rot = 0.0, x0, y0, de, dv,
                    zbase = 0.0, zmult = 1.0)
 
 Write the grid `A` (`A[i, j]` is column `i`, row `j`, row 1 south) as a Geosoft
@@ -35,9 +35,10 @@ is a row; with `kx = -1` it is a column, and `de` is then the Y spacing.
 
 With `compress = true` the values go in zlib blocks of 65,536 bytes of whole
 vectors (one vector when one does not fit), in the layout of research section 4.
-The grid is written a vector at a time, so any size works.
+The grid is written a vector at a time, so any size works. `A` may be a lazy
+matrix that makes its values on demand, so a large grid needs no memory.
 """
-function write_test_grd(path, A::Matrix; T::Type = Float32, kx = 1, compress = false, rot = 0.0, x0, y0, de, dv,
+function write_test_grd(path, A::AbstractMatrix; T::Type = Float32, kx = 1, compress = false, rot = 0.0, x0, y0, de, dv,
                         zbase = 0.0, zmult = 1.0)
     kx in (1, -1) || throw(ArgumentError("kx must be 1 or -1"))
     es = sizeof(T)

@@ -68,18 +68,22 @@ remove_after!(x::GridExport, path::String, why::String, stuck::String) = (push!(
     each_row_block(f, x; north_first = false)
 
 Call `f(j1, block)` for each block of rows of the grid of `x`, south row first,
-or north row first when `north_first`. `block` is a new `nx` by `n` matrix of
+or north row first when `north_first`. `block` is an `nx` by `n` matrix of
 rows `j1` to `j1 + n - 1` (south row first inside the block), which `f` may
-change. Reports progress and checks for cancel after each block.
+change but must not keep: the same matrix is filled again for the next block,
+so an export makes no garbage per block. Reports progress and checks for
+cancel after each block.
 """
 function each_row_block(f::F, x::GridExport; north_first::Bool = false) where {F}
     g = x.grid
-    n = block_rows(g)
+    n = min(block_rows(g), g.ny)
+    buf = Matrix{g.eltype}(undef, g.nx, n)
     left = g.ny                          # rows not yet read
     while left > 0
         k = min(n, left)
         j1 = north_first ? left - k + 1 : g.ny - left + 1
-        f(j1, read_rows(g, j1, k))
+        k == size(buf, 2) || (buf = Matrix{g.eltype}(undef, g.nx, k))   # the last, shorter block
+        f(j1, read_rows!(buf, g, j1))
         rows_done!(x.ticker, k)
         left -= k
     end

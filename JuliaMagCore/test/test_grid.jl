@@ -8,6 +8,12 @@ include("support/grids.jl")
         write_rows!(g, 1, Float32[1 4; 2 5; 3 6])      # row 1 = 1 2 3, row 2 = 4 5 6
         g2 = open_grid(g.folder)
         @test read_rows(g2, 2, 1) == reshape(Float32[4, 5, 6], 3, 1)
+        # `read_rows!` fills a matrix the caller made, with as many rows as it has.
+        buf = fill(NaN32, 3, 2)
+        @test JuliaMagCore.read_rows!(buf, g2, 1) === buf && buf == Float32[1 4; 2 5; 3 6]
+        @test_throws ArgumentError JuliaMagCore.read_rows!(Matrix{Float32}(undef, 3, 3), g2, 1)
+        @test_throws ArgumentError JuliaMagCore.read_rows!(Matrix{Float32}(undef, 2, 1), g2, 1)
+        @test_throws ArgumentError JuliaMagCore.read_rows!(Matrix{Float64}(undef, 3, 1), g2, 1)
         @test filesize(values_path(g2)) == 6 * sizeof(Float32)
         @test basename(values_path(g2)) == "values.f32"
         with_grid_values(A -> @test(A[3, 2] == 6f0), g2)

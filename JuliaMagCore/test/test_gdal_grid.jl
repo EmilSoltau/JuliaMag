@@ -64,6 +64,31 @@ end
     @test AG.GDAL.cplgeterrorhandler(C_NULL) == JuliaMagCore.QUIET_GDAL_HANDLER[]
 end
 
+@testset "the GDAL block cache is small" begin
+    # GDAL's default cache is 5 % of the memory, so a big file would fill
+    # over 1 GB of it. The package's `__init__` makes it small.
+    cachemax() = AG.GDAL.gdalgetcachemax64()
+    floor = JuliaMagCore.GDAL_CACHE_FLOOR
+    @test floor == 64 * 2^20
+    @test cachemax() == floor
+    # A job that needs more raises it while it runs; two jobs add up.
+    JuliaMagCore.with_gdal_cache(10 * 2^20) do
+        @test cachemax() == floor
+    end
+    JuliaMagCore.with_gdal_cache(100 * 2^20) do
+        @test cachemax() == 100 * 2^20
+        JuliaMagCore.with_gdal_cache(50 * 2^20) do
+            @test cachemax() == 150 * 2^20
+        end
+        @test cachemax() == 100 * 2^20
+    end
+    @test cachemax() == floor
+    @test_throws ErrorException JuliaMagCore.with_gdal_cache(() -> error("boom"), 200 * 2^20)
+    @test cachemax() == floor
+    # The need of a band: two rows of its blocks.
+    @test JuliaMagCore.gdal_cache_need(20_000, 256, Float32) == 2 * 20_000 * 256 * 4
+end
+
 @testset "coordinate system text" begin
     @test crs_from_wkt("") == ""
     @test crs_wkt("") == ""

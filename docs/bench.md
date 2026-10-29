@@ -1,6 +1,7 @@
 # Import benchmark
 
 This page records how fast JuliaMagCore imports big files, and how much memory it needs.
+Line data (XYZ and CSV) comes first; grids are in "Grids" below.
 These numbers are a guard: a slow import or a crash on a large file would show here.
 
 ## Machine
@@ -77,6 +78,89 @@ It still finishes in 5.5 s.
   It was not measured.
 - On Windows, `release_map!` runs `GC.gc()`.
   This was not measured here, because the machine is Linux.
+
+## Grids
+
+`bench/import_grid.jl` measures a grid of 20,000 by 20,000 `Float32` cells (1.6 GB of values).
+It writes the grid three times: as an uncompressed Geosoft `.grd`, as a compressed (zlib) Geosoft `.grd`, and as a plain GeoTIFF (strips, no compression).
+It imports each file with `import_file` and exports the first grid to `.grd`, `.ers` and `.tif` with `export_file`.
+Each step is a job, timed up to the end of `wait_job`.
+The machine and threads are the same as above.
+
+### What is measured
+
+- Speed is the 1.6 GB of values divided by the time of the step, for every format.
+  The compressed file is 1.45 GB.
+- Memory growth is the peak resident memory, sampled every 50 ms during the step, minus the resident memory just before it, after a garbage collection.
+- The script also prints the part of the growth that is not backed by a file (`RssAnon`) and the growth of `Sys.maxrss()`.
+  In every run the growth was all `RssAnon`.
+- A small grid of every kind is imported and exported first, so compile time is not in the numbers.
+- The resident memory before the steps is about 1 GB: Julia, the compiled code, GDAL and PROJ.
+
+### Results
+
+Run of 2026-10-29, after the fixes below (`JULIA_NUM_THREADS=4 julia --project=JuliaMagCore bench/import_grid.jl 20000`):
+
+| Step | Time | Speed | Memory growth |
+|---|---|---|---|
+| Import Geosoft `.grd` | 2.5 s | 647 MB/s | 42 MiB |
+| Import Geosoft `.grd`, zlib | 9.3 s | 172 MB/s | 150 MiB |
+| Import GeoTIFF | 2.4 s | 662 MB/s | 120 MiB |
+| Export to `.grd` | 3.1 s | 512 MB/s | 0 MiB |
+| Export to `.ers` | 1.8 s | 888 MB/s | 0 MiB |
+| Export to `.tif` | 3.8 s | 419 MB/s | 32 MiB |
+
+Writing the inputs took 6 s for the `.grd`, 50 s for the zlib `.grd` and 5 s for the GeoTIFF.
+
+Memory growth is under 300 MB for every step, and it does not grow with the grid.
+At 10,000 by 10,000 cells (400 MB) the growth is 44, 145, 7, 0, 0 and 28 MiB.
+The 0 MiB of the exports means the export reused memory that the process already had.
+The numbers vary by about 100 MiB from run to run.
+
+### Before the fixes
+
+The first run of the same command gave:
+
+| Step | Time | Speed | Memory growth |
+|---|---|---|---|
+| Import Geosoft `.grd` | 2.2 s | 715 MB/s | 206 MiB |
+| Import Geosoft `.grd`, zlib | 8.7 s | 184 MB/s | 170 MiB |
+| Import GeoTIFF | 2.5 s | 650 MB/s | 1184 MiB |
+| Export to `.grd` | 2.8 s | 571 MB/s | 367 MiB |
+| Export to `.ers` | 1.7 s | 927 MB/s | 1280 MiB |
+| Export to `.tif` | 45.5 s | 35 MB/s | 973 MiB |
+
+### Findings
+
+- GDAL keeps the blocks it reads and writes in a cache.
+  Its default size is 5 % of the memory, here 1.2 GB.
+  A GeoTIFF import, an `.ers` export and a `.tif` export filled it: up to 1.3 GB of growth.
+  A profile showed the GDAL cache at 383 MiB during a 400 MB GeoTIFF import.
+  The fix: JuliaMagCore sets the cache to 64 MiB when it loads (`GDAL_CACHE_FLOOR`).
+  A job that reads or writes a band raises it by two rows of the band's blocks while it runs (`with_gdal_cache`), so a very wide tiled file still fits.
+- The Julia side made a new 16 MiB matrix for every block, and the import sink copied each block once more.
+  The garbage collector let up to 370 MiB of this pile up before it ran.
+  The fix: the readers and `each_row_block` fill the same matrix for every block (`read_rows!`), and the sink writes a block of the grid's type without a copy.
+- The GeoTIFF export compressed its tiles on one thread, at 35 MB/s.
+  The fix: it now passes `NUM_THREADS=ALL_CPUS` to GDAL, which compresses tiles in parallel.
+  The same export takes 3.8 s instead of 45.5 s, and the file holds the same values.
+- The zlib import still grows by about 150 MiB.
+  Oasis puts few rows in each zlib block (here one row of 80 kB), and each block makes a new zlib stream with its own buffers.
+  This garbage stays flat with the grid size, so it was left as it is.
+
+### How to re-run
+
+From the repo root:
+
+```
+JULIA_NUM_THREADS=4 julia --project=JuliaMagCore bench/import_grid.jl 20000
+```
+
+- The first argument is the number of cells per side (default 20,000).
+- `--dir DIR` says where to put the temporary files; the default is the system temp folder.
+  The run needs about 11 GB of free disk at 20,000.
+- `--keep` keeps the files.
+- The run takes about 3 minutes, most of it writing the zlib input.
 
 ## Limits
 

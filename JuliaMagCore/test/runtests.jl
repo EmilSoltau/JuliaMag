@@ -22,5 +22,6 @@ using Test
     include("test_channel_math.jl")
     include("test_statistics.jl")
     include("test_grid_properties.jl")
+    include("test_grid_end_to_end.jl")
     include("test_end_to_end.jl")
 end
