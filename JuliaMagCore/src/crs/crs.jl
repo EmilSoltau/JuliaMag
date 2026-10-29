@@ -121,6 +121,47 @@ function epsg_code(pj::Ptr{Proj.PJ}, ctx::Ptr{Proj.PJ_CONTEXT})::Union{Nothing,S
     end
 end
 
+"The kinds of coordinate system `crs_from_name` looks for."
+const NAMED_CRS_TYPES = [Proj.PJ_TYPE_GEOGRAPHIC_2D_CRS, Proj.PJ_TYPE_PROJECTED_CRS, Proj.PJ_TYPE_COMPOUND_CRS]
+
+"""
+    crs_from_name(name)::Union{Nothing,String}
+
+The EPSG code of the coordinate system with exactly this name, such as
+`"EPSG:28355"` for `"GDA94 / MGA zone 55"`. Case is ignored. Only 2D
+geographic, projected and compound systems count, so `"WGS 84"` is
+`"EPSG:4326"`. `nothing` when PROJ knows no such name, or when more than one
+current system has it. Never throws.
+"""
+function crs_from_name(name::AbstractString)::Union{Nothing,String}
+    text = String(strip(name))
+    (isempty(text) || occursin('\0', text)) && return nothing
+    ctx = quiet_context()
+    try
+        list = Proj.proj_create_from_name("EPSG", text, NAMED_CRS_TYPES, length(NAMED_CRS_TYPES), 0, 0, C_NULL, ctx)
+        list == C_NULL && return nothing
+        codes = String[]
+        try
+            for k in 1:Proj.proj_list_get_count(list)
+                obj = Proj.proj_list_get(list, k - 1, ctx)
+                obj == C_NULL && continue
+                try
+                    Proj.proj_is_deprecated(obj) == 0 || continue
+                    id = Proj.proj_get_id_code(obj, 0)
+                    id isa String && push!(codes, "EPSG:$id")
+                finally
+                    Proj.proj_destroy(obj)
+                end
+            end
+        finally
+            Proj.proj_list_destroy(list)
+        end
+        return length(codes) == 1 ? only(codes) : nothing
+    finally
+        Proj.proj_context_destroy(ctx)
+    end
+end
+
 """
     crs_wkt(code)::String
 

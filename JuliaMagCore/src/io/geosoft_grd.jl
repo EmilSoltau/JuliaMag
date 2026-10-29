@@ -118,12 +118,14 @@ function read_grd_header(io::IO)::GrdHeader
 end
 
 """
-    read_geosoft_grd(s, path, settings, progress; header = open(read_grd_header, path)) -> ImportResult
+    read_geosoft_grd(s, path, settings, progress; header = open(read_grd_header, path), crs = "",
+                     warnings = ImportWarning[]) -> ImportResult
 
 Import a Geosoft grid as a grid item named after the file. Pass the job's
-progress, so the import can be cancelled. An uncompressed grid is read here, a
-block of whole vectors at a time. A compressed grid goes to
-`read_geosoft_grd_compressed`.
+progress, so the import can be cancelled. `crs` is the coordinate system of the
+grid (the file itself has none), and `warnings` go into the job report. An
+uncompressed grid is read here, a block of whole vectors at a time. A
+compressed grid goes to `read_geosoft_grd_compressed`.
 
 The grid is `Float32` when the file holds 8 or 16 bit integers or `Float32`
 values and is not scaled (`ZMULT = 1`, `ZBASE = 0`). Every other grid is
@@ -131,13 +133,14 @@ values and is not scaled (`ZMULT = 1`, `ZBASE = 0`). Every other grid is
 file is fine.
 """
 function read_geosoft_grd(s::Session, path::AbstractString, settings::AbstractDict, progress::Progress;
-                          header::GrdHeader = open(read_grd_header, String(path)))::ImportResult
+                          header::GrdHeader = open(read_grd_header, String(path)), crs::AbstractString = "",
+                          warnings::Vector{ImportWarning} = ImportWarning[])::ImportResult
     path = String(path)
-    header.compressed && return read_geosoft_grd_compressed(s, path, settings, progress, header)
+    header.compressed && return read_geosoft_grd_compressed(s, path, settings, progress, header; crs, warnings)
     m = (header.es * header.ne) * header.nv
     n = filesize(path) - GRD_HEADER_BYTES
     n >= m || throw(GridError("the file ends after $(max(n, 0)) of $m data bytes"))
-    return import_grd(s, path, header, "", progress) do sink, h
+    return import_grd(s, path, header, "", progress; crs, warnings) do sink, h
         open(io -> read_grd_vectors!(sink, io, h, grd_eltype(h)), path)
     end
 end
@@ -148,7 +151,7 @@ const GRD_SIGNATURE = 0xF8E7D8C7
 const GRD_BLOCK_HEADER_BYTES = 16
 
 """
-    read_geosoft_grd_compressed(s, path, settings, progress, header) -> ImportResult
+    read_geosoft_grd_compressed(s, path, settings, progress, header; crs = "", warnings = ImportWarning[]) -> ImportResult
 
 Import a compressed Geosoft grid (research section 4). After the 512-byte header
 comes a 16-byte compression header (signature, compression type, block count
@@ -163,9 +166,10 @@ a block of vectors at a time. Every offset and size in the file is checked
 against the file size before it is used.
 """
 function read_geosoft_grd_compressed(s::Session, path::String, ::AbstractDict, progress::Progress,
-                                     header::GrdHeader)::ImportResult
+                                     header::GrdHeader; crs::AbstractString = "",
+                                     warnings::Vector{ImportWarning} = ImportWarning[])::ImportResult
     blocks = open(io -> read_grd_block_table(io, header, filesize(path)), path)
-    return import_grd(s, path, header, "zlib", progress) do sink, h
+    return import_grd(s, path, header, "zlib", progress; crs, warnings) do sink, h
         open(io -> read_grd_blocks!(sink, io, h, grd_eltype(h), blocks), path)
     end
 end
@@ -255,20 +259,22 @@ end
 
 """
 Import the grid of header `h` with `fill_grid!(sink, h)`, which puts every vector.
-`compression` is recorded in the grid source.
+`compression` is recorded in the grid source. `crs` is the coordinate system of
+the grid, and `warnings` go into the job report.
 """
 function import_grd(fill_grid!::F, s::Session, path::String, h::GrdHeader, compression::String,
-                    progress::Progress)::ImportResult where {F}
+                    progress::Progress; crs::AbstractString = "",
+                    warnings::Vector{ImportWarning} = ImportWarning[])::ImportResult where {F}
     T = grd_eltype(h)
     O = grid_eltype(T, h.zmult != 1 || h.zbase != 0)
     rows = h.kx == 1
     nx, ny = rows ? (h.ne, h.nv) : (h.nv, h.ne)
     dx, dy = rows ? (h.de, h.dv) : (h.dv, h.de)
     source = GridSource(path, "Geosoft GRD", lowercase(string(T)), compression)
-    header = GridHeader(nx, ny, dx, dy, h.x0, h.y0, h.rot, "", "", O, source)
+    header = GridHeader(nx, ny, dx, dy, h.x0, h.y0, h.rot, String(crs), "", O, source)
     file = basename(path)
     name = lowercase(file_extension(file)) == ".grd" ? String(chop(file; tail = 4)) : file
-    r = import_grid(sink -> fill_grid!(sink, h), s, name, header; progress)
+    r = import_grid(sink -> fill_grid!(sink, h), s, name, header; warnings, progress)
     isempty(h.label) && return r
     return ImportResult(r.item, r.warnings, r.rows, r.lines, "$(r.summary), label \"$(h.label)\"")
 end

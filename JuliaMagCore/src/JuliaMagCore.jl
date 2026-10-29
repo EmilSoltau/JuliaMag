@@ -25,6 +25,8 @@ include("io/grid_import.jl")
 include("io/georef.jl")
 include("io/gdal_grid.jl")
 include("io/geosoft_grd.jl")
+include("io/cfb.jl")
+include("io/grd_files.jl")
 include("io/csv_fields.jl")
 include("io/csv_import.jl")
 include("io/csv_templates.jl")
@@ -59,6 +61,7 @@ export eachfileline, ImportWarning, ImportResult, Progress, report, is_cancelled
 export GridHeader, GridSink, put_rows!, put_columns!, import_grid
 export georef_from_affine, affine_from_grid, read_gdal_grid
 export GrdHeader, read_grd_header, grd_eltype, grd_dummy, read_geosoft_grd
+export grd_kind, crs_from_grd_xml, crs_from_grd_gi
 export ImporterSpec, register_importer!, importers, importer_for, import_xyz
 export CsvColumn, CsvLayout, sniff_csv, preview_rows, import_csv
 export save_template, load_template, list_templates, layout_json
@@ -70,7 +73,7 @@ export SettingSpec, NumberSetting, TextSetting, ExprSetting, ChoiceSetting, Bool
     ChannelSetting, ChannelListSetting, LinesSetting, CRSSetting, PairSetting, ExtentSetting, PointSetting
 export Place, ToolSpec, ToolError, register_tool!, unregister_tool!, tools, tool, tabs
 export default_settings, validate, last_settings, reset_settings!, run_tool
-export valid_crs, crs_name, crs_from_wkt, crs_wkt, guess_utm, reproject_xy
+export valid_crs, crs_name, crs_from_wkt, crs_from_name, crs_wkt, guess_utm, reproject_xy
 export parse_channel_expr, ChannelStats, channel_stats
 
 # The one `__init__` of the package. Each part that needs setup when the

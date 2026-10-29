@@ -2,7 +2,7 @@
 
 julia_version = "1.12.7"
 manifest_format = "2.0"
-project_hash = "413a64b143287cf6b9f086bb0865a1388b64af59"
+project_hash = "0560a202349e04aaaa1ea92cd69feb58efebf165"
 
 [[deps.AbstractTrees]]
 git-tree-sha1 = "2d9c9a55f9c93e8887ad391fbae72f8ef55e1177"
@@ -314,6 +314,12 @@ git-tree-sha1 = "b309b36a9e02fe7be71270dd8c0fd873625332b4"
 uuid = "411431e0-e8b7-467b-b5e0-f676ba4f2910"
 version = "0.1.6"
 
+[[deps.EzXML]]
+deps = ["Printf", "XML2_jll"]
+git-tree-sha1 = "7ea1aa5869e2626ccae84480e4f37185bc6f41d3"
+uuid = "8f5d6c58-4d21-5cfd-889c-e3ad7ee6a615"
+version = "1.2.3"
+
 [[deps.FNVHash]]
 git-tree-sha1 = "d6de2c735a8bffce9bc481942dfa453cc815357e"
 uuid = "5207ad80-27db-4d23-8732-fa0bd339ea89"
@@ -527,7 +533,7 @@ uuid = "aacddb02-875f-59d6-b918-886e6ef4fbf8"
 version = "3.2.1+0"
 
 [[deps.JuliaMagCore]]
-deps = ["ArchGDAL", "CodecZlib", "JSON3", "Mmap", "Parquet2", "Parsers", "Printf", "Proj", "StructTypes", "Tables"]
+deps = ["ArchGDAL", "CodecZlib", "EzXML", "JSON3", "Mmap", "Parquet2", "Parsers", "Printf", "Proj", "StructTypes", "Tables"]
 path = "JuliaMagCore"
 uuid = "133f1fd6-5f53-418f-9a68-c205e5f9c1d6"
 version = "0.1.0"
