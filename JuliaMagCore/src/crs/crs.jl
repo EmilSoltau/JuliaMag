@@ -30,7 +30,10 @@ Call `f(pj)` with the PROJ object of coordinate system `code` and return its
 result. Returns `nothing` when PROJ cannot read `code` as a coordinate system.
 Never throws for bad codes. An error in `f` is thrown as it is.
 """
-function with_crs(f::F, code::AbstractString) where {F}
+with_crs(f::F, code::AbstractString) where {F} = with_crs_context((pj, _) -> f(pj), code)
+
+"Like `with_crs`, but call `f(pj, ctx)` with the PROJ context of `pj` too."
+function with_crs_context(f::F, code::AbstractString) where {F}
     (isempty(code) || occursin('\0', code)) && return nothing
     ctx = quiet_context()
     pj = Ptr{Proj.PJ}(C_NULL)
@@ -44,7 +47,7 @@ function with_crs(f::F, code::AbstractString) where {F}
             Ptr{Proj.PJ}(C_NULL)
         end
         (pj == C_NULL || Proj.proj_is_crs(pj) == 0) && return nothing
-        return f(pj)
+        return f(pj, ctx)
     finally
         pj == C_NULL || Proj.proj_destroy(pj)
         Proj.proj_context_destroy(ctx)
@@ -75,6 +78,58 @@ end
 function is_geographic(code::AbstractString)::Bool
     geo = (Proj.PJ_TYPE_GEOGRAPHIC_CRS, Proj.PJ_TYPE_GEOGRAPHIC_2D_CRS, Proj.PJ_TYPE_GEOGRAPHIC_3D_CRS)
     return with_crs(pj -> Proj.proj_get_type(pj) in geo, code) === true
+end
+
+"""
+    crs_from_wkt(wkt)::String
+
+The code of a coordinate system given as WKT text, such as one read from a
+GeoTIFF. `"EPSG:n"` when PROJ identifies it as that EPSG code with full
+confidence (100), else the WKT text itself. Blank text gives `""`.
+Never throws.
+"""
+function crs_from_wkt(wkt::AbstractString)::String
+    text = String(strip(wkt))
+    isempty(text) && return ""
+    code = with_crs_context(epsg_code, text)
+    return code isa String ? code : text
+end
+
+"The EPSG code of `pj` when PROJ is sure of it (confidence 100), else `nothing`."
+function epsg_code(pj::Ptr{Proj.PJ}, ctx::Ptr{Proj.PJ_CONTEXT})::Union{Nothing,String}
+    confidence = Ref(Ptr{Cint}(C_NULL))
+    list = Proj.proj_identify(pj, "EPSG", confidence, C_NULL, ctx)
+    list == C_NULL && return nothing
+    try
+        n = Proj.proj_list_get_count(list)
+        for k in 1:n
+            unsafe_load(confidence[], k) == 100 || continue
+            obj = Proj.proj_list_get(list, k - 1, ctx)
+            obj == C_NULL && continue
+            try
+                auth = Proj.proj_get_id_auth_name(obj, 0)
+                id = Proj.proj_get_id_code(obj, 0)
+                (auth isa String && id isa String) && return "$auth:$id"
+            finally
+                Proj.proj_destroy(obj)
+            end
+        end
+        return nothing
+    finally
+        confidence[] == C_NULL || Proj.proj_int_list_destroy(confidence[])
+        Proj.proj_list_destroy(list)
+    end
+end
+
+"""
+    crs_wkt(code)::String
+
+The coordinate system `code` as WKT 1 in GDAL style, for file formats that store
+WKT. `""` for blank text or a code that `valid_crs` refuses.
+"""
+function crs_wkt(code::AbstractString)::String
+    wkt = with_crs_context((pj, ctx) -> Proj.proj_as_wkt(pj, Proj.PJ_WKT1_GDAL, C_NULL, ctx), code)
+    return wkt isa AbstractString ? String(wkt) : ""
 end
 
 # ---- UTM zones -------------------------------------------------------------
