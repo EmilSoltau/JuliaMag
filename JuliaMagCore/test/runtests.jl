@@ -11,6 +11,7 @@ using Test
     include("test_xyz.jl")
     include("test_grid_import.jl")
     include("test_gdal_grid.jl")
+    include("test_geosoft_grd.jl")
     include("test_csv.jl")
     include("test_jobs.jl")
     include("test_tools.jl")

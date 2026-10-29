@@ -275,6 +275,29 @@ end
             @test length(s.project.items) == n && isempty(importing(s))
         end
 
+        @testset "public ER Mapper samples" begin
+            data = joinpath(@__DIR__, "data", "grids")
+            # GDAL's own test: the geotransform is (-301100, 200, 0, -69400 + 200 * 165, 0, -200).
+            gt = (-301100.0, 200.0, 0.0, -69400.0 + 200 * 165, 0.0, -200.0)
+            job = wait_job(import_file(s, joinpath(data, "mag4014.ers")))
+            @test status(job) == JOB_DONE
+            g = grid(s.project, only(job.outputs))
+            @test g.nx == 131 && g.ny == 166 && g.dx == 200 && g.dy == 200 && g.rotation == 0
+            @test g.x0 == -301000 && g.y0 == -69500
+            @test cell_centre(g, 1, 166) == pixel_centre(gt, 1, 1)
+            @test g.count > 0
+
+            # Big-endian, with 1E+20 as its null value.
+            job = wait_job(import_file(s, joinpath(data, "f0540mag.ers")))
+            @test status(job) == JOB_DONE
+            g = grid(s.project, only(job.outputs))
+            @test g.nx == 271 && g.ny == 136
+            A = read_rows(g, 1, g.ny)
+            @test count(isnan, A) > 0 && g.count == count(!isnan, A)
+            @test maximum(filter(!isnan, A)) < 1e19
+            @test isempty(importing(s))
+        end
+
         @testset "importers" begin
             @test importer_for("a.TIF").id == "import.geotiff"
             @test importer_for("a.tiff").id == "import.geotiff"

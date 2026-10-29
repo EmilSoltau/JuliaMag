@@ -24,6 +24,7 @@ include("io/xyz_import.jl")
 include("io/grid_import.jl")
 include("io/georef.jl")
 include("io/gdal_grid.jl")
+include("io/geosoft_grd.jl")
 include("io/csv_fields.jl")
 include("io/csv_import.jl")
 include("io/csv_templates.jl")
@@ -57,6 +58,7 @@ export record!, set_cell!, set_line_selected!, set_cursor!, script_text
 export eachfileline, ImportWarning, ImportResult, Progress, report, is_cancelled, NO_PROGRESS
 export GridHeader, GridSink, put_rows!, put_columns!, import_grid
 export georef_from_affine, affine_from_grid, read_gdal_grid
+export GrdHeader, read_grd_header, grd_eltype, grd_dummy, read_geosoft_grd
 export ImporterSpec, register_importer!, importers, importer_for, import_xyz
 export CsvColumn, CsvLayout, sniff_csv, preview_rows, import_csv
 export save_template, load_template, list_templates, layout_json

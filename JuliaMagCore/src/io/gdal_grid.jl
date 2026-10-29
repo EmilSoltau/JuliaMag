@@ -100,6 +100,9 @@ function import_gdal_band(s::Session, ds::ArchGDAL.Dataset, path::String, n::Int
     ny = Int(ArchGDAL.height(ds))
     drv = ArchGDAL.getdriver(ds)
     gt = geotransform(ds)
+    if gt === nothing && ArchGDAL.shortname(drv) == "ERS"
+        gt = ers_meters_transform(path)
+    end
     if gt === nothing
         push!(warnings, ImportWarning(0, "The file has no georeference. The cells are 1 by 1, from 0, 0."))
         gt = (0.0, 1.0, 0.0, Float64(ny), 0.0, -1.0)
@@ -217,6 +220,27 @@ function ers_angle(text::String, path::String)::Float64
         deg += abs(x::Float64) / 60.0^(k - 1)
     end
     return startswith(strip(text), "-") ? -deg : deg
+end
+
+"""
+The affine transform of an ER Mapper header with a `RAW` coordinate space, or
+`nothing`. Such a header gives its registration point as `MetersX` and
+`MetersY`. GDAL reads these only from version 3.14 on (GDAL pull request
+15261); this is the same rule. The registration point sits at cell
+`RegistrationCellX`, `RegistrationCellY`, counted from 0 at the outer
+north-west corner.
+"""
+function ers_meters_transform(path::String)::Union{Nothing,NTuple{6,Float64}}
+    text = ers_header(path)
+    num(key, default) = (v = ers_field(text, key); v === nothing ? default : tryparse(Float64, v))
+    mx = num("MetersX", nothing)
+    my = num("MetersY", nothing)
+    (mx === nothing || my === nothing) && return nothing
+    xd = something(num("Xdimension", 1.0), 1.0)
+    yd = something(num("Ydimension", 1.0), 1.0)
+    cx = something(num("RegistrationCellX", 0.0), 0.0)
+    cy = something(num("RegistrationCellY", 0.0), 0.0)
+    return (mx - cx * xd, xd, 0.0, my + cy * yd, 0.0, -yd)
 end
 
 """
