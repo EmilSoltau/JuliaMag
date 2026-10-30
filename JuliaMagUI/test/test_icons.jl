@@ -1,7 +1,7 @@
 using Test
 import Rsvg
 using JuliaMagUI: icon_for, ICON_DIR, ICON_SIZES, ICON_STYLES, ICON_PLACEHOLDERS, LIGHT, DARK,
-    build_icon_atlas, px, CORE_ICONS
+    build_icon_atlas, px, CORE_ICONS, ICON_STYLE_SIZES, icon_size_index
 import JuliaMagCore as JMCore
 
 include(joinpath(@__DIR__, "..", "tools", "extract_icons.jl"))
@@ -54,9 +54,10 @@ const PROTOTYPE_HTML = joinpath(@__DIR__, "..", "..", "prototype", "juliamag-ui.
             @test size(a.rects) == (length(ICON_STYLES), length(ICON_SIZES), length(a.names))
             # Each cell is the scaled size, and no two cells overlap.
             for k in eachindex(ICON_SIZES)
-                @test all(r -> r[3] == r[4] == px(scale, ICON_SIZES[k]), a.rects[:, k, :])
+                @test all(r -> r[3] == 0 || r[3] == r[4] == px(scale, ICON_SIZES[k]),
+                    a.rects[:, k, :])
             end
-            cells = vec(a.rects)
+            cells = filter(r -> r[3] > 0, vec(a.rects))
             @test all(r -> r[1] + r[3] <= a.width && r[2] + r[4] <= a.height, cells)
             used = falses(a.width, a.height)
             overlaps = 0
@@ -68,11 +69,27 @@ const PROTOTYPE_HTML = joinpath(@__DIR__, "..", "..", "prototype", "juliamag-ui.
             @test overlaps == 0
         end
 
-        # The 48 px database icon: ink, the accent fill at 22 %, straight alpha.
+        # At scale 4 the atlas still fits in an 8192 px texture.
+        a4 = build_icon_atlas(LIGHT, 4f0)
+        @test a4.height <= 8192 && a4.width <= 8192
+        # Only the sizes each style uses are drawn; the others are empty.
+        for (s, sizes) in enumerate(ICON_STYLE_SIZES), (k, size) in enumerate(ICON_SIZES)
+            @test all(r -> (r[3] > 0) == (size in sizes), a4.rects[s, k, :])
+        end
+        # A size a style does not hold comes from its next bigger size, else its biggest.
+        normal, disabled, nav, on_accent = 1, 2, 3, 4
+        @test ICON_SIZES[icon_size_index(normal, 20)] == 22
+        @test ICON_SIZES[icon_size_index(normal, 64)] == 48
+        @test ICON_SIZES[icon_size_index(disabled, 10)] == 16
+        @test ICON_SIZES[icon_size_index(nav, 22)] == 48
+        @test ICON_SIZES[icon_size_index(on_accent, 32)] == 22
+
+        # The biggest database icon of each style: ink, the accent fill at 22 %, straight alpha.
         a = build_icon_atlas(DARK, 1f0)
         db = a.index["database"]
         colours(style) = begin
-            x, y, d, _ = a.rects[findfirst(==(style), ICON_STYLES), end, db]
+            s = findfirst(==(style), ICON_STYLES)
+            x, y, d, _ = a.rects[s, icon_size_index(s, 48), db]
             Set((a.pixels[4*((y+j)*a.width+x+i)+1], a.pixels[4*((y+j)*a.width+x+i)+2],
                  a.pixels[4*((y+j)*a.width+x+i)+3], a.pixels[4*((y+j)*a.width+x+i)+4])
                 for j in 0:d-1, i in 0:d-1)

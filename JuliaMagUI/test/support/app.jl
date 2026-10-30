@@ -69,7 +69,32 @@ Each action is also a function that takes the context first, such as `click(ctx,
 struct TestContext
     window::UI.Window
     render_queue::Vector{Any}
+    deadline::Float64   # `time()` when the whole test runs out of time
 end
+
+"""
+    TestTimeout(seconds)
+
+Thrown when a `with_test_app` test runs longer than its `timeout`.
+"""
+struct TestTimeout <: Exception
+    seconds::Float64
+end
+
+Base.showerror(io::IO, e::TestTimeout) =
+    print(io, "TestTimeout: the app test did not finish within $(e.seconds) s")
+
+# Every action checks the overall time limit first.
+function check_time(ctx::TestContext)
+    deadline = getfield(ctx, :deadline)
+    time() > deadline && throw(TestTimeout(TEST_TIMEOUT[]))
+    return nothing
+end
+
+const TEST_TIMEOUT = Ref(0.0)   # the `timeout` of the running `with_test_app`
+
+# One frame, after checking the time limit.
+next_frame(ctx::TestContext, n::Integer = 1) = (check_time(ctx); te.Yield(n); nothing)
 
 const TEST_ACTIONS = (:click, :type, :key, :frames, :shot, :wait_until, :on_render)
 
@@ -81,37 +106,40 @@ end
 
 Base.propertynames(::TestContext) = (fieldnames(TestContext)..., TEST_ACTIONS...)
 
-function click(::TestContext, ref::AbstractString)
+function click(ctx::TestContext, ref::AbstractString)
+    check_time(ctx)
     te.ItemExists(String(ref)) || error("there is no item \"$ref\" to click")
     te.ItemClick(String(ref))
     return nothing
 end
 
-function type(::TestContext, ref::AbstractString, text::AbstractString)
+function type(ctx::TestContext, ref::AbstractString, text::AbstractString)
+    check_time(ctx)
     te.ItemExists(String(ref)) || error("there is no input \"$ref\" to type into")
     te.ItemInputValue(String(ref), String(text))
     return nothing
 end
 
-type(::TestContext, text::AbstractString) = (te.KeyChars(String(text)); nothing)
+type(ctx::TestContext, text::AbstractString) = (check_time(ctx); te.KeyChars(String(text)); nothing)
 
-key(::TestContext, chord::AbstractString) = (te.KeyPress(key_chord(chord)); nothing)
+key(ctx::TestContext, chord::AbstractString) =
+    (check_time(ctx); te.KeyPress(key_chord(chord)); nothing)
 
-frames(::TestContext, n::Integer = 1) = (te.Yield(n); nothing)
+frames(ctx::TestContext, n::Integer = 1) = next_frame(ctx, n)
 
 function shot(ctx::TestContext, path::AbstractString)
     rm(path; force = true)
     UI.capture_png(ctx.window, path)
-    te.Yield()   # the loop writes the file at the end of the frame
+    next_frame(ctx)   # the loop writes the file at the end of the frame
     isfile(path) || error("the screenshot $path was not written")
     return path
 end
 
-function wait_until(::TestContext, pred; timeout::Real = 10)
+function wait_until(ctx::TestContext, pred; timeout::Real = 10)
     deadline = time() + timeout
     while !pred()
         time() > deadline && error("wait_until: the condition did not hold within $timeout s")
-        te.Yield()
+        next_frame(ctx)
     end
     return nothing
 end
@@ -157,17 +185,23 @@ end
 
 """
     with_test_app(f; project = nothing, theme = THEME_LIGHT, size = (1480, 920), scale = 1f0,
-                  config_dir = mktempdir(), extra_ui = nothing)
+                  config_dir = mktempdir(), extra_ui = nothing, timeout = 120)
 
 Start the real app (`JuliaMagUI.main`) with the bundled fonts and an ImGuiTestEngine
 context, run `f(ctx::TestContext)` as one registered test, then close the app.
 `theme` is saved in the settings of `config_dir` before the app starts.
 `extra_ui(w)` is drawn after the app in every frame.
 An error in `f` is thrown again once the window is closed. Returns what `f` returns.
+
+The whole test, start and close included, has `timeout` seconds.
+After that, the next action throws `TestTimeout`, and the test engine's watchdog stops an
+action that hangs; the app then closes and the error reaches the caller.
 """
 function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGHT,
         size::Tuple{Integer,Integer} = (1480, 920), scale::Real = 1f0,
-        config_dir::AbstractString = mktempdir(), extra_ui = nothing)
+        config_dir::AbstractString = mktempdir(), extra_ui = nothing, timeout::Real = 120)
+    deadline = time() + timeout
+    TEST_TIMEOUT[] = timeout
     config, _ = UI.load_config(config_dir)
     config.theme = theme
     UI.save_config(config, config_dir)
@@ -191,6 +225,8 @@ function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGH
         io.ConfigVerboseLevel = te.VerboseLevel_Silent
         io.ConfigVerboseLevelOnError = te.VerboseLevel_Silent
         io.ConfigMouseDrawCursor = false   # no drawn mouse cursor in screenshots
+        io.ConfigWatchdogWarning = timeout
+        io.ConfigWatchdogKillTest = timeout   # stops an engine action that hangs
         test = te.@register_test(engine, "app", "with_test_app")
         test.TestFunc = () -> begin
             try
@@ -200,7 +236,7 @@ function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGH
                     te.Yield()
                 end
                 window[] === nothing && error("the app drew no frame")
-                result[] = f(TestContext(window[], queue))
+                result[] = f(TestContext(window[], queue, deadline))
             catch e
                 failure[] = CapturedException(e, catch_backtrace())
             end
@@ -209,6 +245,7 @@ function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGH
         UI.main(; project, config_dir, extra_ui = hook, size, scale, fonts = :bundled,
             engine, passive = true)
         summary = te.GetResultSummary(engine)
+        failure[] === nothing && time() > deadline && throw(TestTimeout(timeout))
         if failure[] === nothing && (summary.CountTested != 1 || summary.CountSuccess != 1)
             error("the test engine did not finish the test with success " *
                   "(tested $(summary.CountTested), passed $(summary.CountSuccess))")

@@ -241,3 +241,54 @@ rgb(p) = (Float32(p.r), Float32(p.g), Float32(p.b))
         end
     end
 end
+
+# GLFW's monitor query can get RANDR BadRRCrtc from the X server, and Xlib's default
+# handler then exits the process. A child process makes that query with a bad CRTC:
+# with the app's handler it lives on, without it (the handler kept off) it dies.
+const X11_CHILD = raw"""
+import JuliaMagUI, GLFW
+const L = Base.Libc.Libdl
+ARGS[1] == "without" && (JuliaMagUI.X_HANDLER_INSTALLED[] = true)   # keep it off
+JuliaMagUI.run_window(; fonts = :bundled, passive = true) do w
+    JuliaMagUI.request_frames!(w)
+    if w.frame == 1
+        dpy = ccall((:glfwGetX11Display, GLFW.libglfw), Ptr{Cvoid}, ())
+        x11 = L.dlopen("libX11.so.6")
+        xrr = L.dlopen("libXrandr.so.2")
+        root = ccall(L.dlsym(x11, :XDefaultRootWindow), Culong, (Ptr{Cvoid},), dpy)
+        res = ccall(L.dlsym(xrr, :XRRGetScreenResourcesCurrent), Ptr{Cvoid},
+            (Ptr{Cvoid}, Culong), dpy, root)
+        info = ccall(L.dlsym(xrr, :XRRGetCrtcInfo), Ptr{Cvoid},
+            (Ptr{Cvoid}, Ptr{Cvoid}, Culong), dpy, res, 0x0123_4567)
+        ccall(L.dlsym(xrr, :XRRFreeScreenResources), Cvoid, (Ptr{Cvoid},), res)
+        println("QUERY ", info == C_NULL ? "failed" : "worked")
+    elseif w.frame == 3
+        println("IGNORED ", JuliaMagUI.X_IGNORED[])
+        JuliaMagUI.quit!(w)
+    end
+    nothing
+end
+println("ALIVE")
+"""
+
+window_testset("X11 errors") do
+    if !Sys.islinux() || GLFW.GetPlatform() != GLFW.PLATFORM_X11
+        @test_skip "needs X11"
+    else
+        run_child(mode) = begin
+            cmd = `$(Base.julia_cmd()) -t auto,1 --project=$(Base.active_project()) -e $X11_CHILD $mode`
+            out, err = IOBuffer(), IOBuffer()
+            ok = success(pipeline(ignorestatus(cmd); stdout = out, stderr = err))
+            (; ok, out = String(take!(out)), err = String(take!(err)))
+        end
+        with = run_child("with")
+        @test with.ok
+        @test occursin("QUERY failed", with.out)
+        @test occursin("IGNORED 1", with.out)
+        @test occursin("ALIVE", with.out)
+        without = run_child("without")
+        @test !without.ok
+        @test occursin("RANDR", without.err)
+        @test !occursin("ALIVE", without.out)
+    end
+end

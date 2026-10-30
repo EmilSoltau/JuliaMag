@@ -255,16 +255,17 @@ Run of 2026-10-30, same machine, median of five runs.
 | Step | Time |
 |---|---|
 | `using JuliaMagUI` | 1.87 s |
-| `main()` until its first frame is shown | 0.42 s |
+| `main()` until its first frame is shown | 0.46 s |
 | Process start until the first frame | 2.43 s |
 
-The first frame now builds the icon atlas, which adds about 0.15 s.
+The first frame now builds and uploads the icon atlas, which adds about 0.2 s.
 The total stays under the 4 s target.
 
 ## Icon atlas
 
 `bench/ui_icons.jl` times how long the icon atlas takes to build.
-The atlas holds 119 icons in 4 styles at 8 sizes, drawn with Rsvg and Cairo.
+The atlas holds 119 icons drawn with Rsvg and Cairo.
+The normal style has 8 sizes; the disabled, nav and on-accent styles have only the sizes the UI uses (3, 2 and 2).
 The window builds it at the start and again when the theme or the scale changes.
 The target is under 300 ms at scale 2.
 
@@ -274,14 +275,17 @@ Run of 2026-10-30 on the machine above, on WSLg (`DISPLAY=:0`), five runs after 
 
 | Case | Best | Median | Atlas size |
 |---|---|---|---|
-| Build, scale 1 | 111 ms | 132 ms | 4096 x 621 |
-| Build, scale 1.5 | 152 ms | 168 ms | 4096 x 1379 |
-| Build, scale 2 | 190 ms | 198 ms | 4096 x 2394 |
-| Build and upload in a window, scale 2 | 198 ms | 231 ms | 4096 x 2394 |
+| Build, scale 1 | 60 ms | 61 ms | 4096 x 325 |
+| Build, scale 1.5 | 70 ms | 97 ms | 4096 x 724 |
+| Build, scale 2 | 112 ms | 114 ms | 4096 x 1237 |
+| Build and upload in a window, scale 2 | 109 ms | 114 ms | 4096 x 1237 |
+| Build, scale 4 | 191 ms | - | 4096 x 4777 |
 
-The rebuild at scale 2 takes 231 ms, under the 300 ms target.
+The rebuild at scale 2 takes 114 ms, under the 300 ms target.
+At scale 4 the atlas is 4777 px high, well under the 8192 px texture limit of older cards.
 The window does not draw while the atlas builds, so a theme or scale change shows one slow frame.
-Almost all of the time is Rsvg drawing 3,808 small images.
+Almost all of the time is Rsvg drawing 1,785 small images.
+A first version drew every style at every size: 3,808 images, 231 ms and 2394 px high at scale 2.
 
 ### How to re-run
 

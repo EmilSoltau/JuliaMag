@@ -217,6 +217,7 @@ function draw_frame!(w::Window, @nospecialize(ui), @nospecialize(on_close),
     end
     update_scale!(w)
     update_icons!(w)
+    log_x_errors()
 
     lib.ImGui_ImplOpenGL3_NewFrame()
     lib.ImGui_ImplGlfw_NewFrame()
@@ -304,6 +305,7 @@ function open_and_run(@nospecialize(ui), title::String, size::NTuple{2,Int},
         @nospecialize(engine), tokens::Tokens, passive::Bool)
     ig.set_backend(:GlfwOpenGL3)
     handle = create_glfw_window(title, size, passive)
+    install_x_error_handler()
     ctx = Ptr{ig.lib.ImGuiContext}(C_NULL)
     glfw_ready = gl_ready = engine_started = false
     try

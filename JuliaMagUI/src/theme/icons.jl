@@ -4,6 +4,10 @@
 
 const ICON_DIR = normpath(joinpath(@__DIR__, "..", "..", "assets", "icons"))
 
+# The package recompiles when an icon file changes, is added or is removed.
+include_dependency(ICON_DIR)
+foreach(f -> endswith(f, ".svg") && include_dependency(joinpath(ICON_DIR, f)), readdir(ICON_DIR))
+
 """
     ICON_SIZES
 
@@ -22,6 +26,16 @@ How an icon is coloured:
 - `:on_accent`: on an accent fill; ink `on_accent` (white), accent `accent`.
 """
 const ICON_STYLES = (:normal, :disabled, :nav, :on_accent)
+
+"""
+    ICON_STYLE_SIZES
+
+The sizes the atlas holds for each style, as the prototype uses them:
+`:normal` at every size, `:disabled` for buttons and menus, `:nav` for the backstage
+nav (18) and its cards (48), `:on_accent` for selected rows (16) and dialog heads (22).
+Another size is drawn scaled from the next bigger size of its style.
+"""
+const ICON_STYLE_SIZES = (ICON_SIZES, (16, 18, 32), (18, 48), (16, 22))
 
 # The placeholder colour of each prototype colour variable in the SVG files.
 # tools/extract_icons.jl writes the same table.
@@ -66,15 +80,18 @@ exporter id. An unknown word gives `"tool"`.
 """
 icon_for(core_icon::AbstractString)::String = get(CORE_ICONS, core_icon, FALLBACK_ICON)
 
-# The SVG text of every icon, read once. Sorted by name.
-const ICON_SVGS = Ref{Vector{Pair{String,String}}}()
+# The SVG text of every icon, read at first use. Sorted by name.
+# `__init__` empties it, so a cache filled while precompiling is never used.
+const ICON_SVGS = Ref{Union{Nothing,Vector{Pair{String,String}}}}(nothing)
 
 function icon_svgs()::Vector{Pair{String,String}}
-    if !isassigned(ICON_SVGS)
+    svgs = ICON_SVGS[]
+    if svgs === nothing
         files = sort!(filter(f -> endswith(f, ".svg"), readdir(ICON_DIR)))
-        ICON_SVGS[] = [first(splitext(f)) => read(joinpath(ICON_DIR, f), String) for f in files]
+        svgs = [first(splitext(f)) => read(joinpath(ICON_DIR, f), String) for f in files]
+        ICON_SVGS[] = svgs
     end
-    return ICON_SVGS[]
+    return svgs
 end
 
 hex_colour(c::NTuple{4,Float32}) =
@@ -104,11 +121,12 @@ end
 """
     IconAtlas
 
-Every icon in every style at every size of `ICON_SIZES`, for one theme and one scale,
+Every icon in every style at the sizes of `ICON_STYLE_SIZES`, for one theme and one scale,
 packed into one straight RGBA image. `upload!` makes it an OpenGL texture.
 
 - `names`: icon names, sorted; `index` maps a name to its position.
-- `rects[style, size, icon]`: `(x, y, w, h)` in pixels, `w == h == px(scale, size)`.
+- `rects[style, size, icon]`: `(x, y, w, h)` in pixels, `w == h == px(scale, size)`;
+  `size` indexes `ICON_SIZES`. A size the style does not hold is all zeros.
 - `pixels`: RGBA bytes, rows from the top. Emptied by `upload!`.
 - `texture`: the OpenGL texture, or 0.
 """
@@ -129,12 +147,13 @@ const ICON_GAP = 1   # empty pixels around each icon, so linear filtering takes 
 
 # Place every icon cell in rows, biggest size first. Returns the rects and the atlas height.
 function pack_icons(n_icons::Int, scale::Float32)
-    rects = Array{NTuple{4,Int32},3}(undef, length(ICON_STYLES), length(ICON_SIZES), n_icons)
+    rects = fill(NTuple{4,Int32}((0, 0, 0, 0)), length(ICON_STYLES), length(ICON_SIZES), n_icons)
     x = y = row_h = 0
     for k in reverse(eachindex(ICON_SIZES))
         d = Int(px(scale, ICON_SIZES[k]))
         cell = d + ICON_GAP
         for s in eachindex(ICON_STYLES), i in 1:n_icons
+            ICON_SIZES[k] in ICON_STYLE_SIZES[s] || continue
             if x + cell > ICON_ATLAS_WIDTH
                 x = 0
                 y += row_h
@@ -169,6 +188,7 @@ function build_icon_atlas(tokens::Tokens, scale::Real)::IconAtlas
                 try
                     for k in eachindex(ICON_SIZES)
                         x, y, d, _ = rects[s, k, i]
+                        d == 0 && continue
                         Cairo.save(cr)
                         Cairo.translate(cr, x, y)
                         Cairo.rectangle(cr, 0, 0, d, d)
@@ -229,16 +249,21 @@ end
 unpremultiply(c::UInt32, a::UInt32)::UInt8 = min((c * 255 + a ÷ 2) ÷ a, 0xff) % UInt8
 
 """
-    upload!(atlas)
+    upload!(atlas) -> Bool
 
 Make the atlas an OpenGL texture of the current context and drop the CPU copy.
+Returns false, with an `@error`, when the card does not take it; the atlas then has no texture.
 """
-function upload!(atlas::IconAtlas)
+function upload!(atlas::IconAtlas)::Bool
     max_size = Ref{GL.GLint}(0)
     GL.glGetIntegerv(GL.GL_MAX_TEXTURE_SIZE, max_size)
-    max(atlas.width, atlas.height) <= max_size[] ||
-        error("the icon atlas at scale $(atlas.scale) is $(atlas.width) by $(atlas.height) " *
-              "pixels; this graphics card allows at most $(max_size[])")
+    if max(atlas.width, atlas.height) > max_size[]
+        @error "The icon atlas is $(atlas.width) by $(atlas.height) pixels at scale " *
+               "$(atlas.scale); this graphics card allows at most $(max_size[]). Icons are not drawn."
+        return false
+    end
+    while GL.glGetError() != GL.GL_NO_ERROR   # clear errors from earlier calls
+    end
     id = Ref{GL.GLuint}(0)
     GL.glGenTextures(1, id)
     GL.glBindTexture(GL.GL_TEXTURE_2D, id[])
@@ -251,9 +276,16 @@ function upload!(atlas::IconAtlas)
     GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGBA8, atlas.width, atlas.height, 0,
         GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, atlas.pixels)
     GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+    err = GL.glGetError()
+    if err != GL.GL_NO_ERROR
+        GL.glDeleteTextures(1, id)
+        @error "Could not upload the icon atlas ($(atlas.width) by $(atlas.height) pixels): " *
+               "OpenGL error 0x$(string(err; base = 16)). Icons are not drawn."
+        return false
+    end
     atlas.texture = id[]
     atlas.pixels = UInt8[]
-    return atlas
+    return true
 end
 
 """
@@ -272,18 +304,39 @@ end
 # The icon atlas of each ImGui context. Only the render thread uses it.
 const ICON_ATLASES = Dict{Ptr{ig.lib.ImGuiContext},IconAtlas}()
 
+# The theme and scale of the last build that failed, per context, so it is not tried each frame.
+const ICON_FAILURES = Dict{Ptr{ig.lib.ImGuiContext},Tuple{Tokens,Float32}}()
+
 """
     update_icons!(w)
 
 Build the icon atlas of the window when it has none, or when the theme or scale changed.
-The loop calls it before each frame.
+The loop calls it before each frame. The new atlas is uploaded before the old one is freed,
+so there is always a texture to draw with.
+When the build fails, it logs an `@error`, keeps the old atlas and does not try again until
+the theme or scale changes. It never throws.
 """
 function update_icons!(w)
     atlas = get(ICON_ATLASES, w.ctx, nothing)
-    atlas !== nothing && atlas.tokens == w.tokens && atlas.scale == w.scale && return nothing
+    if atlas !== nothing && atlas.tokens == w.tokens && atlas.scale == w.scale
+        delete!(ICON_FAILURES, w.ctx)   # back to a working theme: a later change tries again
+        return nothing
+    end
+    get(ICON_FAILURES, w.ctx, nothing) == (w.tokens, w.scale) && return nothing
+    new = try
+        a = build_icon_atlas(w.tokens, w.scale)
+        upload!(a) ? a : nothing
+    catch e
+        @error "Could not build the icon atlas" exception = (e, catch_backtrace())
+        nothing
+    end
+    if new === nothing
+        ICON_FAILURES[w.ctx] = (w.tokens, w.scale)
+        return nothing
+    end
+    delete!(ICON_FAILURES, w.ctx)
+    ICON_ATLASES[w.ctx] = new
     atlas === nothing || free!(atlas)
-    delete!(ICON_ATLASES, w.ctx)
-    ICON_ATLASES[w.ctx] = upload!(build_icon_atlas(w.tokens, w.scale))
     return nothing
 end
 
@@ -293,6 +346,7 @@ end
 Delete the icon texture of an ImGui context. Called when the window closes.
 """
 function forget_icons!(ctx::Ptr{ig.lib.ImGuiContext})
+    delete!(ICON_FAILURES, ctx)
     atlas = pop!(ICON_ATLASES, ctx, nothing)
     atlas === nothing || free!(atlas)
     return nothing
@@ -305,10 +359,12 @@ function icon_index(atlas::IconAtlas, name::AbstractString)::Int
     return atlas.index[ICON_ALIASES[FALLBACK_ICON]]
 end
 
-# The atlas size to draw a `size` icon from: that size, else the next bigger, else the biggest.
-function icon_size_index(size::Integer)::Int
-    k = findfirst(>=(size), ICON_SIZES)
-    return k === nothing ? length(ICON_SIZES) : k
+# The atlas size to draw a `size` icon of style `s` from, as an index of `ICON_SIZES`:
+# that size, else the next bigger of the style, else the style's biggest.
+function icon_size_index(s::Int, size::Integer)::Int
+    sizes = ICON_STYLE_SIZES[s]
+    j = findfirst(>=(size), sizes)
+    return findfirst(==(sizes[j === nothing ? lastindex(sizes) : j]), ICON_SIZES)::Int
 end
 
 """
@@ -316,14 +372,16 @@ end
 
 Draw icon `name` at `pos` (device pixels, top left) on the draw list `dl`,
 `size` logical pixels wide. See `ICON_STYLES` for `style`.
-An unknown name draws the icon `tool`. A size not in `ICON_SIZES` is drawn scaled from
-the next bigger one.
+An unknown name draws the icon `tool`. A size the style does not hold (see
+`ICON_STYLE_SIZES`) is drawn scaled from the next bigger one.
+Without an icon atlas (its upload failed) it draws nothing.
 """
 function draw_icon(dl, name::AbstractString, pos, size::Integer; style::Symbol = :normal)
-    atlas = ICON_ATLASES[ig.GetCurrentContext()]
     s = findfirst(==(style), ICON_STYLES)
     s === nothing && throw(ArgumentError("icon style must be one of $(ICON_STYLES), got :$style"))
-    x, y, w, h = atlas.rects[s, icon_size_index(size), icon_index(atlas, name)]
+    atlas = get(ICON_ATLASES, ig.GetCurrentContext(), nothing)
+    atlas === nothing && return nothing
+    x, y, w, h = atlas.rects[s, icon_size_index(s, size), icon_index(atlas, name)]
     d = px(atlas.scale, size)
     p = pos isa ig.ImVec2 ? (pos.x, pos.y) : pos
     x0, y0 = round(Float32(p[1])), round(Float32(p[2]))

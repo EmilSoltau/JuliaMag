@@ -1,4 +1,5 @@
 using Test
+using Base.CoreLogging: with_logger, NullLogger   # Logging is not a test dependency
 import CImGui as ig
 import PNGFiles
 import ModernGL as GL
@@ -78,14 +79,63 @@ window_testset("harness") do
             state = Ref{Any}(nothing)
             ctx.on_render(w -> begin
                 atlas = ICON_ATLASES[w.ctx]
-                state[] = (; tokens = atlas.tokens, texture = atlas.texture,
+                state[] = (; tokens = atlas.tokens, old = old[], texture = atlas.texture,
                     old_alive = GL.glIsTexture(old[]) == GL.GL_TRUE)
             end)
             state[]
         end
         @test result.tokens == DARK
-        @test result.texture != 0
+        # The new atlas is uploaded before the old one is freed, so the names differ.
+        @test result.texture != result.old
         @test !result.old_alive
+    end
+
+    @testset "a failed icon build keeps the old atlas and the app running" begin
+        result = with_test_app(; theme = THEME_LIGHT) do ctx
+            state = Ref{Any}(nothing)
+            ctx.on_render(w -> begin
+                old = ICON_ATLASES[w.ctx].texture
+                UI.ICON_SVGS[] = ["broken" => "<svg"]   # Rsvg cannot read this
+                UI.set_theme!(w, DARK)
+                with_logger(NullLogger()) do
+                    UI.update_icons!(w)
+                end
+                state[] = (; old, failed = get(UI.ICON_FAILURES, w.ctx, nothing))
+            end)
+            ctx.frames(3)   # the loop does not try again, so it logs nothing more
+            ctx.on_render(w -> begin
+                atlas = ICON_ATLASES[w.ctx]
+                state[] = (; state[]..., texture = atlas.texture, tokens = atlas.tokens)
+                # Back to working icons: the next build succeeds.
+                UI.ICON_SVGS[] = nothing
+                UI.set_theme!(w, LIGHT)
+            end)
+            ctx.frames(1)
+            ctx.on_render(w -> (state[] = (; state[]...,
+                after = haskey(UI.ICON_FAILURES, w.ctx))))
+            # The theme that failed builds once the icons are readable again.
+            ctx.on_render(w -> UI.set_theme!(w, DARK))
+            ctx.frames(1)
+            ctx.on_render(w -> (state[] = (; state[]..., retried = ICON_ATLASES[w.ctx].tokens)))
+            state[]
+        end
+        @test result.failed == (DARK, 1f0)
+        @test result.texture == result.old && result.tokens == LIGHT
+        @test !result.after
+        @test result.retried == DARK
+    end
+
+    @testset "the overall timeout ends a test that hangs" begin
+        t0 = time()
+        err = try
+            with_test_app(ctx -> ctx.wait_until(() -> false; timeout = 60); timeout = 2)
+            nothing
+        catch e
+            e
+        end
+        @test err isa CapturedException && err.ex isa TestTimeout
+        @test time() - t0 < 30
+        @test isempty(ICON_ATLASES)
     end
 
     @testset "errors in the test function reach the caller" begin
