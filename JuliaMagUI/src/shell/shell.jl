@@ -61,14 +61,15 @@ const PEEK_FLAGS = ig.ImGuiWindowFlags_NoDecoration | ig.ImGuiWindowFlags_NoMove
     draw_app(app)
 
 Draw one frame of the app: the shell, then the dialogs, the ribbon peek, the open menu,
-the toasts and the tooltip. It handles the requests of the last frame first and the
-shortcuts last.
+the toasts and the tooltip. It handles the requests of the last frame first, then makes
+the toasts of jobs that ended (`watch_jobs!`), and the shortcuts last.
 Call it on the render thread once per frame, after `drain!` and `refresh!`.
 """
 function draw_app(app)
     w = app.window::Window
     ui = app.ui
     handle_requests!(app)
+    watch_jobs!(app)
     prune_toasts!(app)
     sync_current_db!(app)
     begin_menu_frame!(app)

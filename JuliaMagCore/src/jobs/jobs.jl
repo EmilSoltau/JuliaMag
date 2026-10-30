@@ -77,7 +77,7 @@ function start_job!(s::Session, command::AbstractString, args::AbstractDict, wor
     lock(s.jobs_lock) do
         check_open(s)
         job = Job(reserve_job_id!(s), String(command), a, Threads.Atomic{Int}(Int(JOB_RUNNING)),
-                  Threads.Atomic{Float64}(0.0), Threads.Atomic{Bool}(false), now_text(), "",
+                  Threads.Atomic{Float64}(0.0), Threads.Atomic{Bool}(false), job_time_text(), "",
                   JobReport(), String[], String[], "", nothing)
         push!(s.jobs, job)
         save_job_quietly(s, job)
@@ -241,7 +241,7 @@ function finish_locked!(s::Session, job::Job, items::Vector{ProjectItem}, before
     old_status = replaces === nothing ? JOB_DONE : status(replaces)
     job.outputs = String[it.id for it in new]
     job.progress[] = 1.0
-    job.finished = now_text()
+    job.finished = job_time_text()
     set_status!(job, JOB_DONE)
     save_job_quietly(s, job)
     bump!(s)
@@ -430,7 +430,7 @@ function fail_job!(s::Session, job::Job, e, ctx::JobContext)
     end
     job.error = cancel_error ? "the job was cancelled" :
                 cancelled ? "the job was cancelled: " * first(msg, 10_000) : first(msg, 10_000)
-    job.finished = now_text()
+    job.finished = job_time_text()
     set_status!(job, cancelled ? JOB_CANCELLED : JOB_FAILED)
     quietly(() -> save_job_quietly(s, job))
     bump!(s)

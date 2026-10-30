@@ -19,7 +19,8 @@
             spec = Core.find_tool("database.statistics")
             spec === nothing || push_dialog!(app, ToolDialog(app,
                 build_form(app, spec, Core.default_settings(spec), nothing)))
-            for _ in 1:2
+            for k in 1:3
+                k == 3 && (app.ui.left_tab = :jobs)   # the Jobs tab too
                 ig.NewFrame()
                 AppFrame(app, nothing)(w)
                 ig.Render()

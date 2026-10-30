@@ -312,3 +312,89 @@ function small_xyz(name::AbstractString = "small.xyz")
     write_synthetic_xyz(path; lines = 2, ties = 0, rows_per_line = 20)
     return path
 end
+
+"""
+    gate_tool(gate = nothing; id = "test.gate", name = "Gate") -> ToolSpec
+
+A test job tool of `steps` steps (a setting, 10 by default). It reports progress after
+each step and writes "Step k of n" to its report. At the end it imports a small XYZ file
+as the database "<name> output" and returns it, so the job makes one item.
+
+- Without `gate` each step takes 0.3 s, so the job takes about 3 s.
+- With a `Channel{Int}` gate the job waits for the test: `put!(gate, k)` lets it run up
+  to step `k`. So a test sets the progress itself and never depends on timing.
+
+It checks for cancel between steps and while it waits.
+"""
+function gate_tool(gate::Union{Nothing,Channel{Int}} = nothing; id::AbstractString = "test.gate",
+        name::AbstractString = "Gate")
+    xyz = small_xyz("gate.xyz")
+    run = (s, ins, st, progress, report) -> begin
+        n = Int(st["steps"])
+        k = 0
+        while k < n
+            target = gate === nothing ? k + 1 : min(next_gate(gate, progress), n)
+            for j in k+1:target
+                gate === nothing && sleep(0.3)
+                Core.is_cancelled(progress) && throw(Core.JobCancelled())
+                Core.report(progress, j / n)
+                println(report, "Step $j of $n")
+            end
+            k = max(k, target)
+        end
+        r = Core.import_xyz(s, xyz; name = "$name output", record = false)
+        return Core.ProjectItem[something(r.item)]
+    end
+    return Core.ToolSpec(id, name, "A test job that steps when the test says.", "clock", Core.Place[],
+        Pair{String,Core.ItemKind}[], Core.SettingSpec[Core.NumberSetting("steps", "Steps"; default = 10, min = 1)],
+        :job, run)
+end
+
+# The next step a gated job may run to. Waits for the test; stops on cancel.
+function next_gate(gate::Channel{Int}, progress)
+    deadline = time() + 30
+    while !isready(gate)
+        Core.is_cancelled(progress) && throw(Core.JobCancelled())
+        time() > deadline && error("gate_tool: the test gave no step within 30 s")
+        sleep(0.005)
+    end
+    return take!(gate)
+end
+
+"""
+    fail_tool(; id = "test.fail", name = "Fail") -> ToolSpec
+
+A test job tool that writes a report line, adds the warning "check the input file" and
+then fails with "the input file is bad".
+"""
+fail_tool(; id::AbstractString = "test.fail", name::AbstractString = "Fail") =
+    Core.ToolSpec(id, name, "A test job that fails.", "error", Core.Place[], Pair{String,Core.ItemKind}[],
+        Core.SettingSpec[], :job, (s, ins, st, progress, report) -> begin
+            println(report, "Reading the input file")
+            Core.report(progress, 0.25)
+            Core.job_warning!("check the input file")
+            throw(Core.ToolError("the input file is bad"))
+        end)
+
+"""
+    fake_job_row(; kwargs...) -> JobRow
+
+A `JobRow` for logic tests, with a `Core.Job` of its own (no session, no task).
+`progress` sets the job's live progress; `status` its live status.
+"""
+function fake_job_row(; id::AbstractString = "job-1", command::AbstractString = "test.tool",
+        kind::Symbol = :tool, title::AbstractString = "Test Tool",
+        args::AbstractDict = Dict{String,Any}(), names::AbstractDict = Dict{String,String}(),
+        expression::AbstractString = "", started::AbstractString = "2026-10-30T10:43:02.100+1000",
+        finished::AbstractString = "2026-10-30T10:43:04.200+1000", status::Core.JobStatus = Core.JOB_DONE,
+        error::AbstractString = "", outputs::Vector{String} = String[], warnings::Vector{String} = String[],
+        progress::Real = status == Core.JOB_RUNNING ? 0.0 : 1.0)
+    a = Dict{String,Any}(String(k) => v for (k, v) in args)
+    job = Core.Job(String(id), String(command), a, Threads.Atomic{Int}(Int(status)),
+        Threads.Atomic{Float64}(Float64(progress)), Threads.Atomic{Bool}(false), String(started),
+        status == Core.JOB_RUNNING ? "" : String(finished), Core.JobReport(), copy(warnings), copy(outputs),
+        String(error), nothing)
+    return UI.JobRow(job, String(id), String(command), kind, String(title), copy(a),
+        Dict{String,String}(String(k) => String(v) for (k, v) in names), String(expression), job.started,
+        job.finished, status, String(error), copy(outputs), copy(warnings))
+end

@@ -309,34 +309,38 @@ function hit(id::AbstractString, b::Box; flags::Integer = 0, overlap::Bool = fal
 end
 
 """
-    button_width(app, label; primary = false, small = false) -> Float32
+    button_width(app, label; primary = false, small = false, link = false) -> Float32
 
 The width of `button` for `label`, in device pixels.
 """
-function button_width(app, label::AbstractString; primary::Bool = false, small::Bool = false)
+function button_width(app, label::AbstractString; primary::Bool = false, small::Bool = false,
+        link::Bool = false)
     s = app.window.scale
     size = small ? 11.5 : BODY_FONT_SIZE
     role = primary ? FONT_SEMIBOLD : FONT_REGULAR
-    return text_width(role, size, label) + px(s, small ? 16 : 24) + 2 * hairline(s)
+    pad = link ? 12 : small ? 16 : 24   # `.btn.link` has padding 0 6
+    return text_width(role, size, label) + px(s, pad) + 2 * hairline(s)
 end
 
 """
-    button(app, id, label, x, y; primary = false, small = false, enabled = true, busy = false,
-           alpha = 1, dl = window draw list) -> Bool
+    button(app, id, label, x, y; primary = false, small = false, link = false, enabled = true,
+           busy = false, alpha = 1, dl = window draw list) -> Bool
 
 A prototype `.btn` at `(x, y)`: 26 high (22 when `small`), radius 6 (5), 1 px
 `input_border` on `input`; `hover` and `border_strong` on hover, `pressed` when held.
 A `primary` button is `accent` with semibold `on_accent` text; it is lighter on hover and
-half transparent when disabled. A `busy` button keeps its width, shows a spinner in place
-of its label and takes no clicks. Returns true when clicked while enabled.
+half transparent when disabled. A `link` button (`.btn.link`) has no frame and no fill,
+`accent_text` text and 6 px padding; it shows `hover` (`pressed` when held) under the mouse.
+A `busy` button keeps its width, shows a spinner in place of its label and takes no clicks.
+Returns true when clicked while enabled.
 """
 function button(app, id::AbstractString, label::AbstractString, x::Real, y::Real;
-        primary::Bool = false, small::Bool = false, enabled::Bool = true, busy::Bool = false,
-        alpha::Real = 1, dl = ig.GetWindowDrawList())::Bool
+        primary::Bool = false, small::Bool = false, link::Bool = false, enabled::Bool = true,
+        busy::Bool = false, alpha::Real = 1, dl = ig.GetWindowDrawList())::Bool
     w = app.window::Window
     t = app.tokens
     s = w.scale
-    bw = button_width(app, label; primary, small)
+    bw = button_width(app, label; primary, small, link)
     b = Box(round(Float32(x)), round(Float32(y)), round(Float32(x)) + round(bw),
         round(Float32(y)) + px(s, small ? 22 : 26))
     clicked, hovered, held = hit(id, b)
@@ -347,6 +351,8 @@ function button(app, id::AbstractString, label::AbstractString, x::Real, y::Real
     if primary
         fill = on ? brighter(t.accent, 1.08f0) : t.accent
         ig.AddRectFilled(dl, (b.x0, b.y0), (b.x1, b.y1), u32(fill, a), radius)
+    elseif link
+        on && ig.AddRectFilled(dl, (b.x0, b.y0), (b.x1, b.y1), u32(held ? t.pressed : t.hover, a), radius)
     else
         fill = on && held ? t.pressed : on ? t.hover : t.input
         ig.AddRectFilled(dl, (b.x0, b.y0), (b.x1, b.y1), u32(fill, a), radius)
@@ -355,7 +361,7 @@ function button(app, id::AbstractString, label::AbstractString, x::Real, y::Real
     end
     size = small ? 11.5 : BODY_FONT_SIZE
     role = primary ? FONT_SEMIBOLD : FONT_REGULAR
-    col = primary ? t.on_accent : enabled ? t.text : t.text_disabled
+    col = primary ? t.on_accent : !enabled ? t.text_disabled : link ? t.accent_text : t.text
     if busy
         draw_spinner(app, dl, (b.x0 + b.x1) / 2, centre_y(b); col = primary ? t.on_accent : t.accent)
         request_frames!(w)   # the spinner turns

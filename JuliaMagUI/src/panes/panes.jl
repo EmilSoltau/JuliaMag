@@ -1,6 +1,6 @@
 # The side panes: their widths, the left pane frame with its header band of text tabs,
-# and the splitters that resize them. The Data tab body is in data.jl; the Jobs tab body
-# and the right pane come in later tasks.
+# and the splitters that resize them. The Data tab body is in data.jl, the Jobs tab body
+# in jobs.jl; the right pane comes in a later task.
 
 # Sizes in logical pixels (prototype CSS).
 const PANE_HEAD_H = 34
@@ -195,7 +195,7 @@ function draw_left_pane(app, dl, b::Box)::Bool
         x = tab.x1 + p(2)
     end
     body = Box(b.x0, head.y1, b.x1 - hl, b.y1)
-    app.ui.left_tab === :data && draw_data_tab(app, dl, body)
+    app.ui.left_tab === :data ? draw_data_tab(app, dl, body) : draw_jobs_tab(app, dl, body)
     ig.PopID()
     return hot
 end

@@ -39,6 +39,7 @@ include("dialogs/item_dialogs.jl")
 include("dialogs/form.jl")
 include("dialogs/widgets.jl")
 include("dialogs/tool_dialog.jl")
+include("panes/jobs.jl")
 
 """
     main(; project = nothing, config_dir = config_dir(), extra_ui = nothing, on_app = nothing,

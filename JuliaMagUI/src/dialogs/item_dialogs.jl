@@ -279,36 +279,62 @@ end
 
 """
     ResultDialog(title, text)
+    ResultDialog(title, lines, kinds; boxed = true)
 
-The report of a quick tool: `text` in the mono font, with Copy and Close. The text is
-split into `lines` once; the dialog draws only the lines in view, and long lines scroll
-sideways.
+A report in the mono font, with Copy and Close: the result of a quick tool (`text`, mono 12
+on lines 1.4 high), or a job's report (`lines`, each with a kind, in the prototype's `.desc`
+box). The dialog draws only the lines in view, and long lines scroll sideways.
+
+- `kinds`: the colour of each line: `:text`, `:dim` (a heading), `:warn` (`amber`) or
+  `:error` (`red`).
+- `boxed`: the `.desc` box: `pane_header` fill, 1 px `border`, radius 6, padding 8 10,
+  mono 11.5 on lines 1.45 high, at most 340 px high.
+- `text`: what Copy puts on the clipboard: the lines, one per line.
 """
 struct ResultDialog
     title::String
     text::String
     lines::Vector{String}
+    kinds::Vector{Symbol}
+    boxed::Bool
     "The widest line in device px and the scale it was measured at (measured once)."
     widest::Base.RefValue{Tuple{Float32,Float32}}
 end
 
-ResultDialog(title::AbstractString, text::AbstractString) =
-    ResultDialog(String(title), String(text), String.(split(text, '\n')), Ref((0f0, 0f0)))
+function ResultDialog(title::AbstractString, text::AbstractString)
+    lines = String.(split(text, '\n'))
+    return ResultDialog(String(title), String(text), lines, fill(:text, length(lines)), false, Ref((0f0, 0f0)))
+end
+
+function ResultDialog(title::AbstractString, lines::Vector{String}, kinds::Vector{Symbol}; boxed::Bool = true)
+    length(kinds) == length(lines) || throw(ArgumentError("a ResultDialog needs one kind per line"))
+    return ResultDialog(String(title), join(lines, '\n'), copy(lines), copy(kinds), boxed, Ref((0f0, 0f0)))
+end
 
 const RESULT_MAX_H = 360   # the text scrolls past this height
 const RESULT_LINE = 1.4    # line height, times the 12 px mono font
+const REPORT_MAX_H = 340   # the `.desc` box of a job report, padding and border included
+
+# The mono font size and line height of the dialog's text.
+result_font(d::ResultDialog) = d.boxed ? (11.5, 1.45) : (12, RESULT_LINE)
 
 function widest_line(d::ResultDialog, scale::Float32)::Float32
     w, at = d.widest[]
     at == scale && return w
-    w = maximum(l -> text_width(FONT_MONO, 12, l), d.lines; init = 0f0)
+    size = first(result_font(d))
+    w = maximum(l -> text_width(FONT_MONO, size, l), d.lines; init = 0f0)
     d.widest[] = (w, scale)
     return w
 end
 
+line_colour(t::Tokens, kind::Symbol) =
+    kind === :dim ? t.text_dim : kind === :warn ? t.amber : kind === :error ? t.red : t.text
+
 function draw_modal(app, d::ResultDialog)
     s = app.window.scale
-    line_h = fpx(s, 12 * RESULT_LINE)
+    t = app.tokens
+    size, lh = result_font(d)
+    line_h = fpx(s, size * lh)
     n = length(d.lines)
     copy = () -> begin
         pos = ig.GetCursorScreenPos()
@@ -320,19 +346,35 @@ function draw_modal(app, d::ResultDialog)
     draw_dialog(app, d; title = d.title, icon = "report", width = 640, ok_label = "Close",
         cancel_label = nothing, footer_left = copy, on_ok = () -> filter!(x -> x !== d, app.ui.dialogs)) do
         w = Float32(ig.CalcItemWidth())
-        wide = widest_line(d, s) > w
+        pos = ig.GetCursorScreenPos()
+        hl = hairline(s)
+        pad_x, pad_y = d.boxed ? (hl + fpx(s, 10), hl + fpx(s, 8)) : (0f0, 0f0)
+        inner_w = w - 2 * pad_x
+        wide = widest_line(d, s) > inner_w
         bar = wide ? fpx(s, 10) : 0f0   # room for the sideways scrollbar
-        h = min(n * line_h, fpx(s, RESULT_MAX_H)) + bar
-        ig.BeginChild("report", (w, h), 0, ig.ImGuiWindowFlags_NoBackground | ig.ImGuiWindowFlags_HorizontalScrollbar)
+        max_h = d.boxed ? fpx(s, REPORT_MAX_H) - 2 * pad_y : fpx(s, RESULT_MAX_H)
+        h = min(n * line_h, max_h) + bar
+        total = h + 2 * pad_y
+        if d.boxed
+            dl = ig.GetWindowDrawList()
+            box = snap(Box(pos.x, pos.y, pos.x + w, pos.y + total))
+            ig.AddRectFilled(dl, (box.x0, box.y0), (box.x1, box.y1), u32(t.pane_header), fpx(s, 6))
+            ig.AddRect(dl, (box.x0, box.y0), (box.x1, box.y1), u32(t.border), fpx(s, 6), hl)
+            ig.SetCursorScreenPos((pos.x + pad_x, pos.y + pad_y))
+        end
+        ig.BeginChild("report", (inner_w, h), 0, ig.ImGuiWindowFlags_NoBackground | ig.ImGuiWindowFlags_HorizontalScrollbar)
         dl = ig.GetWindowDrawList()
-        pos = ig.GetCursorScreenPos()   # the content's top left, scrolled
-        view_h = h - bar
-        for k in visible_rows(n, line_h, ig.GetScrollY(), view_h)
-            draw_text_mid(dl, FONT_MONO, 12, pos.x, pos.y + (k - 0.5f0) * line_h, u32(app.tokens.text),
-                d.lines[k]; line = RESULT_LINE)
+        top = ig.GetCursorScreenPos()   # the content's top left, scrolled
+        for k in visible_rows(n, line_h, ig.GetScrollY(), h - bar)
+            draw_text_mid(dl, FONT_MONO, size, top.x, top.y + (k - 0.5f0) * line_h,
+                u32(line_colour(t, d.kinds[k])), d.lines[k]; line = lh)
         end
         ig.Dummy((max(widest_line(d, s), 1f0), n * line_h))
         ig.EndChild()
+        if d.boxed   # the body holds the whole box, padding included
+            ig.SetCursorScreenPos((pos.x, pos.y))
+            ig.Dummy((w, total))
+        end
     end
     return nothing
 end

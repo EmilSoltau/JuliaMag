@@ -478,6 +478,19 @@ end
 now_text() = Libc.strftime("%Y-%m-%dT%H:%M:%S%z", time())
 
 """
+    job_time_text(t = time())
+
+`now_text` with milliseconds, such as `"2026-10-30T10:43:02.123+1000"`. Jobs record their
+start and end with it, so a short job can show how long it took.
+"""
+function job_time_text(t::Real = time())::String
+    whole = floor(t)
+    ms = min(floor(Int, (t - whole) * 1000), 999)
+    return string(Libc.strftime("%Y-%m-%dT%H:%M:%S", whole), ".", lpad(ms, 3, '0'),
+        Libc.strftime("%z", whole))
+end
+
+"""
     record!(s, command, args; job = "", outputs = String[], replaces = "", replaced = String[])
 
 Add an entry to the history and append it to `jobs/history.jsonl`.

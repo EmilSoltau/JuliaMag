@@ -86,19 +86,28 @@ GridView(id::String, error::String) =
     GridView(id, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, "", "", "", NaN, NaN, 0, error)
 
 """
-A job of the session.
+A job of the session, as the Jobs tab shows it.
 
-`status` is the status at snapshot time; a job card reads the live `Core.status(job)`
-and `job.progress[]`. `error` and `outputs` are empty while the job runs.
-`title` is the name of the tool, importer or exporter; `target` names what the job
-works on: an item name or a file name, or `\"\"`.
+- `status` is the status at snapshot time. A job card reads the live `Core.status(job)` and
+  `job.progress[]` for its bar. `error`, `outputs` and `finished` are empty while it runs.
+- `kind`: `:import`, `:export`, `:tool` (a job tool), or `:other` (a command no registry knows).
+- `title`: the tool, importer or exporter name in title case, such as "Import Geosoft XYZ";
+  the command id when no registry knows it.
+- `args`: a copy of the job's args (the settings it ran with).
+- `names`: the item names of the project by id, to name the job's items and outputs.
+  Every row of a snapshot shares it.
+- `expression`: the value of the tool's expression setting (Channel Math), or `""`.
+- `started`, `finished`: times such as `"2026-10-30T10:43:02.123+1000"`.
 """
 struct JobRow
     job::Core.Job
     id::String
     command::String
+    kind::Symbol
     title::String
-    target::String
+    args::Dict{String,Any}
+    names::Dict{String,String}
+    expression::String
     started::String
     finished::String
     status::Core.JobStatus
@@ -172,7 +181,7 @@ function snapshot(s::Core.Session)::Snapshot
             isempty(s.undo_stack) ? nothing : last(s.undo_stack).label,
             isempty(s.redo_stack) ? nothing : last(s.redo_stack).label,
             c === nothing ? nothing : Core.Cursor(c.item, c.line, c.row),
-            s.marked, Core.jobs(s))
+            s.marked, [(j, deepcopy(j.args)) for j in Core.jobs(s)])
     end
     warns = Core.warnings(s)
 
@@ -190,8 +199,8 @@ function snapshot(s::Core.Session)::Snapshot
         end
     end
     names = Dict{String,String}(it.id => it.name for it in items)
-    titles = command_titles()
-    job_rows = JobRow[job_row(j, titles, names) for j in jobs]
+    infos = command_infos()
+    job_rows = JobRow[job_row(j, args, infos, names) for (j, args) in jobs]
     return Snapshot(rev, name, p.folder, rows, databases, grids, job_rows, undo_label,
         redo_label, warns, cursor, marked, crs_infos(databases, grids))
 end
@@ -280,41 +289,41 @@ function grid_view(p::Core.Project, it::Core.ProjectItem, gone::Bool, relock::Fu
         string(g.eltype), g.vmin, g.vmax, g.count, "")
 end
 
-# The names of every tool, importer and exporter, by id.
-function command_titles()::Dict{String,String}
-    titles = Dict{String,String}()
+"""
+What a snapshot needs to know of a command: its title, its kind (see `JobRow`) and the
+key of its expression setting, or `""`.
+"""
+struct CommandInfo
+    title::String
+    kind::Symbol
+    expression::String
+end
+
+# The title and kind of every tool, importer and exporter, by id.
+function command_infos()::Dict{String,CommandInfo}
+    infos = Dict{String,CommandInfo}()
     for t in Core.tools()
-        titles[t.id] = t.name
+        k = findfirst(st -> st isa Core.ExprSetting, t.settings)
+        infos[t.id] = CommandInfo(owner_title(t), :tool, k === nothing ? "" : t.settings[k].key)
     end
     for i in Core.importers()
-        titles[i.id] = i.name
+        infos[i.id] = CommandInfo(owner_title(i), :import, "")
     end
     for e in Core.exporters()
-        titles[e.id] = e.name
+        infos[e.id] = CommandInfo(owner_title(e), :export, "")
     end
-    return titles
+    return infos
 end
 
-# What a job works on: its item, else its first input item, else its file.
-function job_target(args::AbstractDict, names::Dict{String,String})::String
-    id = get(args, "item", nothing)
-    id isa AbstractString && return get(names, id, String(id))
-    inputs = get(args, "inputs", nothing)
-    if inputs isa AbstractDict && !isempty(inputs)
-        id = inputs[minimum(keys(inputs))]
-        id isa AbstractString && return get(names, id, String(id))
-    end
-    path = get(args, "path", nothing)
-    path isa AbstractString && return basename(path)
-    return ""
-end
-
-function job_row(j::Core.Job, titles::Dict{String,String}, names::Dict{String,String})::JobRow
+function job_row(j::Core.Job, args::Dict{String,Any}, infos::Dict{String,CommandInfo},
+        names::Dict{String,String})::JobRow
     st = Core.status(j)
     running = st == Core.JOB_RUNNING
+    info = get(infos, j.command, CommandInfo(j.command, :other, ""))
+    e = isempty(info.expression) ? nothing : get(args, info.expression, nothing)
     # `error`, `outputs` and `finished` are written once, before the status leaves running.
-    return JobRow(j, j.id, j.command, get(titles, j.command, j.command),
-        job_target(j.args, names), j.started, running ? "" : j.finished, st,
+    return JobRow(j, j.id, j.command, info.kind, info.title, args, names,
+        e isa AbstractString ? String(e) : "", j.started, running ? "" : j.finished, st,
         running ? "" : j.error, running ? String[] : copy(j.outputs), Core.job_warnings(j))
 end
 
@@ -362,6 +371,13 @@ What the UI shows and where, apart from the project data. Changed on the render 
   see modal.jl).
 - `opening`: the ids of tools, importers and exporters whose dialog the worker is
   preparing; a second open of one waits for the first.
+- `jobs_scroll`: how far the Jobs tab is scrolled, in device pixels; `jobs_cache`: its card
+  layout for the last key (a `JobsLayout`, see jobs.jl).
+- `job_bars`: where the progress bar of each running job was drawn in the last frame
+  (tests read it).
+- `jobs_seen`: the status of each job when a snapshot last showed it, so a job that leaves
+  running gets one toast; `nothing` until the first snapshot of the project.
+  `jobs_watched`: the snapshot that `watch_jobs!` looked at last.
 """
 Base.@kwdef mutable struct UiState
     tab::String = "Database"
@@ -400,6 +416,11 @@ Base.@kwdef mutable struct UiState
     jobs_shown::Bool = false
     dialog_places::Vector{Any} = Any[]
     opening::Set{String} = Set{String}()
+    jobs_scroll::Float32 = 0f0
+    jobs_cache::Any = nothing
+    job_bars::Dict{String,Box} = Dict{String,Box}()
+    jobs_seen::Union{Nothing,Dict{String,Core.JobStatus}} = nothing
+    jobs_watched::Any = nothing
 end
 
 """
@@ -476,8 +497,10 @@ Make `s` (a session or `nothing`) the app's project. This is the only way to cha
 `app.session`. It drops everything that belongs to the old project: the snapshot (a
 build of the old session that comes back later is dropped too), the count of shown
 warnings, a failed build, the Data tree's current database, selection, expanded
-nodes, filter, scroll and cached rows, the open dialogs and menu, the requests not handled yet (they were
-made for the old project), and whether a job has shown the Jobs pane. Call it on the render thread. It does not close the old session.
+nodes, filter, scroll and cached rows, the open dialogs and menu, the requests not
+handled yet (they were made for the old project), whether a job has shown the Jobs pane,
+and what the Jobs tab knew of the old jobs (so the new project's finished jobs make no
+toasts). Call it on the render thread. It does not close the old session.
 """
 function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     app.session = s
@@ -502,5 +525,10 @@ function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     ui.menu = nothing
     ui.jobs_shown = false
     empty!(ui.opening)
+    ui.jobs_scroll = 0f0
+    ui.jobs_cache = nothing
+    empty!(ui.job_bars)
+    ui.jobs_seen = nothing
+    ui.jobs_watched = nothing
     return nothing
 end

@@ -420,7 +420,8 @@ function made_by_text(snap::Snapshot, job_id::AbstractString)
     k = findfirst(j -> j.id == job_id, snap.jobs)
     k === nothing && return String(job_id)
     j = snap.jobs[k]
-    return isempty(j.target) ? string(j.title, " (", j.id, ")") : string(j.title, ", ", j.target, " (", j.id, ")")
+    target = job_target(j)
+    return isempty(target) ? string(job_title(j), " (", j.id, ")") : string(job_title(j), ", ", target, " (", j.id, ")")
 end
 
 function grid_properties(snap::Snapshot, it::ItemRow, g::GridView)

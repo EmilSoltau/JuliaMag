@@ -20,11 +20,13 @@ include("support/state.jl")
     include("test_ribbon.jl")
     include("test_data_tree.jl")
     include("test_form.jl")
+    include("test_jobs_view.jl")
     include("window/test_harness.jl")
     include("window/test_shell.jl")
     include("window/test_ribbon.jl")
     include("window/test_data.jl")
     include("window/test_dialogs.jl")
+    include("window/test_jobs.jl")
 end
 
 end

@@ -107,7 +107,8 @@ end
     draw_tool_body(app, d)
 
 The body: the help paragraph, the status line, the inputs and main settings, the file of
-an import or export, "Replace the old output" for a run again, the Advanced section and
+an import or export, "Replace the old output" for a run again of a job that made items
+(`offers_replace`), the Advanced section and
 the Tool Description box. Settings whose `when` is not met are left out.
 """
 function draw_tool_body(app, d::ToolDialog)
@@ -158,7 +159,7 @@ function draw_tool_body(app, d::ToolDialog)
     for st in list
         st.advanced || !Core.is_active(list, st, f.values) || draw_setting!(app, d, g, st)
     end
-    if f.rerun_of !== nothing && !(o isa Core.ExporterSpec)
+    if offers_replace(app, f)
         bool_row!(app, d, g, "replace", "Replace the old output", f.replace) && (f.replace = !f.replace)
         hint!(app, d, g, "replace", "Off: the run makes a new item, and the old one stays.")
     end

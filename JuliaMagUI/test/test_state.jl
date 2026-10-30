@@ -126,10 +126,10 @@ using JuliaMagUI: snapshot, Snapshot, AppState, UiState, set_session!
             snap = snapshot(s)
             @test [j.id for j in snap.jobs] == [failed.id, job.id]   # newest first
             done, bad = snap.jobs[2], snap.jobs[1]
-            @test done.job === job && done.status == Core.JOB_DONE && done.target == "Survey"
+            @test done.job === job && done.status == Core.JOB_DONE && UI.job_target(done) == "Survey"
             @test done.title == "test.snapshot_job" && done.finished != "" && done.error == ""
             @test bad.status == Core.JOB_FAILED && occursin("the file is bad", bad.error)
-            @test bad.target == "data.xyz"
+            @test UI.job_target(bad) == "data.xyz" && bad.kind == :other
         end
     end
 
