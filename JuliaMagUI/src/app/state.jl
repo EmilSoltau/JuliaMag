@@ -141,6 +141,11 @@ Copy what the UI shows of session `s`. Call it off the render thread.
 It holds `s.lock` (and inside it `s.jobs_lock`, in the core's lock order) only while it
 copies lists. It opens each database and grid after the locks are released, once each.
 A missing or broken item gives `missing = true` or an `error` text; it never throws.
+
+An open that fails is tried once more while holding `s.lock`. Session edits that move an
+item's files (renaming or deleting a channel, and their undo) hold `s.lock`, so a read
+in the middle of one is not shown as an error. Appends cannot cause such a failure: the
+core writes the rows before `database.json` names them.
 """
 function snapshot(s::Core.Session)::Snapshot
     rev = Core.revision(s)   # first, so a change during the build is seen as new
@@ -156,6 +161,7 @@ function snapshot(s::Core.Session)::Snapshot
     end
     warns = Core.warnings(s)
 
+    relock = f -> lock(f, s.lock)
     rows = ItemRow[]
     databases = Dict{String,DatabaseView}()
     grids = Dict{String,GridView}()
@@ -163,9 +169,9 @@ function snapshot(s::Core.Session)::Snapshot
         gone = Core.item_missing(p, it)
         push!(rows, ItemRow(it.id, it.kind, it.name, gone, it.made_by, get(busy, it.id, "")))
         if it.kind == Core.ITEM_DATABASE
-            databases[it.id] = database_view(p, it, gone)
+            databases[it.id] = database_view(p, it, gone, relock)
         elseif it.kind == Core.ITEM_GRID
-            grids[it.id] = grid_view(p, it, gone)
+            grids[it.id] = grid_view(p, it, gone, relock)
         end
     end
     names = Dict{String,String}(it.id => it.name for it in items)
@@ -184,15 +190,33 @@ function read_error(@nospecialize(e))::String
     return "It cannot be read: " * sprint(showerror, e)
 end
 
-function database_view(p::Core.Project, it::Core.ProjectItem, gone::Bool)::DatabaseView
-    gone && return DatabaseView(it.id, missing_text(it))
-    db = try
-        # `item_path` is internal to the core: the item's folder from its relative path.
-        Core.open_database(Core.item_path(p, it))
+"""
+    open_item(open, p, it, relock)
+
+`open(folder)` for item `it`, or the exception it threw. A failed open is tried once
+more inside `relock(f)`, which runs `f()` while holding the session lock.
+"""
+function open_item(open::Function, p::Core.Project, it::Core.ProjectItem, relock::Function)
+    # `item_path` is internal to the core: the item's folder from its relative path.
+    folder = Core.item_path(p, it)
+    try
+        return open(folder)
     catch e
         e isa InterruptException && rethrow()
-        return DatabaseView(it.id, read_error(e))
     end
+    try
+        return relock(() -> open(folder))
+    catch e
+        e isa InterruptException && rethrow()
+        return e
+    end
+end
+
+function database_view(p::Core.Project, it::Core.ProjectItem, gone::Bool,
+        relock::Function)::DatabaseView
+    gone && return DatabaseView(it.id, missing_text(it))
+    db = open_item(Core.open_database, p, it, relock)
+    db isa Core.LineDatabase || return DatabaseView(it.id, read_error(db))
     lines = LineRow[LineRow(l.id, Core.line_name(l.id), l.selected, l.flight, l.nrows)
                     for l in db.lines]
     channels = ChannelRow[ChannelRow(c.name, c.label, c.units, c.role, string(c.eltype),
@@ -201,14 +225,10 @@ function database_view(p::Core.Project, it::Core.ProjectItem, gone::Bool)::Datab
     return DatabaseView(it.id, lines, channels, pairs, db.current_pair, Core.total_rows(db), "")
 end
 
-function grid_view(p::Core.Project, it::Core.ProjectItem, gone::Bool)::GridView
+function grid_view(p::Core.Project, it::Core.ProjectItem, gone::Bool, relock::Function)::GridView
     gone && return GridView(it.id, missing_text(it))
-    g = try
-        Core.open_grid(Core.item_path(p, it))
-    catch e
-        e isa InterruptException && rethrow()
-        return GridView(it.id, read_error(e))
-    end
+    g = open_item(Core.open_grid, p, it, relock)
+    g isa Core.Grid || return GridView(it.id, read_error(g))
     return GridView(it.id, g.nx, g.ny, g.dx, g.dy, g.x0, g.y0, g.rotation, g.crs, g.units,
         string(g.eltype), g.vmin, g.vmax, g.count, "")
 end
@@ -296,7 +316,7 @@ Everything the app holds. The render thread owns it: only the render thread chan
 and the worker hands results back through `drain!`.
 
 - `config`, `tokens`: the settings and the colours in use.
-- `session`: the open project, or `nothing`.
+- `session`: the open project, or `nothing`. Change it only with `set_session!`.
 - `snap`: the latest `Snapshot` of `session`, replaced whole; `refreshing`: a build runs.
 - `queue`: the `Worker` that runs every core call; `busy`: the label of its running action.
 - `ui`: the `UiState`; `toasts`: the toasts shown, oldest first.
@@ -322,3 +342,26 @@ end
 AppState(config::AppConfig, tokens::Tokens; session::Union{Nothing,Core.Session} = nothing) =
     AppState(config, tokens, session, nothing, false, Worker(), UiState(), Toast[], nothing, 0,
         nothing)
+
+"""
+    set_session!(app, s)
+
+Make `s` (a session or `nothing`) the app's project. This is the only way to change
+`app.session`. It drops everything that belongs to the old project: the snapshot (a
+build of the old session that comes back later is dropped too), the count of shown
+warnings, a failed build, and the Data tree's current database, selection, expanded
+nodes and filter. Call it on the render thread. It does not close the old session.
+"""
+function set_session!(app::AppState, s::Union{Nothing,Core.Session})
+    app.session = s
+    app.snap = nothing
+    app.refreshing = false
+    app.seen_warnings = 0
+    app.queue.failed = nothing
+    ui = app.ui
+    ui.current_db = ""
+    ui.selected = nothing
+    empty!(ui.expanded)
+    ui.filter = ""
+    return nothing
+end

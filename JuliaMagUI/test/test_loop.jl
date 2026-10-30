@@ -1,4 +1,6 @@
 using Test
+using Base.CoreLogging: with_logger, NullLogger, Debug   # Logging is not a test dependency
+import JuliaMagUI as UI
 import CImGui as ig
 import PNGFiles
 import GLFW
@@ -90,8 +92,52 @@ rgb(p) = (Float32(p.r), Float32(p.g), Float32(p.b))
         end
     end
 
+    @testset "GLFW error callback" begin
+        # Logs from before this test set are not part of it.
+        clear_glfw_log() = with_logger(() -> UI.log_glfw_errors(), NullLogger())
+        UI.install_glfw_error_callback()
+        cb = UI.GLFW_CALLBACK[]
+        @test cb != C_NULL
+        # It is the callback GLFW calls now (setting it again returns the current one).
+        @test ccall((:glfwSetErrorCallback, GLFW.libglfw), Ptr{Cvoid}, (Ptr{Cvoid},), cb) == cb
+        clear_glfw_log()
+        # The WSLg monitor error: recorded, not thrown, logged as debug only.
+        ccall(cb, Cvoid, (Cint, Ptr{UInt8}), Cint(GLFW.PLATFORM_ERROR),
+            "X11: Failed to query video mode")
+        @test UI.glfw_last_error() == (Int(GLFW.PLATFORM_ERROR), "X11: Failed to query video mode")
+        @test_logs (:debug, r"Failed to query video mode") min_level = Debug UI.log_glfw_errors()
+        @test_logs UI.log_glfw_errors()   # each error is logged once
+        # Any other error is a warning.
+        ccall(cb, Cvoid, (Cint, Ptr{UInt8}), Cint(GLFW.INVALID_ENUM), "Invalid window hint")
+        @test_logs (:warn, r"Invalid window hint") UI.log_glfw_errors()
+        # A real GLFW error goes through it too and throws nothing.
+        if GLFW.is_initialized()
+            GLFW.WindowHint(0x7fff0000, 1)
+            @test UI.glfw_last_error()[1] == Int(GLFW.INVALID_ENUM)
+            @test_logs (:warn, r"GLFW error") UI.log_glfw_errors()
+        end
+        # A long text is cut to the buffer, with no overrun.
+        ccall(cb, Cvoid, (Cint, Ptr{UInt8}), Cint(GLFW.PLATFORM_ERROR), "x"^2000)
+        @test UI.glfw_last_error()[2] == "x"^(UI.GLFW_TEXT_SIZE - 1)
+        clear_glfw_log()
+    end
+
     window_testset("window") do
         mkpath(SHOTS)
+
+        @testset "a window that cannot open raises" begin
+            before = UI.GLFW_ERRORS[]
+            err = try
+                UI.create_glfw_window("bad", (0, 0), true)
+                nothing
+            catch e
+                e
+            end
+            @test err isa ErrorException
+            @test startswith(err.msg, "could not open a window with OpenGL 3.3: ")
+            @test UI.GLFW_ERRORS[] > before
+            with_logger(() -> UI.log_glfw_errors(), NullLogger())
+        end
 
         # Draw a few widgets, keep the loop busy, capture at frame 30 and quit.
         function capture_run(shot; scale = nothing)

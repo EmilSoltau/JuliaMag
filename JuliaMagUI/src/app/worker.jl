@@ -11,7 +11,7 @@ struct WorkerAction
     f::Function
     done::Function
     session::Union{Nothing,Core.Session}
-    window::Union{Nothing,Window}   # woken when the action starts and ends
+    window::Any   # woken with `wake!` when the action starts and ends; the app's `Window`
 end
 
 # Messages from the worker and the snapshot task to the render thread.
@@ -30,6 +30,12 @@ struct SnapshotDone
     revision::Int                  # the revision when the build started
     snap::Any                      # a `Snapshot`, or `nothing` when the build failed
     failure::Union{Nothing,CapturedException}
+end
+
+# An error outside an action, such as in `wake!`. The render thread logs it.
+struct WorkerProblem
+    what::String
+    failure::CapturedException
 end
 
 """
@@ -59,13 +65,43 @@ function Worker()
     return Worker(inbox, results, task, 0, nothing)
 end
 
-# Wake the window, if there is one, so the loop draws the result.
-notify_window(w::Union{Nothing,Window}) = (w === nothing || wake!(w); nothing)
+# Wake the window, if there is one, so the loop draws the result. Never throws:
+# an error (`wake!` calls GLFW) goes to the render thread as a `WorkerProblem`.
+function notify_window(@nospecialize(w), results::Channel{Any})
+    w === nothing && return nothing
+    try
+        wake!(w)
+    catch e
+        report_problem(results, "Could not wake the window", e, catch_backtrace())
+    end
+    return nothing
+end
+
+# Send a `WorkerProblem`; if even that fails, log it here.
+function report_problem(results::Channel{Any}, what::String, @nospecialize(e), bt)
+    failure = CapturedException(e, bt)
+    try
+        put!(results, WorkerProblem(what, failure))
+    catch
+        @error what exception = (e, bt)
+    end
+    return nothing
+end
 
 function run_worker(inbox::Channel{WorkerAction}, results::Channel{Any})
     for a in inbox
+        run_action(a, results)
+    end
+    return nothing
+end
+
+# Run one action. Never throws, so the worker never dies; every action sends an
+# `ActionDone`, so `pending` always comes back to 0.
+function run_action(a::WorkerAction, results::Channel{Any})
+    done_sent = false
+    try
         put!(results, ActionStarted(a.label))
-        notify_window(a.window)
+        notify_window(a.window, results)
         msg = try
             # The worker task keeps the world of its start; an action may be newer code.
             ActionDone(a, Base.invokelatest(a.f, a.session), nothing)
@@ -73,7 +109,19 @@ function run_worker(inbox::Channel{WorkerAction}, results::Channel{Any})
             ActionDone(a, nothing, CapturedException(e, catch_backtrace()))
         end
         put!(results, msg)
-        notify_window(a.window)
+        done_sent = true
+        notify_window(a.window, results)
+    catch e
+        bt = catch_backtrace()
+        if done_sent
+            report_problem(results, "The worker failed after an action", e, bt)
+        else
+            try
+                put!(results, ActionDone(a, nothing, CapturedException(e, bt)))
+            catch
+                @error "The worker could not report an action" exception = (e, bt)
+            end
+        end
     end
     return nothing
 end
@@ -82,10 +130,15 @@ end
     stop_worker!(w)
 
 Take no more actions, let the queued ones finish, and wait for the worker task to end.
+Never throws: a worker task that failed is logged.
 """
 function stop_worker!(w::Worker)
     close(w.inbox)
-    wait(w.task)
+    try
+        wait(w.task)
+    catch e
+        @error "The worker task failed" exception = (e, catch_backtrace())
+    end
     return nothing
 end
 
@@ -128,17 +181,22 @@ function handle_result!(app, m::ActionDone)
         try
             Base.invokelatest(m.action.done, app, m.value)
         catch e
-            toast!(app, :error, user_message(e, catch_backtrace()))
+            toast!(app, :error, safe_user_message(e, catch_backtrace()))
         end
     else
-        toast!(app, :error, user_message(m.failure.ex, m.failure.processed_bt))
+        toast!(app, :error, safe_user_message(m.failure.ex, m.failure.processed_bt))
     end
     return nothing
 end
 
+handle_result!(app, m::WorkerProblem) =
+    (@error m.what exception = (m.failure.ex, m.failure.processed_bt); nothing)
+
 function handle_result!(app, m::SnapshotDone)
+    # A build that started before `set_session!` is dropped. It does not touch
+    # `refreshing`, which now belongs to a build of the new session.
+    m.session === app.session || return nothing
     app.refreshing = false
-    m.session === app.session || return nothing   # the project changed meanwhile
     if m.failure !== nothing
         app.queue.failed = (m.session, m.revision)
         @error "Could not read the project state" exception = (m.failure.ex, m.failure.processed_bt)
@@ -174,15 +232,23 @@ function refresh!(app)
     failed !== nothing && failed[1] === s && failed[2] == rev && return nothing
     app.refreshing = true
     results, window = app.queue.results, app.window
-    Threads.@spawn :default begin
-        msg = try
-            SnapshotDone(s, rev, snapshot(s), nothing)
-        catch e
-            SnapshotDone(s, rev, nothing, CapturedException(e, catch_backtrace()))
-        end
-        put!(results, msg)
-        notify_window(window)
+    Threads.@spawn :default build_snapshot(s, rev, results, window)
+    return nothing
+end
+
+# Build a snapshot and send it to the render thread. Never throws.
+function build_snapshot(s::Core.Session, rev::Int, results::Channel{Any}, @nospecialize(window))
+    msg = try
+        SnapshotDone(s, rev, snapshot(s), nothing)
+    catch e
+        SnapshotDone(s, rev, nothing, CapturedException(e, catch_backtrace()))
     end
+    try
+        put!(results, msg)
+    catch e
+        @error "Could not hand back a snapshot" exception = (e, catch_backtrace())
+    end
+    notify_window(window, results)
     return nothing
 end
 
@@ -209,6 +275,15 @@ function user_message(@nospecialize(e), backtrace = nothing)::String
     e isa USER_ERRORS && return plain_message(e)
     @error "Unexpected error" exception = (backtrace === nothing ? e : (e, backtrace))
     return "Something went wrong: " * sprint(showerror, e)
+end
+
+# `user_message`, but it never throws: an exception whose `showerror` fails gives a fixed text.
+function safe_user_message(@nospecialize(e), backtrace = nothing)::String
+    try
+        return user_message(e, backtrace)
+    catch
+        return "Something went wrong."
+    end
 end
 
 # The message of `e` without its "TypeName: " prefix, as a sentence.

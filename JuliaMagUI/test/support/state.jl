@@ -19,12 +19,40 @@ test_app_state(s::Union{Nothing,Core.Session}) =
 """
     stop_app!(app)
 
-Stop the worker and close the session. Every test that makes an app calls it at the end.
+Stop the worker and close the session, if it is still open.
 """
 function stop_app!(app::UI.AppState)
     UI.stop_worker!(app.queue)
-    app.session === nothing || Core.close_session!(app.session)
+    s = app.session
+    s === nothing || !isopen(s) || Core.close_session!(s)
     return nothing
+end
+
+"""
+    with_app(f, app)
+
+`f(app)`, then `stop_app!(app)`, also when `f` throws, so a failed test leaks no worker
+and no open session.
+"""
+function with_app(f, app::UI.AppState)
+    try
+        return f(app)
+    finally
+        stop_app!(app)
+    end
+end
+
+"""
+    with_test_session(f, s)
+
+`f(s)`, then close session `s` if it is still open, also when `f` throws.
+"""
+function with_test_session(f, s::Core.Session)
+    try
+        return f(s)
+    finally
+        isopen(s) && Core.close_session!(s)
+    end
 end
 
 """

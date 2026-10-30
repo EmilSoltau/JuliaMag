@@ -218,6 +218,7 @@ function draw_frame!(w::Window, @nospecialize(ui), @nospecialize(on_close),
     update_scale!(w)
     update_icons!(w)
     log_x_errors()
+    log_glfw_errors()
 
     lib.ImGui_ImplOpenGL3_NewFrame()
     lib.ImGui_ImplGlfw_NewFrame()
@@ -259,8 +260,19 @@ function create_glfw_window(title::AbstractString, size::Tuple{Int,Int}, passive
     GLFW.WindowHint(GLFW.FOCUS_ON_SHOW, !passive)
     GLFW.WindowHint(GLFW.FOCUSED, !passive)
     GLFW.WindowHint(MOUSE_PASSTHROUGH, passive)
-    handle = GLFW.CreateWindow(size[1], size[2], title)
-    handle.handle == C_NULL && error("could not open a window with OpenGL 3.3")
+    # Not `GLFW.CreateWindow`: on a failure it passes the NULL window on to GLFW.
+    before = GLFW_ERRORS[]
+    handle = ccall((:glfwCreateWindow, GLFW.libglfw), GLFW.Window,
+        (Cint, Cint, Cstring, GLFW.Monitor, GLFW.Window),
+        size[1], size[2], title, GLFW.Monitor(C_NULL), GLFW.Window(C_NULL))
+    handle.handle == C_NULL &&
+        throw(glfw_failure("could not open a window with OpenGL 3.3", before))
+    # What `GLFW.CreateWindow` does after a window opens, so GLFW.jl's window
+    # callbacks and `GLFW.DestroyWindow` work as usual.
+    callbacks = Ref{Vector{GLFW.Callback}}(fill(nothing, GLFW._window_callback_num[]))
+    GLFW._window_callbacks[handle] = callbacks
+    ccall((:glfwSetWindowUserPointer, GLFW.libglfw), Cvoid,
+        (GLFW.Window, Ref{Vector{GLFW.Callback}}), handle, callbacks)
     return handle
 end
 
@@ -304,12 +316,18 @@ function open_and_run(@nospecialize(ui), title::String, size::NTuple{2,Int},
         min_size::NTuple{2,Int}, scale::Float32, fonts::Symbol, @nospecialize(on_close),
         @nospecialize(engine), tokens::Tokens, passive::Bool)
     ig.set_backend(:GlfwOpenGL3)
+    install_glfw_error_callback()
+    GLFW.is_initialized() || throw(ErrorException("GLFW did not start, so no window can open"))
     handle = create_glfw_window(title, size, passive)
     install_x_error_handler()
     ctx = Ptr{ig.lib.ImGuiContext}(C_NULL)
     glfw_ready = gl_ready = engine_started = false
     try
+        before = GLFW_ERRORS[]
         GLFW.MakeContextCurrent(handle)
+        current = ccall((:glfwGetCurrentContext, GLFW.libglfw), Ptr{Cvoid}, ())
+        current == handle.handle ||
+            throw(glfw_failure("could not use the window's OpenGL context", before))
         GLFW.SwapInterval(1)
         ctx = ig.CreateContext()
         io = ig.GetIO()
