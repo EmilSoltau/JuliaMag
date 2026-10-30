@@ -105,3 +105,82 @@ function tokens_for(mode::ThemeMode, system_dark::Bool)::Tokens
     mode == THEME_DARK && return DARK
     return system_dark ? DARK : LIGHT
 end
+
+# Style sizes in logical pixels, from the prototype. `apply_style!` scales them.
+const BODY_FONT_SIZE = 12.5f0
+const STYLE_SIZES = (;
+    FramePadding = (8f0, 4f0),
+    ItemSpacing = (6f0, 5f0),
+    FrameRounding = 5f0,
+    PopupRounding = 8f0,
+    WindowRounding = 10f0,
+    ScrollbarSize = 10f0,
+    GrabRounding = 5f0,
+)
+const BORDER_SIZES = (:WindowBorderSize, :ChildBorderSize, :PopupBorderSize, :FrameBorderSize)
+
+# The ImGui colour slots and the token each one takes.
+const STYLE_COLOURS = (
+    ig.ImGuiCol_WindowBg => :pane,
+    ig.ImGuiCol_FrameBg => :input,
+    ig.ImGuiCol_FrameBgHovered => :input,
+    ig.ImGuiCol_FrameBgActive => :input,
+    ig.ImGuiCol_Border => :input_border,
+    ig.ImGuiCol_Button => :ribbon,
+    ig.ImGuiCol_ButtonHovered => :hover,
+    ig.ImGuiCol_ButtonActive => :pressed,
+    ig.ImGuiCol_HeaderHovered => :hover,
+    ig.ImGuiCol_HeaderActive => :pressed,
+    ig.ImGuiCol_Header => :selection,
+    ig.ImGuiCol_Text => :text,
+    ig.ImGuiCol_TextDisabled => :text_disabled,
+    ig.ImGuiCol_PopupBg => :menu,
+    ig.ImGuiCol_ModalWindowDimBg => :backdrop,
+    ig.ImGuiCol_CheckMark => :accent,
+    ig.ImGuiCol_SliderGrab => :accent,
+    ig.ImGuiCol_SliderGrabActive => :accent,
+    ig.ImGuiCol_Tab => :tab_strip,
+    ig.ImGuiCol_TabHovered => :hover,
+    ig.ImGuiCol_TabSelected => :ribbon,
+    ig.ImGuiCol_TabDimmed => :tab_strip,
+    ig.ImGuiCol_TabDimmedSelected => :ribbon,
+    ig.ImGuiCol_Separator => :border,
+    ig.ImGuiCol_ScrollbarGrab => :border_strong,
+    ig.ImGuiCol_NavCursor => :accent,
+)
+
+# Relative luminance of a token, to pick the light or dark ImGui preset as a base.
+luminance(c::NTuple{4,Float32}) = 0.2126f0 * c[1] + 0.7152f0 * c[2] + 0.0722f0 * c[3]
+
+"""
+    apply_style!(t::Tokens, scale)
+
+Set the style of the current ImGui context from the tokens, with sizes scaled by `scale`.
+It starts from a fresh default style each time, so calling it again never scales twice.
+Colours that no token covers come from the ImGui light or dark preset.
+"""
+function apply_style!(t::Tokens, scale::Real)
+    s = Float32(scale)
+    style = Ptr{ig.lib.ImGuiStyle}(ig.GetStyle())
+    fresh = ig.lib.ImGuiStyle_ImGuiStyle()
+    try
+        unsafe_store!(style, unsafe_load(fresh))
+    finally
+        ig.lib.ImGuiStyle_destroy(fresh)
+    end
+    luminance(t.pane) < 0.5f0 ? ig.StyleColorsDark() : ig.StyleColorsLight()
+    for (slot, name) in STYLE_COLOURS
+        ig.c_set!(style.Colors, slot, ig.ImVec4(getfield(t, name)...))
+    end
+    for (name, value) in pairs(STYLE_SIZES)
+        setproperty!(style, name, value isa Tuple ? ig.ImVec2(value...) : value)
+    end
+    ig.ScaleAllSizes(style, s)
+    border = max(1f0, round(s))
+    for name in BORDER_SIZES
+        setproperty!(style, name, border)
+    end
+    style.FontSizeBase = BODY_FONT_SIZE
+    style.FontScaleDpi = s
+    return nothing
+end

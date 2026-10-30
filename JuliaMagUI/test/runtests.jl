@@ -4,4 +4,5 @@ using Test
     include("test_quality.jl")
     include("test_tokens.jl")
     include("test_config.jl")
+    include("test_loop.jl")
 end

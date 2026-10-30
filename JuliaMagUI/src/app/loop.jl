@@ -1,0 +1,355 @@
+# The app window and its render loop.
+# The loop is a copy of the CImGui.jl GLFW and OpenGL 3 extension loop
+# (ext/GlfwOpenGLBackend.jl), changed so that it idles, scales with the screen and takes screenshots.
+# It runs on thread 1. Start Julia with `-t auto,1` so jobs run on other threads.
+
+const IDLE_TIMEOUT = 0.1        # s; an idle loop still lets libuv run this often
+const BUSY_FRAME_TIME = 1 / 120 # s; the shortest frame while animating, when vsync does not hold
+const INPUT_FRAMES = 3         # frames drawn after input, so ImGui can settle its state
+const APP_NAME = "JuliaMag"
+
+"""
+    Window
+
+The app window.
+
+- `handle`: the GLFW window.
+- `ctx`: the ImGui context.
+- `tokens`: the colours in use.
+- `scale`: the content scale (DPI). Layout sizes go through `px`.
+- `frame`: the number of frames drawn so far.
+- `wake`: set by `wake!` from any thread; the loop then draws a frame at once.
+- `animating_until`: the loop polls instead of waiting until this `time()`.
+- `input_frames`: frames still to draw without waiting, after input.
+
+The other fields are for the loop itself.
+"""
+mutable struct Window
+    handle::GLFW.Window
+    ctx::Ptr{ig.lib.ImGuiContext}
+    tokens::Tokens
+    scale::Float32
+    fixed_scale::Bool
+    min_size::Tuple{Int,Int}
+    frame::Int
+    wake::Threads.Atomic{Bool}
+    animating_until::Float64
+    input_frames::Int
+    quit::Bool
+    capture_path::Union{Nothing,String}
+end
+
+"""
+    px(w, x)
+
+`x` logical pixels as device pixels, rounded. Every layout size goes through it.
+"""
+px(scale::Real, x::Real) = round(Float32(x) * Float32(scale))
+px(w::Window, x::Real) = px(w.scale, x)
+
+"""
+    request_frames!(w, seconds = 0.25)
+
+Keep drawing for `seconds` more. Hover effects, tooltips, toasts and progress bars call it.
+"""
+function request_frames!(w::Window, seconds::Real = 0.25)
+    w.animating_until = max(w.animating_until, time() + seconds)
+    return nothing
+end
+
+"""
+    wake!(w)
+
+Make the loop draw a frame soon. Safe to call from any thread; worker results call it.
+"""
+function wake!(w::Window)
+    w.wake[] = true
+    GLFW.PostEmptyEvent()
+    return nothing
+end
+
+"""
+    quit!(w)
+
+End the loop after this frame. It does not ask `on_close`.
+"""
+quit!(w::Window) = (w.quit = true; nothing)
+
+"""
+    capture_png(w, path)
+
+Save this frame as a PNG at `path`, at the framebuffer size.
+The loop reads the back buffer after the frame is drawn and before it is shown,
+so the file exists once the current frame ends.
+"""
+function capture_png(w::Window, path::AbstractString)
+    w.capture_path = String(path)
+    return path
+end
+
+# Read the back buffer and write it as an RGB PNG, top row first.
+function write_back_buffer(path::AbstractString, width::Integer, height::Integer)
+    buf = Vector{UInt8}(undef, 4 * width * height)
+    GL.glReadBuffer(GL.GL_BACK)
+    GL.glPixelStorei(GL.GL_PACK_ALIGNMENT, 1)
+    GL.glReadPixels(0, 0, width, height, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, buf)
+    img = Array{UInt8}(undef, height, width, 3)
+    for y in 1:height, x in 1:width
+        i = 4 * ((height - y) * width + (x - 1))   # OpenGL rows start at the bottom
+        for c in 1:3
+            img[y, x, c] = buf[i+c]
+        end
+    end
+    mkpath(dirname(abspath(path)))
+    PNGFiles.save(path, img)
+    return nothing
+end
+
+content_scale(handle::GLFW.Window) = Float32(GLFW.GetWindowContentScale(handle)[1])
+
+# Screen coordinates per logical pixel. On Windows and X11 screen coordinates are device
+# pixels; on macOS and Wayland they are already logical.
+function screen_per_logical(w::Window)::Float32
+    win_w = GLFW.GetWindowSize(w.handle)[1]
+    fb_w = GLFW.GetFramebufferSize(w.handle)[1]
+    (win_w > 0 && fb_w > 0) || return 1f0
+    return w.scale * win_w / fb_w
+end
+
+function set_min_size!(w::Window)
+    f = screen_per_logical(w)
+    GLFW.SetWindowSizeLimits(w.handle, round(Int, w.min_size[1] * f),
+        round(Int, w.min_size[2] * f), GLFW.DONT_CARE, GLFW.DONT_CARE)
+    return nothing
+end
+
+# Follow a change of the monitor scale (no GLFW callback; checked each frame).
+function update_scale!(w::Window)
+    w.fixed_scale && return nothing
+    s = content_scale(w.handle)
+    s == w.scale && return nothing
+    w.scale = s
+    apply_style!(w.tokens, s)
+    set_min_size!(w)
+    return nothing
+end
+
+# Did the GLFW callbacks of the ImGui backend queue any input since the last frame?
+input_queued(ctx::Ptr{ig.lib.ImGuiContext}) = unsafe_load(ctx.InputEventsQueue).Size > 0
+
+# GLFW calls that block, made GC-safe so the GC of worker threads does not wait for them.
+# The CImGui loop wraps them in jl_gc_safe_enter/leave; Julia 1.12 `gc_safe = true` does the same.
+# They run no Julia code, as long as no Julia GLFW callbacks are set (see `wait_or_poll`).
+glfw_wait_gc_safe(timeout::Float64) =
+    @ccall gc_safe = true GLFW.libglfw.glfwWaitEventsTimeout(timeout::Cdouble)::Cvoid
+glfw_poll_gc_safe() = @ccall gc_safe = true GLFW.libglfw.glfwPollEvents()::Cvoid
+glfw_swap_gc_safe(handle::GLFW.Window) =
+    @ccall gc_safe = true GLFW.libglfw.glfwSwapBuffers(handle::GLFW.Window)::Cvoid
+
+# Wait for events (idle) or only collect them (busy).
+function wait_or_poll(handle::GLFW.Window, idle::Bool)
+    if any(!isnothing, GLFW.callbacks(handle))
+        # Julia callbacks run inside the wait, so it must not be GC-safe.
+        idle ? GLFW.WaitEvents(IDLE_TIMEOUT) : GLFW.PollEvents()
+    else
+        idle ? glfw_wait_gc_safe(IDLE_TIMEOUT) : glfw_poll_gc_safe()
+    end
+    return nothing
+end
+
+# Call a test engine hook of CImGui. ImGuiTestEngine.jl adds the methods when it loads,
+# so the call is made at run time.
+engine_call(f, args...) = Base.invokelatest(f, args...)
+
+# One frame. Returns false when the loop should end.
+function draw_frame!(w::Window, @nospecialize(ui), @nospecialize(on_close),
+        @nospecialize(engine))::Bool
+    if GLFW.WindowShouldClose(w.handle)
+        on_close() && return false
+        GLFW.SetWindowShouldClose(w.handle, false)
+    end
+    update_scale!(w)
+
+    lib.ImGui_ImplOpenGL3_NewFrame()
+    lib.ImGui_ImplGlfw_NewFrame()
+    ig.NewFrame()
+    ui(w)
+    if engine !== nothing
+        engine.show_test_window && engine_call(ig._show_test_window, engine)
+        engine.exit_on_completion && !engine_call(ig._test_engine_is_running, engine) &&
+            quit!(w)
+    end
+    ig.Render()
+
+    fb_w, fb_h = GLFW.GetFramebufferSize(w.handle)
+    GL.glViewport(0, 0, fb_w, fb_h)
+    GL.glClearColor(w.tokens.canvas...)
+    GL.glClear(GL.GL_COLOR_BUFFER_BIT)
+    lib.ImGui_ImplOpenGL3_RenderDrawData(Ptr{Cint}(ig.GetDrawData()))
+    path = w.capture_path
+    if path !== nothing
+        w.capture_path = nothing
+        write_back_buffer(path, fb_w, fb_h)
+    end
+    glfw_swap_gc_safe(w.handle)
+    engine !== nothing && engine_call(ig._post_swap, engine)
+    w.frame += 1
+    return !w.quit
+end
+
+const MOUSE_PASSTHROUGH = 0x0002000D   # GLFW 3.4; GLFW.jl has no name for it
+
+function create_glfw_window(title::AbstractString, size::Tuple{Int,Int}, passive::Bool)::GLFW.Window
+    GLFW.WindowHint(GLFW.VISIBLE, true)
+    GLFW.WindowHint(GLFW.DECORATED, true)
+    GLFW.WindowHint(GLFW.CONTEXT_VERSION_MAJOR, 3)
+    GLFW.WindowHint(GLFW.CONTEXT_VERSION_MINOR, 3)
+    GLFW.WindowHint(GLFW.OPENGL_PROFILE, GLFW.OPENGL_CORE_PROFILE)
+    GLFW.WindowHint(GLFW.OPENGL_FORWARD_COMPAT, true)
+    GLFW.WindowHint(GLFW.SCALE_TO_MONITOR, true)
+    GLFW.WindowHint(GLFW.FOCUS_ON_SHOW, !passive)
+    GLFW.WindowHint(GLFW.FOCUSED, !passive)
+    GLFW.WindowHint(MOUSE_PASSTHROUGH, passive)
+    handle = GLFW.CreateWindow(size[1], size[2], title)
+    handle.handle == C_NULL && error("could not open a window with OpenGL 3.3")
+    return handle
+end
+
+"""
+    run_window(ui; title = "JuliaMag", size = (1480, 920), min_size = (900, 560),
+               scale = nothing, fonts = :system, on_close = () -> true,
+               engine = nothing, tokens = LIGHT, passive = false)
+
+Open the window and run the render loop on thread 1 until the window closes.
+`ui(w::Window)` draws one frame.
+
+- Idle: with nothing to animate, the loop waits for events for at most 0.1 s,
+  so the CPU rests and Julia's libuv loop still runs.
+  It draws without waiting while `time() < w.animating_until`, after input, and after `wake!`.
+- `scale`: the content scale; `nothing` follows the monitor.
+- `fonts`: `:system` or `:bundled`, see `font_paths`.
+- `on_close()`: asked when the user closes the window; `false` keeps it open.
+- `engine`: an ImGuiTestEngine engine, or `nothing`.
+- `passive`: the window takes no mouse input and no focus. Tests use it,
+  so a user working on the same desktop does not change what they measure.
+"""
+function run_window(ui; title::AbstractString = APP_NAME,
+        size::Tuple{Integer,Integer} = (1480, 920),
+        min_size::Tuple{Integer,Integer} = (900, 560),
+        scale::Union{Nothing,Real} = nothing, fonts::Symbol = :system,
+        on_close = () -> true, engine = nothing, tokens::Tokens = LIGHT,
+        passive::Bool = false)
+    Threads.threadid() == 1 ||
+        throw(ArgumentError("run_window must run on thread 1, not thread $(Threads.threadid())"))
+    font_paths(fonts)   # fail on a bad source before a window opens
+    open_and_run(ui, String(title), (Int(size[1]), Int(size[2])),
+        (Int(min_size[1]), Int(min_size[2])), scale === nothing ? 0f0 : Float32(scale),
+        fonts, on_close, engine, tokens, passive)
+    return nothing
+end
+
+# The body of `run_window`, with plain argument types so that one compiled copy serves
+# every caller (see the precompile workload). A `scale` of 0 follows the monitor.
+function open_and_run(@nospecialize(ui), title::String, size::NTuple{2,Int},
+        min_size::NTuple{2,Int}, scale::Float32, fonts::Symbol, @nospecialize(on_close),
+        @nospecialize(engine), tokens::Tokens, passive::Bool)
+    ig.set_backend(:GlfwOpenGL3)
+    handle = create_glfw_window(title, size, passive)
+    ctx = Ptr{ig.lib.ImGuiContext}(C_NULL)
+    glfw_ready = gl_ready = false
+    try
+        GLFW.MakeContextCurrent(handle)
+        GLFW.SwapInterval(1)
+        ctx = ig.CreateContext()
+        io = ig.GetIO()
+        io.IniFilename = C_NULL   # the app keeps its own settings
+        engine !== nothing && engine_call(ig._start_test_engine, engine, ctx)
+        glfw_ready = lib.ImGui_ImplGlfw_InitForOpenGL(Ptr{lib.GLFWwindow}(handle.handle), true)
+        gl_ready = lib.ImGui_ImplOpenGL3_Init("#version 330")
+        (glfw_ready && gl_ready) || error("could not start the ImGui GLFW and OpenGL 3 backends")
+
+        fixed = scale > 0
+        s = fixed ? scale : content_scale(handle)
+        w = Window(handle, ctx, tokens, s, fixed, min_size, 0, Threads.Atomic{Bool}(false),
+            0.0, 0, false, nothing)
+        apply_style!(tokens, s)
+        load_fonts!(w, fonts)
+        set_min_size!(w)
+        run_loop!(w, ui, on_close, engine)
+    finally
+        for f in ig._exit_handlers
+            try
+                f()
+            catch e
+                @error "Error in a CImGui exit handler" exception = (e, catch_backtrace())
+            end
+        end
+        gl_ready && lib.ImGui_ImplOpenGL3_Shutdown()
+        glfw_ready && lib.ImGui_ImplGlfw_Shutdown()
+        if ctx != C_NULL
+            forget_fonts!(ctx)
+            ig.DestroyContext(ctx)
+        end
+        GLFW.DestroyWindow(handle)
+    end
+    return nothing
+end
+
+function run_loop!(w::Window, @nospecialize(ui), @nospecialize(on_close),
+        @nospecialize(engine))
+    while true
+        frame_start = time()
+        idle = !w.wake[] && frame_start >= w.animating_until && w.input_frames == 0
+        wait_or_poll(w.handle, idle)
+        w.wake[] = false
+        w.input_frames = input_queued(w.ctx) ? INPUT_FRAMES : max(w.input_frames - 1, 0)
+        draw_frame!(w, ui, on_close, engine) || break
+        # Without vsync a busy loop would spin; keep at most 120 frames per second.
+        rest = BUSY_FRAME_TIME - (time() - frame_start)
+        rest > 0.001 && sleep(rest)
+        # Run due libuv timers and IO now. With yield alone they ran one idle wait late.
+        Base.process_events()
+        yield()
+    end
+    return nothing
+end
+
+# The empty app: the canvas colour with the app name in the middle. Task 9 fills it.
+function draw_empty(w::Window)
+    with_font(FONT_SEMIBOLD, 13) do
+        text = ig.CalcTextSize(APP_NAME)
+        vp = unsafe_load(ig.GetMainViewport())
+        # Whole pixels keep the text sharp.
+        pos = (round(vp.Pos.x + (vp.Size.x - text.x) / 2),
+            round(vp.Pos.y + (vp.Size.y - text.y) / 2))
+        col = ig.GetColorU32(ig.ImVec4(w.tokens.text_dim...))
+        ig.AddText(ig.GetBackgroundDrawList(), pos, col, APP_NAME)
+    end
+    return nothing
+end
+
+"""
+    main(; project = nothing, extra_ui = nothing)
+
+Start the app. Today it opens the empty window; later tasks fill it and open `project`.
+`extra_ui(w)` is drawn after the app in every frame; tests and the startup bench use it.
+"""
+function main(; project::Union{Nothing,AbstractString} = nothing, extra_ui = nothing)
+    project === nothing || @debug "Opening a project is not built yet" project
+    config, _ = load_config()   # a broken settings file gives the defaults
+    dark = config.theme == THEME_SYSTEM ? system_dark() : false
+    tokens = tokens_for(config.theme, dark)
+    run_window(AppFrame(extra_ui); tokens)
+    return nothing
+end
+
+# One frame of the app, plus the optional test hook.
+struct AppFrame
+    extra_ui::Any
+end
+
+function (a::AppFrame)(w::Window)
+    draw_empty(w)
+    a.extra_ui === nothing || a.extra_ui(w)
+    return nothing
+end

@@ -199,3 +199,50 @@ JULIA_NUM_THREADS=4 julia --project=JuliaMagCore bench/import_xyz.jl 500 --csv
 - The script writes the file, imports it, prints the numbers and deletes the files.
 - The file writer is in the script.
   It makes 500 MB in under a second.
+
+## UI startup
+
+`bench/ui_startup.jl` measures how long the app takes to show its first frame.
+It starts a fresh process `julia -t auto,1 --project=JuliaMagUI` three times.
+Each process times `using JuliaMagUI` and the first frame that `main()` draws, and then quits.
+The package is precompiled before the runs, so the numbers are for a warm package cache.
+Each run uses an empty settings folder, so the theme follows the system.
+
+### Results
+
+Run of 2026-10-30 on the machine above, on WSLg (`DISPLAY=:0`), median of three runs.
+
+| Step | Time |
+|---|---|
+| Process start until Julia runs the script | 0.12 s |
+| `using JuliaMagUI` | 1.86 s |
+| `main()` until its first frame | 0.25 s |
+| Process start until the first frame | 2.24 s |
+
+The target is under 4 s from process start to the first frame.
+The measured 2.24 s meets it.
+Most of `using JuliaMagUI` is `JuliaMagCore`: loading the core alone takes about 1.7 s.
+
+### Findings
+
+- Without a precompile workload, the first frame came 1.96 s after `using`, and the total was 3.9 s.
+  Almost all of it was compiling the window code on first use.
+- `JuliaMagUI` now has a PrecompileTools workload.
+  It draws a frame with no window (style, fonts and the empty app) and compiles the window code without running it.
+  It needs no display, so it also works on a build machine.
+  The first frame now comes 0.25 s after `using`.
+- The first frame is not always this fast.
+  In a series of six runs it took 0.25, 0.25, 0.61, 0.95, 0.45 and 0.98 s, and the total stayed under 3 s.
+  The first runs of a series are the fast ones.
+  The cause was not found; the WSLg window system, which opens each window, is a likely one.
+
+### How to re-run
+
+From the repo root, on a machine with a display:
+
+```
+julia bench/ui_startup.jl
+```
+
+- The optional argument is the number of runs (default 3).
+

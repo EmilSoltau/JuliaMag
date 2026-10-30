@@ -2,3 +2,6 @@
 *.cov
 *.mem
 .DS_Store
+JuliaMagUI/test/shots/
+# Written into the working folder by the CImGui GLFW extension when it precompiles.
+imgui.ini
