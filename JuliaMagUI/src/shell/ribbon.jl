@@ -121,19 +121,12 @@ end
 # --- Sizes ---
 #
 # Widths and drawing offsets both use logical px times the scale with no rounding per
-# constant (`fpx`). A browser adds such lengths up as fractions and snaps only the edges it
-# paints; the drawing does the same with `snap`. So a width is exactly the drawn width.
+# constant (`fpx`, draw.jl). A browser adds such lengths up as fractions and snaps only the
+# edges it paints; the drawing does the same with `snap`. So a width is exactly the drawn width.
 
 const RIBBON_LABEL_SIZE = 11.5f0
 const GROUP_LABEL_SIZE = 11f0
 const CHOOSER_LABEL = "Acts on"
-
-"`v` logical px at `scale`, in device px, not rounded."
-fpx(scale::Real, v::Real) = Float32(v) * Float32(scale)
-
-"Round half up, as a browser snaps the edges it paints."
-rnd(v::Real) = round(Float32(v), RoundNearestTiesUp)
-snap(b::Box) = Box(rnd(b.x0), rnd(b.y0), rnd(b.x1), rnd(b.y1))
 
 # The text of a small button: the label on one line.
 small_label(label::AbstractString) = replace(label, '\n' => ' ')

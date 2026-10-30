@@ -163,3 +163,63 @@ end
 "The project of the prototype: 60 lines and 24 channels in \"Kangaroo Hills 2024\"."
 kangaroo() = session_with(lines = 60, channels = 24, name = "Kangaroo Hills 2024",
     project = "Kangaroo Hills 2024")
+
+const KANGAROO_CHANNELS = [
+    # name, label, units, role, protected, decimals
+    ("TIME", "TIME", "s", Core.ROLE_TIME, true, 1),
+    ("X", "X", "m", Core.ROLE_X, true, 1),
+    ("Y", "Y", "m", Core.ROLE_Y, true, 1),
+    ("LON", "LONGITUDE", "deg", Core.ROLE_LON, true, 6),
+    ("LAT", "LATITUDE", "deg", Core.ROLE_LAT, true, 6),
+    ("ALT", "RADALT", "m", Core.ROLE_ELEVATION, true, 1),
+    ("MAG", "TMI_RAW", "nT", Core.ROLE_NONE, true, 2),
+    ("IGRF", "IGRF", "nT", Core.ROLE_NONE, false, 2),
+    ("MAG_IGRF", "MAG_IGRF", "nT", Core.ROLE_NONE, false, 2),
+]
+
+"""
+    kangaroo_data() -> Session
+
+The project of the prototype's Data tab, with its names: the database "Kangaroo Hills 2024"
+(50 lines L1001-L1050 and 10 ties T2001-T2010 of flight 12, 172,900 rows, the nine
+channels TIME to MAG_IGRF with their roles and units, the pairs X,Y in EPSG:7855
+(current) and LON,LAT in EPSG:7844), the grid "KH2024_MAG_IGRF" (400 x 800, 25 m) and the
+grid "Regional_TMI_GA2019" whose folder is missing.
+"""
+function kangaroo_data()
+    s = Core.new_session(joinpath(mktempdir(), "p"), "Kangaroo Hills 2024")
+    p = s.project
+    id = Core.new_item_id(p, Core.ITEM_DATABASE)
+    db = Core.create_database(joinpath(p.folder, "databases", id), id)
+    for (n, label, units, role, _, dec) in KANGAROO_CHANNELS
+        Core.add_channel!(db, Core.ChannelInfo(n, label, Float64, units, role, :normal, 10, dec, false, 1))
+    end
+    names = first.(KANGAROO_CHANNELS)
+    apps = Core.open_appenders(db, names)
+    for k in 1:60
+        rows = k <= 40 ? 2882 : 2881   # 172,900 rows in all, as the prototype
+        lid = k <= 50 ? Core.LineId(Core.LINE, 1000 + k, 0) : Core.LineId(Core.TIE, 1950 + k, 0)
+        Core.add_line!(db, Core.LineInfo(lid, 12, "2024-05-01", 0.0, 0.1, rows, 0, true))
+        for a in values(apps), r in 1:rows
+            Core.append_value!(a, Float64(r))
+        end
+    end
+    Core.close_appenders!(apps)
+    for c in db.channels
+        c.protected = KANGAROO_CHANNELS[findfirst(x -> x[1] == c.name, KANGAROO_CHANNELS)][5]
+    end
+    push!(db.pairs, Core.PositionPair("X", "Y", "EPSG:7855"), Core.PositionPair("LON", "LAT", "EPSG:7844"))
+    db.current_pair = 1
+    Core.save_meta(db)
+    Core.add_item!(p, Core.ProjectItem(id, Core.ITEM_DATABASE, "Kangaroo Hills 2024", "databases/$id", "", ""))
+    gid = Core.new_item_id(p, Core.ITEM_GRID)
+    g = Core.create_grid(joinpath(p.folder, "grids", gid), "KH2024_MAG_IGRF", Float32, 400, 800;
+        dx = 25, dy = 25, x0 = 380_000, y0 = 7_905_000, crs = "EPSG:7855", units = "nT")
+    g.vmin, g.vmax, g.count = -260.3, 607.1, 320_000
+    Core.save_grid_meta(g)
+    Core.add_item!(p, Core.ProjectItem(gid, Core.ITEM_GRID, "KH2024_MAG_IGRF", "grids/$gid", "", ""))
+    Core.add_item!(p, Core.ProjectItem(Core.new_item_id(p, Core.ITEM_GRID), Core.ITEM_GRID,
+        "Regional_TMI_GA2019", "grids/gone", "", ""))
+    Core.save_project(p)
+    return s
+end

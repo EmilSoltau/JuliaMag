@@ -18,9 +18,11 @@ include("support/state.jl")
     include("test_commands.jl")
     include("test_shell.jl")
     include("test_ribbon.jl")
+    include("test_data_tree.jl")
     include("window/test_harness.jl")
     include("window/test_shell.jl")
     include("window/test_ribbon.jl")
+    include("window/test_data.jl")
 end
 
 end

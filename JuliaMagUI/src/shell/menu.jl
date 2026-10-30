@@ -8,11 +8,12 @@ const MENU_MAX_WIDTH = 360
 
 """
     MenuItem(label; icon = "", shortcut = "", checked = nothing, reason = nothing, help = "",
-             id = "", action = app -> nothing)
+             id = "", danger = false, action = app -> nothing)
 
 One row of a menu. `checked` is `nothing` for a plain row, else the row shows a check
 mark or a blank. `reason` is why the row cannot run (it is greyed), or `nothing`.
-`help` and `id` go into its tooltip. `action(app)` runs on a click.
+`help` and `id` go into its tooltip. A `danger` row (such as Remove) is red.
+`action(app)` runs on a click. `menu_separator()` makes the line between groups of rows.
 """
 struct MenuItem
     label::String
@@ -22,27 +23,38 @@ struct MenuItem
     reason::Union{Nothing,String}
     help::String
     id::String
+    danger::Bool
+    separator::Bool
     action::Function
 end
 
 MenuItem(label::AbstractString; icon::AbstractString = "", shortcut::AbstractString = "",
         checked::Union{Nothing,Bool} = nothing, reason::Union{Nothing,AbstractString} = nothing,
-        help::AbstractString = "", id::AbstractString = "", action::Function = app -> nothing) =
+        help::AbstractString = "", id::AbstractString = "", danger::Bool = false,
+        action::Function = app -> nothing) =
     MenuItem(String(label), String(icon), String(shortcut), checked,
-        reason === nothing ? nothing : String(reason), String(help), String(id), action)
+        reason === nothing ? nothing : String(reason), String(help), String(id), danger, false,
+        action)
+
+"The line between two groups of menu rows (the prototype's `.msep`)."
+menu_separator() = MenuItem("", "", "", nothing, nothing, "", "", false, true, app -> nothing)
+
+const MENU_ROW_H = 24
+const MENU_SEPARATOR_H = 9   # 1 px line, 4 px above and below
 
 """
     OpenMenu
 
 The open menu: its `owner` (an id of the control that opened it), the `anchor` box of
-that control, the `items`, the smallest width in logical pixels, and whether the owner
-was drawn in this frame (`seen`). `box` is where the menu was drawn last.
+that control, the `items`, the smallest width and the `gap` to the anchor in logical
+pixels, and whether the owner was drawn in this frame (`seen`). `box` is where the menu was drawn last.
 """
 mutable struct OpenMenu
     owner::String
     anchor::Box
     items::Vector{MenuItem}
     min_width::Float32
+    gap::Float32
     seen::Bool
     fresh::Bool
     box::Box
@@ -59,50 +71,55 @@ struct MenuLayout
 end
 
 """
-    menu_layout(anchor, items, viewport, scale, measure; min_width = 200) -> MenuLayout
+    menu_layout(anchor, items, viewport, scale, measure; min_width = 200, gap = 2) -> MenuLayout
 
-Lay out a menu as the prototype's `openMenu`: under `anchor` with 2 px between, or above it
-when there is no room below; moved left to stay 8 px inside `viewport`. Padding 4, 1 px
-border, rows 24 high. A row is 6 + icon 16 + 8 + label + (16 + shortcut) + 10 wide.
-The menu is `min_width` to 360 wide. `measure(text, size)` is the regular text width in
-device pixels.
+Lay out a menu as the prototype's `openMenu`: under `anchor` with `gap` px between, or
+above it when there is no room below; moved left to stay 8 px inside `viewport`. A
+context menu passes the mouse point as an empty `anchor` and `gap = 0`. Padding 4, 1 px
+border, rows 24 high, separators 9. A row is 6 + icon 16 + 8 + label + (16 + shortcut) +
+10 wide. The menu is `min_width` to 360 wide. `measure(text, size)` is the regular text
+width in device pixels.
 """
 function menu_layout(anchor::Box, items::AbstractVector{MenuItem}, viewport::Box, scale::Real,
-        measure; min_width::Real = MENU_MIN_WIDTH)::MenuLayout
+        measure; min_width::Real = MENU_MIN_WIDTH, gap::Real = 2)::MenuLayout
     p(v) = px(scale, v)
     hl = hairline(scale)
     icons = any(it -> !isempty(it.icon) || it.checked !== nothing, items)
+    row_h(it) = p(it.separator ? MENU_SEPARATOR_H : MENU_ROW_H)
     row_w = 0f0
     for it in items
+        it.separator && continue
         w = p(6) + (icons ? p(24) : 0f0) + measure(it.label, BODY_FONT_SIZE) + p(10)
         isempty(it.shortcut) || (w += p(16) + measure(it.shortcut, 11))
         row_w = max(row_w, w)
     end
     w = max(min(round(row_w + p(8) + 2 * hl), p(MENU_MAX_WIDTH)), p(min_width))
-    h = 2 * hl + p(8) + p(24) * length(items)
+    h = 2 * hl + p(8) + sum(row_h, items; init = 0f0)
     x = anchor.x0
-    y = anchor.y1 + p(2)
-    y + h > viewport.y1 - p(8) && (y = max(viewport.y0 + p(8), anchor.y0 - p(2) - h))
+    y = anchor.y1 + p(gap)
+    y + h > viewport.y1 - p(8) && (y = max(viewport.y0 + p(8), anchor.y0 - p(gap) - h))
     x + w > viewport.x1 - p(8) && (x = viewport.x1 - p(8) - w)
     x = max(viewport.x0 + p(8), x)
     box = Box(round(x), round(y), round(x) + w, round(y) + h)
     rows = Box[]
     ry = box.y0 + hl + p(4)
-    for _ in items
-        push!(rows, Box(box.x0 + hl + p(4), ry, box.x1 - hl - p(4), ry + p(24)))
-        ry += p(24)
+    for it in items
+        push!(rows, Box(box.x0 + hl + p(4), ry, box.x1 - hl - p(4), ry + row_h(it)))
+        ry += row_h(it)
     end
     return MenuLayout(box, rows)
 end
 
 """
-    open_menu!(app, owner, anchor, items; min_width = 200)
+    open_menu!(app, owner, anchor, items; min_width = 200, gap = 2)
 
-Open a menu for the control `owner` under its box `anchor`. It replaces any open menu.
+Open a menu for the control `owner` under its box `anchor`, `gap` px below it. It replaces
+any open menu.
 """
 function open_menu!(app, owner::AbstractString, anchor::Box, items::Vector{MenuItem};
-        min_width::Real = MENU_MIN_WIDTH)
-    app.ui.menu = OpenMenu(String(owner), anchor, items, Float32(min_width), true, true, anchor)
+        min_width::Real = MENU_MIN_WIDTH, gap::Real = 2)
+    app.ui.menu = OpenMenu(String(owner), anchor, items, Float32(min_width), Float32(gap), true,
+        true, anchor)
     return nothing
 end
 
@@ -174,7 +191,7 @@ function draw_menu(app)::Bool
     vp = unsafe_load(ig.GetMainViewport())
     view = Box(vp.Pos.x, vp.Pos.y, vp.Pos.x + vp.Size.x, vp.Pos.y + vp.Size.y)
     l = menu_layout(m.anchor, m.items, view, s, (text, size) -> text_width(FONT_REGULAR, size, text);
-        min_width = m.min_width)
+        min_width = m.min_width, gap = m.gap)
     m.box = l.box
     b = l.box
     m.fresh && ig.SetNextWindowFocus()
@@ -196,6 +213,11 @@ function draw_menu(app)::Bool
     chosen = nothing
     seen_ids = Set{String}()
     for (k, (it, row)) in enumerate(zip(m.items, l.rows))
+        if it.separator
+            ig.AddRectFilled(dl, (row.x0 + p(2), row.y0 + p(4)), (row.x1 - p(2), row.y0 + p(4) + hl),
+                u32(t.border))
+            continue
+        end
         enabled = it.reason === nothing
         id = it.label in seen_ids ? it.label * "##" * string(k) : it.label
         push!(seen_ids, it.label)
@@ -206,10 +228,10 @@ function draw_menu(app)::Bool
         mid = centre_y(row)
         icon = it.checked === nothing ? it.icon : it.checked ? "check" : ""
         isempty(icon) || draw_icon(dl, icon, (x, round(mid - p(8))), 16;
-            style = enabled ? :normal : :disabled)
+            style = !enabled ? :disabled : it.danger ? :danger : :normal)
         icons && (x += p(24))
-        draw_text_mid(dl, FONT_REGULAR, BODY_FONT_SIZE, x, mid, u32(enabled ? t.text : t.text_disabled),
-            it.label)
+        draw_text_mid(dl, FONT_REGULAR, BODY_FONT_SIZE, x, mid,
+            u32(!enabled ? t.text_disabled : it.danger ? t.red : t.text), it.label)
         if !isempty(it.shortcut)
             kw = text_width(FONT_REGULAR, 11, it.shortcut)
             draw_text_mid(dl, FONT_REGULAR, 11, row.x1 - p(10) - kw, mid, u32(t.text_dim), it.shortcut)

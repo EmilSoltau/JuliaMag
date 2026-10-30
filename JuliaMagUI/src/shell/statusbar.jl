@@ -29,7 +29,7 @@ function status_texts(app)::StatusTexts
     w = app.window
     software = w !== nothing && software_renderer(w.renderer)
     v = snap === nothing ? nothing : get(snap.databases, app.ui.current_db, nothing)
-    running = snap === nothing ? 0 : count(j -> Core.status(j.job) == Core.JOB_RUNNING, snap.jobs)
+    running = running_jobs(snap)
     if v === nothing
         return StatusTexts("No database", "", running, app.busy, software)
     end

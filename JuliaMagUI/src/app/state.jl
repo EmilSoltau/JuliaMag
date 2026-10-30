@@ -9,6 +9,8 @@ struct ItemRow
     id::String
     kind::Core.ItemKind
     name::String
+    "The item's folder, relative to the project folder, such as `\"databases/db-1\"`."
+    path::String
     "True when the item's folder or file is gone."
     missing::Bool
     "The id of the job that made it, or `\"\"`."
@@ -106,6 +108,17 @@ struct JobRow
 end
 
 """
+    CrsInfo
+
+What the UI shows of a coordinate system code: its `name` (`\"\"` when the code is not
+known) and the short `unit` of its first axis, such as `\"m\"` or `\"deg\"` (or `\"\"`).
+"""
+struct CrsInfo
+    name::String
+    unit::String
+end
+
+"""
 What the UI shows of a session at one revision. Never changed after it is built.
 
 - `revision`: `Core.revision(s)` when the build started. A change during the build
@@ -114,6 +127,7 @@ What the UI shows of a session at one revision. Never changed after it is built.
 - `jobs`: newest first.
 - `undo_label`, `redo_label`: the label of the step `undo!` or `redo!` would run, or `nothing`.
 - `cursor`: a copy of the session cursor, or `nothing`; `marked`: `(first, last)` or `nothing`.
+- `crs`: a `CrsInfo` for every coordinate system code of the pairs and grids.
 """
 struct Snapshot
     revision::Int
@@ -128,6 +142,7 @@ struct Snapshot
     warnings::Vector{String}
     cursor::Union{Nothing,Core.Cursor}
     marked::Union{Nothing,Tuple{Int,Int}}
+    crs::Dict{String,CrsInfo}
 end
 
 copy_item(it::Core.ProjectItem) =
@@ -167,7 +182,7 @@ function snapshot(s::Core.Session)::Snapshot
     grids = Dict{String,GridView}()
     for it in items
         gone = Core.item_missing(p, it)
-        push!(rows, ItemRow(it.id, it.kind, it.name, gone, it.made_by, get(busy, it.id, "")))
+        push!(rows, ItemRow(it.id, it.kind, it.name, it.path, gone, it.made_by, get(busy, it.id, "")))
         if it.kind == Core.ITEM_DATABASE
             databases[it.id] = database_view(p, it, gone, relock)
         elseif it.kind == Core.ITEM_GRID
@@ -178,7 +193,39 @@ function snapshot(s::Core.Session)::Snapshot
     titles = command_titles()
     job_rows = JobRow[job_row(j, titles, names) for j in jobs]
     return Snapshot(rev, name, p.folder, rows, databases, grids, job_rows, undo_label,
-        redo_label, warns, cursor, marked)
+        redo_label, warns, cursor, marked, crs_infos(databases, grids))
+end
+
+# The name and unit of every coordinate system the pairs and grids use.
+function crs_infos(databases::Dict{String,DatabaseView}, grids::Dict{String,GridView})
+    codes = Set{String}()
+    for v in values(databases), q in v.pairs
+        push!(codes, q.crs)
+    end
+    for g in values(grids)
+        push!(codes, g.crs)
+    end
+    out = Dict{String,CrsInfo}()
+    for code in codes
+        isempty(code) && continue
+        out[code] = crs_info(code)
+    end
+    return out
+end
+
+const UNIT_SHORT = Dict("metre" => "m", "meter" => "m", "degree" => "deg", "foot" => "ft",
+    "US survey foot" => "ft")
+
+function crs_info(code::String)::CrsInfo
+    try
+        Core.valid_crs(code) || return CrsInfo("", "")
+        unit = Core.crs_axis_unit(code)
+        short = unit === nothing ? "" : get(UNIT_SHORT, unit[1], unit[1])
+        return CrsInfo(Core.crs_name(code), short)
+    catch e
+        e isa InterruptException && rethrow()
+        return CrsInfo("", "")
+    end
 end
 
 missing_text(it::Core.ProjectItem) = "The folder of $(it.name) is missing."
@@ -271,6 +318,9 @@ function job_row(j::Core.Job, titles::Dict{String,String}, names::Dict{String,St
         running ? "" : j.error, running ? String[] : copy(j.outputs), Core.job_warnings(j))
 end
 
+# The size of a text field's buffer, in bytes: names of 200 characters and more fit.
+const FIELD_BYTES = 1024
+
 """
     UiState
 
@@ -282,7 +332,14 @@ What the UI shows and where, apart from the project data. Changed on the render 
 - `current_db`: the database item the Database tab acts on, or `""`.
 - `selected`: `(kind, item id, sub key)` of the selection in the Data tree, where the sub
   key is a line or channel name or `""`; or `nothing`.
-- `expanded`: the keys of expanded tree nodes; `filter`: the Data tree filter text.
+- `expanded`: the keys of expanded tree nodes (see `row_key`); `filter`: the Data tree
+  filter text, and `filter_buffer` the bytes its text field edits.
+- `tree_scroll`, `props_scroll`: how far the Data tree and the Properties panel are
+  scrolled, in device pixels. `tree_focused`: the last click was on the tree, so the
+  arrow keys move in it. `tree_reveal`: scroll the selected row into view in the next frame.
+- `tree_cache`: the rows of the Data tree for the last key (a `TreeCache`, see data.jl).
+- `tree_drawn`: how many tree rows the last frame drew (tests read it).
+- `drag`: the splitter being dragged (a `SplitterDrag`, see panes.jl), or `nothing`.
 - `search`: the command search text while it is open, else `nothing`; `search_index`: its
   highlighted row.
 - `dialogs`: the modal stack, bottom first. Only modal dialogs go here: a dialog in the
@@ -311,6 +368,14 @@ Base.@kwdef mutable struct UiState
     selected::Union{Nothing,Tuple{Symbol,String,String}} = nothing
     expanded::Set{String} = Set{String}()
     filter::String = ""
+    filter_buffer::Vector{UInt8} = zeros(UInt8, FIELD_BYTES)
+    tree_scroll::Float32 = 0f0
+    props_scroll::Float32 = 0f0
+    tree_focused::Bool = false
+    tree_reveal::Bool = false
+    tree_cache::Any = nothing
+    tree_drawn::Int = 0
+    drag::Any = nothing
     search::Union{Nothing,String} = nothing
     search_index::Int = 0
     dialogs::Vector{Any} = Any[]
@@ -341,6 +406,7 @@ and the worker hands results back through `drain!`.
 - `seen_warnings`: how many session warnings have been shown as toasts.
 - `config_dir`: the folder that holds `settings.json`; the app saves its settings there.
 - `command_cache`: what `commands(app)` built last (see commands.jl).
+- `draw_ns`: how long the last `draw_app` took, in nanoseconds (tests and benchmarks read it).
 
 The constructor starts the worker. Stop it with `stop_worker!(app.queue)`.
 """
@@ -358,12 +424,13 @@ mutable struct AppState
     busy::Union{Nothing,String}
     config_dir::String
     command_cache::Any
+    draw_ns::Int
 end
 
 AppState(config::AppConfig, tokens::Tokens; session::Union{Nothing,Core.Session} = nothing,
         config_dir::AbstractString = JuliaMagUI.config_dir()) =
     AppState(config, tokens, session, nothing, false, Worker(), UiState(), Toast[], nothing, 0,
-        nothing, String(config_dir), nothing)
+        nothing, String(config_dir), nothing, 0)
 
 """
     set_session!(app, s)
@@ -372,7 +439,7 @@ Make `s` (a session or `nothing`) the app's project. This is the only way to cha
 `app.session`. It drops everything that belongs to the old project: the snapshot (a
 build of the old session that comes back later is dropped too), the count of shown
 warnings, a failed build, the Data tree's current database, selection, expanded
-nodes and filter, the open dialogs and menu, and the requests not handled yet (they were
+nodes, filter, scroll and cached rows, the open dialogs and menu, and the requests not handled yet (they were
 made for the old project). Call it on the render thread. It does not close the old session.
 """
 function set_session!(app::AppState, s::Union{Nothing,Core.Session})
@@ -387,6 +454,12 @@ function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     ui.selected = nothing
     empty!(ui.expanded)
     ui.filter = ""
+    fill!(ui.filter_buffer, 0x00)
+    ui.tree_scroll = 0f0
+    ui.props_scroll = 0f0
+    ui.tree_focused = false
+    ui.tree_reveal = false
+    ui.tree_cache = nothing
     empty!(ui.dialogs)   # the next frame also closes their ImGui popups
     empty!(ui.requests)
     ui.menu = nothing

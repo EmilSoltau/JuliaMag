@@ -25,6 +25,7 @@ include("app/state.jl")
 include("commands/commands.jl")
 include("commands/keys.jl")
 include("app/modal.jl")
+include("panes/panes.jl")
 include("shell/shell.jl")
 include("shell/menu.jl")
 include("shell/ribbon.jl")
@@ -32,6 +33,8 @@ include("shell/header.jl")
 include("shell/tabs.jl")
 include("shell/statusbar.jl")
 include("shell/central.jl")
+include("panes/data.jl")
+include("dialogs/item_dialogs.jl")
 
 """
     main(; project = nothing, config_dir = config_dir(), extra_ui = nothing, on_app = nothing,
@@ -78,7 +81,9 @@ function (a::AppFrame)(w::Window)
     app.window = w
     drain!(app)
     refresh!(app)
+    t = time_ns()
     draw_app(app)
+    app.draw_ns = Int(time_ns() - t)
     a.extra_ui === nothing || a.extra_ui(w)
     return nothing
 end

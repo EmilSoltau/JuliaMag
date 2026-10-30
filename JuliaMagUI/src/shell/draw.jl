@@ -23,6 +23,14 @@ inset(b::Box, dx::Real, dy::Real) = Box(b.x0 + dx, b.y0 + dy, b.x1 - dx, b.y1 - 
 "Do the two boxes share any pixel?"
 overlaps(a::Box, b::Box) = a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1
 
+"`v` logical px at `scale`, in device px, not rounded (ruling T10-R2: sum lengths unrounded)."
+fpx(scale::Real, v::Real) = Float32(v) * Float32(scale)
+
+"Round half up, as a browser snaps the edges it paints."
+rnd(v::Real) = round(Float32(v), RoundNearestTiesUp)
+"`b` with each edge snapped to a whole pixel (`rnd`)."
+snap(b::Box) = Box(rnd(b.x0), rnd(b.y0), rnd(b.x1), rnd(b.y1))
+
 """
     u32(c, alpha = 1) -> UInt32
 
@@ -53,24 +61,127 @@ function draw_text(dl, role::FontRole, size::Real, x::Real, y::Real, col::UInt32
         text::AbstractString)
     isempty(text) && return nothing
     with_font(role, size) do
-        ig.AddText(dl, (round(Float32(x)), round(Float32(y))), col, text)
+        ig.AddText(dl, (round(Float32(x)), round(Float32(y))), col, String(text))
     end
     return nothing
 end
 
 """
-    draw_text_mid(dl, role, size, x, mid_y, col, text; line = 1.25) -> Float32
+    draw_text_mid(dl, role, size, x, mid_y, col, text; line = 1.25, italic = false) -> Float32
 
 Draw one line of `text` from `x` in a CSS line box `line` times the font size high,
 centred on `mid_y`, as a browser draws it (see `text_y`). Returns the text width.
+`italic` slants the glyphs about the baseline, as a browser does for a font without an
+italic face (the app ships none).
 """
 function draw_text_mid(dl, role::FontRole, size::Real, x::Real, mid_y::Real, col::UInt32,
-        text::AbstractString; line::Real = 1.25)::Float32
+        text::AbstractString; line::Real = 1.25, italic::Bool = false)::Float32
     isempty(text) && return 0f0
     return with_font(role, size) do
-        ig.AddText(dl, (round(Float32(x)), text_y(role, size, mid_y; line)), col, text)
+        y = text_y(role, size, mid_y; line)
+        first_vertex = italic ? vertex_count(dl) : 0
+        ig.AddText(dl, (round(Float32(x)), y), col, String(text))
+        italic && slant_since!(dl, first_vertex, y + unsafe_load(ig.GetFontBaked().Ascent), SLANT)
         Float32(ig.CalcTextSize(text).x)
     end
+end
+
+const SLANT = 0.2f0   # the slant of synthetic italics, as Chromium's (about 11 degrees)
+
+vertex_count(dl) = Int(unsafe_load(dl.VtxBuffer).Size)
+
+# Slant the vertices added to `dl` since `first`: each moves right by `k` times its height
+# above `baseline`.
+function slant_since!(dl, first::Int, baseline::Real, k::Float32)
+    buf = unsafe_load(dl.VtxBuffer)
+    data = Ptr{ig.lib.ImDrawVert}(buf.Data)
+    for i in first+1:Int(buf.Size)
+        v = unsafe_load(data, i)
+        pos = ig.ImVec2(v.pos.x + (Float32(baseline) - v.pos.y) * k, v.pos.y)
+        unsafe_store!(data, ig.lib.ImDrawVert(pos, v.uv, v.col), i)
+    end
+    return nothing
+end
+
+"""
+    spaced_width(role, size, text, spacing) -> Float32
+
+The width of `text` drawn with `spacing` device px after each character (CSS `letter-spacing`).
+"""
+spaced_width(role::FontRole, size::Real, text::AbstractString, spacing::Real)::Float32 =
+    text_width(role, size, text) + Float32(spacing) * length(text)
+
+"""
+    draw_spaced_text(dl, role, size, x, mid_y, col, text, spacing)
+
+`draw_text_mid` with `spacing` device px after each character (CSS `letter-spacing`).
+"""
+function draw_spaced_text(dl, role::FontRole, size::Real, x::Real, mid_y::Real, col::UInt32,
+        text::AbstractString, spacing::Real)
+    with_font(role, size) do
+        y = text_y(role, size, mid_y)
+        cx = Float32(x)
+        for c in text
+            ch = string(c)
+            ig.AddText(dl, (round(cx), y), col, ch)
+            cx += Float32(ig.CalcTextSize(ch).x) + Float32(spacing)
+        end
+    end
+    return nothing
+end
+
+"""
+    field_text(buffer) -> String
+
+The text of a text field's zero-ended byte `buffer`.
+"""
+function field_text(buf::Vector{UInt8})::String
+    n = something(findfirst(==(0x00), buf), length(buf) + 1) - 1
+    return String(buf[1:n])
+end
+
+"""
+    set_field!(buffer, text)
+
+Put `text` into a text field's byte `buffer`, cut at a character so it fits with its zero.
+"""
+function set_field!(buf::Vector{UInt8}, text::AbstractString)
+    fill!(buf, 0x00)
+    bytes = codeunits(String(text))
+    n = length(bytes)
+    while n > length(buf) - 1 || (n > 0 && n < length(bytes) && (bytes[n+1] & 0xc0) == 0x80)
+        n -= 1
+    end
+    copyto!(buf, 1, bytes, 1, n)
+    return buf
+end
+
+"""
+    text_input!(app, id, buffer, b; flags = 0, size = 12.5, focus = false) -> (changed, active)
+
+An ImGui text field for `buffer` that fills box `b` with no frame of its own: the caller
+draws the frame. The text sits where a browser puts the text of an input of that height.
+`focus` gives it the keyboard focus. Returns whether the text changed and whether the
+field has the focus.
+"""
+function text_input!(app, id::AbstractString, buf::Vector{UInt8}, b::Box; flags::Integer = 0,
+        size::Real = BODY_FONT_SIZE, focus::Bool = false)
+    changed = with_font(FONT_REGULAR, size) do
+        pad_y = max(text_y(FONT_REGULAR, size, centre_y(b)) - b.y0, 0f0)
+        ig.PushStyleVar(ig.ImGuiStyleVar_FramePadding, (0f0, pad_y))
+        ig.PushStyleVar(ig.ImGuiStyleVar_FrameBorderSize, 0f0)
+        for slot in (ig.ImGuiCol_FrameBg, ig.ImGuiCol_FrameBgHovered, ig.ImGuiCol_FrameBgActive)
+            ig.PushStyleColor(slot, (0f0, 0f0, 0f0, 0f0))
+        end
+        ig.SetCursorScreenPos((b.x0, b.y0))
+        ig.SetNextItemWidth(max(width(b), 1f0))
+        focus && ig.SetKeyboardFocusHere()
+        c = ig.InputText(id, buf, length(buf), flags)
+        ig.PopStyleColor(3)
+        ig.PopStyleVar(2)
+        c
+    end
+    return changed, ig.IsItemActive()
 end
 
 """

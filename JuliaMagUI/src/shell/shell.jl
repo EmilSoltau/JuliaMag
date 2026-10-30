@@ -1,27 +1,14 @@
 # The app frame: one full-window ImGui window that holds the header, the tab strip, the
-# ribbon band, the main row (left pane, central area) and the status bar. Dialogs, the
-# ribbon peek, the open menu, toasts and the tooltip come after it, in that order.
+# ribbon band, the main row (left pane, central area) and the status bar. The panes are in
+# panes/. Dialogs, the ribbon peek, the open menu, toasts and the tooltip come after it,
+# in that order.
 
 # Heights and widths of the shell, in logical pixels (prototype CSS).
 const HEADER_H = 34
 const TABS_H = 32
 const RIBBON_H = 102
 const STATUS_H = 26
-const PANE_HEAD_H = 34
-const LEFT_DEFAULT = 272
-const LEFT_RANGE = (200, 480)
 const TOOLTIP_DELAY = 0.48   # s
-
-"""
-    pane_width(x, range, default) -> Float32
-
-A pane width from the settings, clamped to `range`. A width that is not a finite
-number (a hand-edited settings file) gives `default`.
-"""
-function pane_width(x, range::Tuple{Real,Real}, default::Real)::Float32
-    (x isa Real && !(x isa Bool) && isfinite(x)) || return Float32(default)
-    return Float32(clamp(x, range[1], range[2]))
-end
 
 """
     ShellLayout
@@ -102,8 +89,9 @@ function draw_app(app)
     ig.Begin("JuliaMag", C_NULL, HOST_FLAGS)
     ig.PopStyleVar(3)
     dl = ig.GetWindowDrawList()
-    draw_left_pane(app, dl, layout.left)
+    hot = draw_left_pane(app, dl, layout.left)
     draw_central(app, dl, layout.center)
+    hot && paint_splitter(app, dl, layout.left.x1, layout.left.y0, layout.left.y1)
     draw_status_bar(app, dl, layout.status)
     layout.docked && draw_ribbon_band(app, dl, layout.ribbon)
     draw_header(app, dl, layout.header)
@@ -181,7 +169,7 @@ function run_command!(app, id::AbstractString)
     return nothing
 end
 
-# --- Frames that later tasks fill ---
+# --- The ribbon band ---
 
 """
     draw_ribbon_band(app, dl, b)
@@ -215,50 +203,6 @@ function draw_ribbon_peek(app, b::Box)
     ig.PopClipRect(dl)
     draw_ribbon_band(app, dl, b)
     ig.End()
-    return nothing
-end
-
-const LEFT_TABS = (:data => "Data", :jobs => "Jobs")
-
-"""
-    draw_left_pane(app, dl, b)
-
-The left pane frame: `pane` fill, a 1 px `border` on the right, and the 34 px header band
-(`pane_header`, 1 px `border` at the bottom) with the text tabs Data and Jobs. Tasks 11
-and 12 draw the bodies.
-"""
-function draw_left_pane(app, dl, b::Box)
-    s = app.window.scale
-    t = app.tokens
-    p(v) = px(s, v)
-    hl = hairline(s)
-    ig.AddRectFilled(dl, (b.x0, b.y0), (b.x1, b.y1), u32(t.pane))
-    ig.AddRectFilled(dl, (b.x1 - hl, b.y0), (b.x1, b.y1), u32(t.border))
-    head = Box(b.x0, b.y0, b.x1 - hl, b.y0 + p(PANE_HEAD_H))
-    ig.AddRectFilled(dl, (head.x0, head.y0), (head.x1, head.y1), u32(t.pane_header))
-    ig.AddRectFilled(dl, (head.x0, head.y1 - hl), (head.x1, head.y1), u32(t.border))
-    ig.PushID("left")
-    x = head.x0 + p(6)
-    for (key, label) in LEFT_TABS
-        on = app.ui.left_tab === key
-        tw = text_width(FONT_SEMIBOLD, BODY_FONT_SIZE, label)   # the semibold width, so tabs never move
-        tab = Box(x, head.y0, x + round(tw + p(18)), head.y1 - hl)
-        clicked, hovered, _ = hit(label, tab)
-        clicked && (app.ui.left_tab = key)
-        if hovered && !on
-            ig.AddRectFilled(dl, (tab.x0 + p(1), tab.y0 + p(5)), (tab.x1 - p(1), tab.y1 - p(5)),
-                u32(t.hover), p(4))
-        end
-        role = on ? FONT_SEMIBOLD : FONT_REGULAR
-        lw = text_width(role, BODY_FONT_SIZE, label)
-        draw_text_mid(dl, role, BODY_FONT_SIZE, tab.x0 + (width(tab) - lw) / 2, centre_y(tab),
-            u32(on ? t.text : t.text_dim), label)
-        if on
-            ig.AddRectFilled(dl, (tab.x0 + p(4), tab.y1 - p(2)), (tab.x1 - p(4), tab.y1), u32(t.accent))
-        end
-        x = tab.x1 + p(2)
-    end
-    ig.PopID()
     return nothing
 end
 

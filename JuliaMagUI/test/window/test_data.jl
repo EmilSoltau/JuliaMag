@@ -1,0 +1,403 @@
+using Test
+import CImGui as ig
+import ImGuiTestEngine as te
+import PNGFiles
+import JuliaMagCore as Core
+import JuliaMagUI as UI
+using JuliaMagUI: LIGHT, DARK, THEME_LIGHT, THEME_DARK
+
+const DATA_SHOTS = joinpath(@__DIR__, "..", "shots")
+
+"""
+    tree_ref(key, part = "row") -> String
+
+The test engine reference of a part of a Data tree row: `"row"`, `"check"` or `"chevron"`.
+A `/` in the key is escaped, since the reference uses `/` between ids.
+"""
+tree_ref(key::AbstractString, part::AbstractString = "row") =
+    "JuliaMag/left/tree/" * replace(key, "/" => "\\/") * "/" * part
+
+right_click(ref) = te.ItemClick(ref, 1)
+
+# A right click on `ref` 100 px from the window's left, where the prototype shots click.
+function right_click_at_100(ref)
+    te.MouseMove(ref)
+    y = unsafe_load(ig.GetIO()).MousePos.y
+    te.MouseMoveToPos((100f0, Float32(y)))
+    te.MouseClick(1)
+    return nothing
+end
+
+"Put `text` into the text field `ref` without pressing Enter (which would press OK)."
+fill_field(ref, text) = (te.ItemClick(ref); te.KeyCharsReplace(text); nothing)
+
+# The lines of database `db` in the app's snapshot, by name.
+line_selected(app, db, name) = only(l for l in app.snap.databases[db].lines if l.name == name).selected
+
+# The height of the tree at 1480 x 920 with no Properties panel: the pane body less the
+# filter box. The tree shows at most this many rows (one more when cut at both ends).
+function tree_view_rows(scale = 1)
+    body = 920 - sum(UI.px(scale, h) for h in (UI.HEADER_H, UI.TABS_H, UI.RIBBON_H, UI.STATUS_H, UI.PANE_HEAD_H))
+    view = body - (UI.hairline(scale) + UI.fpx(scale, UI.FOOT_H))
+    return ceil(Int, view / UI.fpx(scale, UI.TREE_ROW_H))
+end
+
+# The open tree with a channel selected, the context menus, and the dialogs, at scale 1.
+function more_shots(ctx, app, name)
+    db = app.ui.current_db
+    # Open everything for a second shot, with a channel selected.
+    union!(app.ui.expanded, [db, "$db/channels"])
+    ctx.frames(2)
+    ctx.click(tree_ref("$db/channels/MAG"))
+    te.MouseMoveToPos((700, 600))
+    ctx.frames(3)
+    ctx.shot(joinpath(DATA_SHOTS, "data-open-$name.png"))
+    right_click_at_100(tree_ref("$db/channels/MAG"))
+    ctx.frames(2)
+    te.MouseMove("//###menu/Channel Properties...")
+    ctx.frames(2)
+    ctx.shot(joinpath(DATA_SHOTS, "data-menu-$name.png"))
+    ctx.key("Escape")
+    right_click_at_100(tree_ref(db))
+    te.MouseMoveToPos((700, 400))
+    ctx.frames(2)
+    ctx.shot(joinpath(DATA_SHOTS, "data-menu-db-$name.png"))
+    ctx.click("//###menu/Rename...")
+    ctx.frames(3)
+    ctx.shot(joinpath(DATA_SHOTS, "data-rename-$name.png"))
+    ctx.key("Escape")
+    ctx.frames(2)
+    right_click(tree_ref("$db/channels/MAG"))
+    ctx.click("//###menu/Channel Properties...")
+    ctx.frames(3)
+    ctx.shot(joinpath(DATA_SHOTS, "data-channel-props-$name.png"))
+    ctx.key("Escape")
+    ctx.frames(2)
+    UI.push_dialog!(app, UI.ResultDialog("Statistics: MAG", "count   172,900\nmin     -173.31\nmax      430.08"))
+    ctx.frames(3)
+    ctx.shot(joinpath(DATA_SHOTS, "data-result-$name.png"))
+    ctx.click("//###dialog1/Close")
+    ctx.frames(2)
+    @test isempty(app.ui.dialogs)
+end
+
+window_testset("data tab") do
+    mkpath(DATA_SHOTS)
+
+    @testset "5,000 lines: only the rows in view are drawn, and the frame is fast" begin
+        with_project_app(session_with(lines = 5_000, channels = 300)) do ctx, app
+            db = app.ui.current_db
+            union!(app.ui.expanded, ["databases", db, "$db/lines", "$db/channels"])
+            ctx.frames(3)
+            limit = tree_view_rows() + 2
+            @test 0 < app.ui.tree_drawn <= limit
+            app.ui.tree_scroll = 60_000f0   # the middle of the lines
+            ctx.frames(2)
+            @test app.ui.tree_scroll == 60_000f0 && 0 < app.ui.tree_drawn <= limit
+            app.ui.tree_scroll = 1f9        # past the end: clamped
+            ctx.frames(2)
+            @test app.ui.tree_scroll < 1f9 && 0 < app.ui.tree_drawn <= limit
+            ctx.frames(10)                  # warm up
+            times = Int[]
+            for _ in 1:20
+                ctx.frames(1)
+                push!(times, app.draw_ns)
+            end
+            sort!(times)
+            @test times[10] < 16_000_000   # the median frame draws in under 16 ms
+        end
+    end
+
+    @testset "a 200-character name is cut, the pane keeps its width" begin
+        with_project_app(session_with(name = "x"^200)) do ctx, app
+            push!(app.ui.expanded, "databases")
+            ctx.frames(2)
+            path = ctx.shot(joinpath(DATA_SHOTS, "data-long-name.png"))
+            img = PNGFiles.load(path)
+            @test app.config.left_width == 272f0
+            row_y = 168 + 34 + 4 + 26 + 13   # the database row's middle
+            @test near(rgb255(img[row_y, 272]), rgb255(LIGHT.border))   # the pane's right border
+            @test near(rgb255(img[row_y, 274]), rgb255(LIGHT.canvas))   # the central area
+            # Nothing is drawn in the row's 8 px right padding: the name stops before it.
+            @test all(near(rgb255(img[y, x]), rgb255(LIGHT.pane)) for y in row_y-6:row_y+6, x in 265:270)
+            # The full name is in the tooltip.
+            te.MouseMove(tree_ref(app.ui.current_db))
+            ctx.wait_until(() -> app.ui.tip !== nothing; timeout = 5)
+            @test app.ui.tip.title == "x"^200
+        end
+    end
+
+    @testset "a line checkbox goes through the worker, and Ctrl+Z ticks it again" begin
+        with_project_app(session_with(lines = 3)) do ctx, app
+            db = app.ui.current_db
+            union!(app.ui.expanded, ["databases", db, "$db/lines"])
+            ctx.frames(2)
+            @test line_selected(app, db, "L1001")
+            ctx.click(tree_ref("$db/lines/L1001", "check"))
+            ctx.wait_until(() -> !line_selected(app, db, "L1001"))
+            @test line_selected(app, db, "L1002")
+            @test app.snap.undo_label !== nothing
+            ctx.key("Ctrl+Z")
+            ctx.wait_until(() -> line_selected(app, db, "L1001"))
+
+            # Select None and Select All in the Lines folder menu act on that database.
+            right_click(tree_ref("$db/lines"))
+            ctx.click("//###menu/Select No Lines")
+            ctx.wait_until(() -> !any(l -> l.selected, app.snap.databases[db].lines))
+            right_click(tree_ref("$db/lines"))
+            ctx.click("//###menu/Select All Lines")
+            ctx.wait_until(() -> all(l -> l.selected, app.snap.databases[db].lines))
+        end
+    end
+
+    @testset "Remove from Project asks, removes, and Ctrl+Z brings the item back" begin
+        with_project_app(kangaroo_data()) do ctx, app
+            db = app.ui.current_db
+            push!(app.ui.expanded, "databases")
+            ctx.frames(2)
+            right_click(tree_ref(db))
+            ctx.frames(1)
+            @test UI.menu_open(app, "tree") && app.ui.selected == (:database, db, "")
+            ctx.click("//###menu/Remove from Project")
+            ctx.frames(1)
+            d = only(app.ui.dialogs)
+            @test d isa UI.ConfirmDialog && d.title == "Remove Kangaroo Hills 2024?"
+            ctx.click("//###dialog1/Remove")
+            ctx.wait_until(() -> !haskey(app.snap.databases, db))
+            ctx.frames(2)
+            @test !te.ItemExists(tree_ref(db))
+            ctx.key("Ctrl+Z")
+            ctx.wait_until(() -> haskey(app.snap.databases, db))
+            ctx.frames(2)
+            @test te.ItemExists(tree_ref(db))
+        end
+    end
+
+    @testset "Delete Channel on a protected channel shows the core's message" begin
+        with_project_app(kangaroo_data()) do ctx, app
+            db = app.ui.current_db
+            union!(app.ui.expanded, ["databases", db, "$db/channels"])
+            ctx.frames(2)
+            right_click(tree_ref("$db/channels/MAG"))
+            ctx.click("//###menu/Delete Channel...")
+            ctx.click("//###dialog1/Delete")
+            ctx.wait_until(() -> any(t -> t.kind === :error, app.toasts))
+            t = only(filter(t -> t.kind === :error, app.toasts))
+            @test t.text == UI.user_message(Core.ProtectedError("MAG")) ==
+                  "Channel MAG is protected and cannot be edited."
+            @test any(c -> c.name == "MAG", app.snap.databases[db].channels)
+        end
+    end
+
+    @testset "Rename: an empty name keeps the button greyed" begin
+        with_project_app(kangaroo_data()) do ctx, app
+            db = app.ui.current_db
+            push!(app.ui.expanded, "databases")
+            ctx.frames(2)
+            right_click(tree_ref(db))
+            ctx.click("//###menu/Rename...")
+            ctx.frames(2)
+            d = only(app.ui.dialogs)
+            @test d isa UI.RenameDialog && UI.field_text(d.name) == "Kangaroo Hills 2024"
+            fill_field("//###dialog1/##Name", "")
+            ctx.frames(1)
+            @test UI.field_text(d.name) == ""
+            ctx.click("//###dialog1/Rename")
+            ctx.frames(2)
+            @test only(app.ui.dialogs) === d   # nothing happened
+            path = ctx.shot(joinpath(DATA_SHOTS, "data-rename-empty-light.png"))
+            ctx.type("//###dialog1/##Name", "Survey B")   # Enter presses Rename
+            ctx.wait_until(() -> UI.item_name(app.snap, db) == "Survey B")
+            @test isempty(app.ui.dialogs)
+            # Rename a channel; the selection follows the new name.
+            union!(app.ui.expanded, [db, "$db/channels"])
+            ctx.frames(2)
+            right_click(tree_ref("$db/channels/IGRF"))
+            ctx.click("//###menu/Rename...")
+            ctx.type("//###dialog1/##Name", "IGRF_2025")
+            ctx.wait_until(() -> any(c -> c.name == "IGRF_2025", app.snap.databases[db].channels))
+            @test app.ui.selected == (:channel, db, "IGRF_2025")
+        end
+    end
+
+    @testset "Channel Properties sets the channel info" begin
+        with_project_app(kangaroo_data()) do ctx, app
+            db = app.ui.current_db
+            union!(app.ui.expanded, ["databases", db, "$db/channels"])
+            ctx.frames(2)
+            right_click(tree_ref("$db/channels/IGRF"))
+            ctx.click("//###menu/Channel Properties...")
+            ctx.frames(2)
+            @test only(app.ui.dialogs) isa UI.ChannelPropsDialog
+            fill_field("//###dialog1/##Decimals", "x")
+            ctx.frames(1)
+            ctx.click("//###dialog1/Apply")
+            ctx.frames(1)
+            @test length(app.ui.dialogs) == 1   # a bad number: Apply is greyed
+            fill_field("//###dialog1/##Decimals", "auto")
+            fill_field("//###dialog1/##Units", "nT/m")
+            ctx.click("//###dialog1/Exponential")
+            ctx.click("//###dialog1/Apply")
+            ch() = only(c for c in app.snap.databases[db].channels if c.name == "IGRF")
+            ctx.wait_until(() -> ch().units == "nT/m")
+            @test ch().decimals == -1 && ch().format == :exponential && ch().label == "IGRF"
+            ctx.key("Ctrl+Z")
+            ctx.wait_until(() -> ch().units == "nT")
+        end
+    end
+
+    @testset "the current database follows the tree selection" begin
+        s = kangaroo_data()
+        second = add_test_database!(s, ["A" => [1.0, 2.0]])
+        with_project_app(s) do ctx, app
+            first_db = app.ui.current_db
+            @test first_db != second
+            union!(app.ui.expanded, ["databases", second, first_db, "$first_db/channels"])
+            ctx.frames(2)
+            ctx.click(tree_ref(second))
+            @test app.ui.current_db == second && app.ui.selected == (:database, second, "")
+            ctx.click(tree_ref("$first_db/channels/MAG"))   # a row under a database
+            @test app.ui.current_db == first_db
+            ctx.click(tree_ref("$second/lines"))
+            @test app.ui.current_db == second
+            # A grid row leaves the current database as it is.
+            ctx.click(tree_ref("grids"))
+            ctx.frames(1)
+            grid = first(it.id for it in app.snap.items if it.kind == Core.ITEM_GRID)
+            ctx.click(tree_ref(grid))
+            @test app.ui.current_db == second && app.ui.selected == (:grid, grid, "")
+        end
+    end
+
+    @testset "keyboard: arrows, Enter and Shift+F10" begin
+        with_project_app(kangaroo_data()) do ctx, app
+            db = app.ui.current_db
+            ctx.click(tree_ref("databases"))   # selects it and opens it
+            @test app.ui.selected == (:databases, "", "") && "databases" in app.ui.expanded
+            ctx.key("Down")
+            @test app.ui.selected == (:database, db, "")
+            ctx.key("Right")
+            @test db in app.ui.expanded
+            ctx.key("Down")
+            @test app.ui.selected == (:lines, db, "")
+            ctx.key("Enter")
+            @test "$db/lines" in app.ui.expanded
+            ctx.key("Down")
+            @test app.ui.selected == (:line, db, "L1001")
+            ctx.key("Enter")   # ticks the line off
+            ctx.wait_until(() -> !line_selected(app, db, "L1001"))
+            ctx.key("Up")
+            ctx.key("Left")
+            @test !("$db/lines" in app.ui.expanded)
+            ctx.key("Up")
+            ctx.key("Shift+F10")
+            ctx.frames(1)
+            @test UI.menu_open(app, "tree") && app.ui.menu.items[end].label == "Remove from Project"
+            ctx.key("Escape")
+            ctx.frames(1)
+            @test app.ui.menu === nothing
+            # The keys pass to the tree only while it has the focus.
+            ctx.click("JuliaMag/left/Data")
+            ctx.key("Down")
+            @test app.ui.selected == (:database, db, "")
+            # Down to the end keeps the selected row in view.
+            union!(app.ui.expanded, ["$db/lines"])
+            ctx.click(tree_ref(db))
+            for _ in 1:40
+                ctx.key("Down")
+            end
+            ctx.frames(1)
+            @test app.ui.selected[1] === :line && app.ui.tree_scroll > 0
+        end
+    end
+
+    @testset "the filter shows matches with their parents; Esc clears it" begin
+        with_project_app(kangaroo_data()) do ctx, app
+            db = app.ui.current_db
+            ctx.type("JuliaMag/left/##Filter", "t2010")
+            ctx.frames(2)
+            @test app.ui.filter == "t2010"
+            @test te.ItemExists(tree_ref("$db/lines/T2010"))
+            ctx.frames(1)
+            @test !te.ItemExists(tree_ref("$db/lines/L1001"))
+            ctx.shot(joinpath(DATA_SHOTS, "data-filter-light.png"))
+            te.ItemClick("JuliaMag/left/##Filter")
+            ctx.key("Escape")
+            ctx.frames(2)
+            @test app.ui.filter == ""
+            @test !te.ItemExists(tree_ref("$db/lines/T2010"))
+        end
+    end
+
+    @testset "the splitter resizes the pane and saves the width on release" begin
+        dir = mktempdir()
+        with_test_app(; config_dir = dir) do ctx
+            app = ctx.app_state()
+            te.MouseMove("JuliaMag/left/splitter")
+            ctx.frames(1)
+            path = ctx.shot(joinpath(DATA_SHOTS, "data-splitter-hover.png"))
+            img = PNGFiles.load(path)
+            # 2 px of accent at 70 % over the pane's border (x 271) and the canvas (x 272).
+            over(c) = ntuple(i -> i == 4 ? 1f0 : LIGHT.accent[i] * 0.7f0 + c[i] * 0.3f0, 4)
+            @test near(rgb255(img[500, 272]), rgb255(over(LIGHT.border)); tol = 2)
+            @test near(rgb255(img[500, 273]), rgb255(over(LIGHT.canvas)); tol = 2)
+            @test near(rgb255(img[500, 271]), rgb255(LIGHT.pane)) && near(rgb255(img[500, 274]), rgb255(LIGHT.canvas))
+            te.MouseDragWithDelta((50, 0))
+            ctx.frames(2)
+            @test app.config.left_width == 322f0
+            ctx.wait_until(() -> app.queue.pending == 0)
+            @test UI.load_config(dir)[1].left_width == 322f0
+            te.MouseMove("JuliaMag/left/splitter")
+            te.MouseDragWithDelta((-500, 0))
+            ctx.frames(2)
+            @test app.config.left_width == 200f0
+        end
+    end
+
+    @testset "the Jobs tab shows the number of running jobs" begin
+        s = kangaroo_data()
+        go = Base.Event()
+        job = Core.start_job!(s, "test.waiting_job", Dict{String,Any}(),
+            (progress, io) -> (wait(go); Core.ProjectItem[]))
+        try
+            with_project_app(s) do ctx, app
+                ctx.frames(2)
+                path = ctx.shot(joinpath(DATA_SHOTS, "data-jobs-badge.png"))
+                img = PNGFiles.load(path)
+                # The badge: a 16 px accent pill after "Jobs".
+                row = img[168 + 17, :]
+                xs = [x for x in 80:140 if near(rgb255(row[x]), rgb255(LIGHT.accent); tol = 6)]
+                @test !isempty(xs) && 14 <= last(xs) - first(xs) + 1 <= 17
+                notify(go)
+                Core.wait_job(job)
+                ctx.wait_until(() -> UI.running_jobs(app.snap) == 0)
+            end
+        finally
+            notify(go)
+        end
+    end
+
+    @testset "shots of the tree, the properties, the menu and the dialogs" begin
+        for (theme, tokens, name) in ((THEME_LIGHT, LIGHT, "light"), (THEME_DARK, DARK, "dark"))
+            for scale in (1, 1.5)
+                sfx = scale == 1 ? "" : "-1.5x"
+                with_project_app(kangaroo_data(); theme, scale) do ctx, app
+                    db = app.ui.current_db
+                    union!(app.ui.expanded, ["databases", db, "grids"])   # as the prototype opens
+                    ctx.frames(1)
+                    ctx.click(tree_ref(db))
+                    te.MouseMoveToPos((700, 600))
+                    ctx.frames(3)
+                    path = ctx.shot(joinpath(DATA_SHOTS, "data-$name$sfx.png"))
+                    img = PNGFiles.load(path)
+                    p(v) = Int(UI.px(scale, v))
+                    # The selected row's fill, inset 4 px; the Properties header band.
+                    y = p(168 + 34 + 4 + 26 + 13)
+                    @test near(rgb255(img[y, p(10)]), rgb255(tokens.selection))
+                    @test near(rgb255(img[y, p(2)]), rgb255(tokens.pane))
+                    scale == 1 && more_shots(ctx, app, name)
+                end
+            end
+        end
+    end
+end

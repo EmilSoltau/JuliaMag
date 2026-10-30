@@ -13,7 +13,7 @@ foreach(f -> endswith(f, ".svg") && include_dependency(joinpath(ICON_DIR, f)), r
 
 The icon sizes in the atlas, in logical pixels.
 """
-const ICON_SIZES = (10, 12, 14, 16, 18, 22, 24, 32, 48)
+const ICON_SIZES = (10, 12, 14, 15, 16, 18, 22, 24, 32, 48)
 
 """
     ICON_STYLES
@@ -25,8 +25,9 @@ How an icon is coloured:
 - `:nav`: on the brand colour of the backstage nav; ink `on_accent` (white), accent `brand_tint`.
 - `:on_accent`: on an accent fill; ink `on_accent` (white), accent `accent`.
 - `:dim`: ink `text_dim`, as the prototype's search pill and ribbon chevron.
+- `:danger`: ink `red`, as the prototype's red menu rows (`.mi.danger`).
 """
-const ICON_STYLES = (:normal, :disabled, :nav, :on_accent, :dim)
+const ICON_STYLES = (:normal, :disabled, :nav, :on_accent, :dim, :danger)
 
 """
     ICON_STYLE_SIZES
@@ -34,10 +35,11 @@ const ICON_STYLES = (:normal, :disabled, :nav, :on_accent, :dim)
 The sizes the atlas holds for each style, as the prototype uses them:
 `:normal` at every size, `:disabled` for buttons and menus, `:nav` for the backstage
 nav (18) and its cards (48), `:on_accent` for selected rows (16) and dialog heads (22),
-`:dim` for the search pill and the ribbon chevron (14) and the ribbon scroll arrows (16).
+`:dim` for the search pill, the ribbon chevron and the Data tree chevrons (14), the Data
+filter box (15) and the ribbon scroll arrows (16), `:danger` for the red rows of a menu (16).
 Another size is drawn scaled from the next bigger size of its style.
 """
-const ICON_STYLE_SIZES = (ICON_SIZES, (16, 18, 32), (18, 48), (16, 22), (14, 16))
+const ICON_STYLE_SIZES = (ICON_SIZES, (16, 18, 32), (18, 48), (16, 22), (14, 15, 16), (16,))
 
 # The placeholder colour of each prototype colour variable in the SVG files.
 # tools/extract_icons.jl writes the same table.
@@ -112,6 +114,8 @@ function style_colours(t::Tokens, style::Symbol)
         (white, t.accent, t.green, t.red, t.amber)
     elseif style === :dim
         (t.text_dim, t.accent, t.green, t.red, t.amber)
+    elseif style === :danger
+        (t.red, t.accent, t.green, t.red, t.amber)
     else
         throw(ArgumentError("icon style must be one of $(ICON_STYLES), got :$style"))
     end

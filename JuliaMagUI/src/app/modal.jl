@@ -82,14 +82,16 @@ const DIALOG_FLAGS = ig.ImGuiWindowFlags_NoTitleBar | ig.ImGuiWindowFlags_NoResi
 
 """
     draw_dialog(f, app, d; title, icon = "", width = 520, ok_label = "OK", ok_enabled = true,
-                on_ok, on_cancel = () -> pop_dialog!(app), footer_left = nothing)
+                on_ok, on_cancel = () -> pop_dialog!(app), footer_left = nothing,
+                cancel_label = "Cancel")
 
 The frame of modal dialog `d`, as the prototype's `openDialog`: centred over the
 `backdrop`, `width` px wide, radius 10, `menu` fill, 1 px `border_strong`, shadow.
 The header is 46 high: a 22 px `icon`, the `title` (15 semibold) and a close x; drag it to
 move the dialog. `f()` draws the body, padded 14 by 16. The footer holds what
 `footer_left()` draws on the left, then Cancel and the primary button (`ok_label`, greyed
-when `ok_enabled` is false).
+when `ok_enabled` is false). With `cancel_label = nothing` there is no Cancel button (Esc
+and the close x still call `on_cancel`).
 
 Esc, Cancel and the close x call `on_cancel()`; the primary button calls `on_ok()`, and so
 does Enter while a text field of the dialog is active. `on_ok` decides whether the dialog
@@ -98,7 +100,8 @@ closes (`pop_dialog!`). Errors in the callbacks become error toasts.
 function draw_dialog(f, app, d; title::AbstractString, icon::AbstractString = "",
         width::Real = 520, ok_label::AbstractString = "OK", ok_enabled::Bool = true,
         on_ok::Function, on_cancel::Function = () -> pop_dialog!(app),
-        footer_left::Union{Nothing,Function} = nothing)
+        footer_left::Union{Nothing,Function} = nothing,
+        cancel_label::Union{Nothing,AbstractString} = "Cancel")
     dialogs = app.ui.dialogs
     level = findfirst(x -> x === d, dialogs)
     level === nothing && return nothing
@@ -115,7 +118,9 @@ function draw_dialog(f, app, d; title::AbstractString, icon::AbstractString = ""
 
     vp = unsafe_load(ig.GetMainViewport())
     dw = p(width)
-    ig.SetNextWindowPos((round(vp.Pos.x + vp.Size.x / 2), round(vp.Pos.y + vp.Size.y / 2 - p(30))),
+    # Centred, 30 px above the middle, as the prototype's `Math.round((innerHeight - h) / 2 - 30)`:
+    # ImGui truncates the top left, so the extra half pixel makes it round half up.
+    ig.SetNextWindowPos((vp.Pos.x + vp.Size.x / 2 + 0.5f0, vp.Pos.y + vp.Size.y / 2 - p(30) + 0.5f0),
         ig.ImGuiCond_Appearing, (0.5, 0.5))
     ig.SetNextWindowSizeConstraints((dw, 0f0), (dw, max(vp.Size.y - p(40), p(100))))
     ig.PushStyleVar(ig.ImGuiStyleVar_WindowPadding, (0, 0))
@@ -155,7 +160,8 @@ function draw_dialog(f, app, d; title::AbstractString, icon::AbstractString = ""
     draw_text_mid(dl, FONT_SEMIBOLD, 15, x, mid, u32(t.text), title)
     ig.PopClipRect(dl)
     cancel = false
-    clicked, hovered = icon_button(app, "Close", "close", close; size = 22)   # `.dlg-h .ic` is 22 px
+    # Its id is not "Close", which a primary button may use (the result dialog).
+    clicked, hovered = icon_button(app, "Close dialog", "close", close; size = 22)   # `.dlg-h .ic` is 22 px
     hovered && item_tip!(app, "Close"; shortcut = "Esc")
     cancel |= clicked
     ig.AddRectFilled(dl, (head.x0, head.y1 - hl), (head.x1, head.y1), u32(t.border))
@@ -182,9 +188,11 @@ function draw_dialog(f, app, d; title::AbstractString, icon::AbstractString = ""
         ig.EndGroup()
     end
     ok_w = round(button_width(app, ok_label; primary = true))
-    cancel_w = round(button_width(app, "Cancel"))
     ok_x = head.x1 - p(16) - ok_w
-    cancel |= button(app, "Cancel", "Cancel", ok_x - p(8) - cancel_w, by)
+    if cancel_label !== nothing
+        cancel_w = round(button_width(app, cancel_label))
+        cancel |= button(app, cancel_label, cancel_label, ok_x - p(8) - cancel_w, by)
+    end
     ok = button(app, ok_label, ok_label, ok_x, by; primary = true, enabled = ok_enabled)
     footer_end = by + p(26 + 12) + hl
     ig.SetCursorScreenPos((b.x0, footer_end))
