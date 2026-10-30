@@ -2,7 +2,7 @@
 
 julia_version = "1.12.7"
 manifest_format = "2.0"
-project_hash = "0560a202349e04aaaa1ea92cd69feb58efebf165"
+project_hash = "6c2cc44a0821583d19ab94a0e4a6919c3293b00a"
 
 [[deps.AbstractTrees]]
 git-tree-sha1 = "2d9c9a55f9c93e8887ad391fbae72f8ef55e1177"
@@ -536,6 +536,12 @@ version = "3.2.1+0"
 deps = ["ArchGDAL", "CodecZlib", "EzXML", "JSON3", "Mmap", "Parquet2", "Parsers", "Printf", "Proj", "StructTypes", "Tables"]
 path = "JuliaMagCore"
 uuid = "133f1fd6-5f53-418f-9a68-c205e5f9c1d6"
+version = "0.1.0"
+
+[[deps.JuliaMagUI]]
+deps = ["JSON3", "JuliaMagCore"]
+path = "JuliaMagUI"
+uuid = "3d3c709c-05d9-4465-82b6-3b33a2dc0c6b"
 version = "0.1.0"
 
 [[deps.JuliaSyntaxHighlighting]]
