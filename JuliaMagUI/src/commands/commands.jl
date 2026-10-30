@@ -60,6 +60,8 @@ handle_request!(app, @nospecialize(request)) = false
 Hand every request of `app.ui.requests` to `handle_request!` and empty the list.
 A request that no method handles is dropped with a `@debug` message.
 A handler that throws is logged and shown as an error toast; the other requests still run.
+When a handler changes the project (`set_session!`), the rest of the batch is dropped:
+it was made for the old project.
 Requests that a handler pushes wait for the next frame.
 Call it on the render thread once per frame.
 """
@@ -68,7 +70,12 @@ function handle_requests!(app)
     isempty(requests) && return nothing
     batch = copy(requests)
     empty!(requests)
-    for r in batch
+    session = app.session
+    for (k, r) in enumerate(batch)
+        if app.session !== session
+            @debug "The project changed; requests for the old one are dropped" requests = batch[k:end]
+            break
+        end
         handled = try
             handle_request!(app, r)
         catch e

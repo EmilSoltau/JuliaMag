@@ -12,6 +12,8 @@ struct CountingRequest
 end
 UI.handle_request!(app, ::FailingRequest) = error("the handler broke")
 UI.handle_request!(app, r::CountingRequest) = (r.count[] += 1; true)
+struct SwitchProjectRequest end
+UI.handle_request!(app, ::SwitchProjectRequest) = (UI.set_session!(app, nothing); true)
 
 @testset "commands" begin
     @testset "list, enabled and places" begin
@@ -131,6 +133,18 @@ UI.handle_request!(app, r::CountingRequest) = (r.count[] += 1; true)
             @test count[] == 2 && isempty(app.ui.requests)
             t = only(app.toasts)
             @test t.kind == :error && occursin("the handler broke", t.text)
+        end
+    end
+
+    @testset "handle_requests! drops the rest of a batch made for the old project" begin
+        with_test_session(fresh_session()) do s
+            with_app(test_app_state(s)) do app
+                count = Ref(0)
+                push!(app.ui.requests, CountingRequest(count), SwitchProjectRequest(),
+                    CountingRequest(count))
+                UI.handle_requests!(app)
+                @test count[] == 1 && app.session === nothing && isempty(app.ui.requests)
+            end
         end
     end
 

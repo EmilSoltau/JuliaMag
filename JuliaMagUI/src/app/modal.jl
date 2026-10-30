@@ -165,7 +165,8 @@ function draw_dialog(f, app, d; title::AbstractString, icon::AbstractString = ""
     ig.BeginGroup()
     ig.PushTextWrapPos(dw - hl - p(16))
     ig.PushItemWidth(dw - 2 * hl - p(32))   # the body width; `paragraph` wraps to it
-    f()
+    broken = run_body(f, app)
+    broken && filter!(x -> x !== d, dialogs)
     ig.PopItemWidth()
     ig.PopTextWrapPos()
     ig.EndGroup()
@@ -190,18 +191,59 @@ function draw_dialog(f, app, d; title::AbstractString, icon::AbstractString = ""
     ig.Dummy((dw, 0f0))
     ig.AddRect(dl, (b.x0, b.y0), (b.x1, footer_end), u32(t.border_strong), p(10), hl)
 
-    if top
+    if top && !broken
         cancel |= ig.IsKeyPressed(lib.ImGuiKey_Escape, false)
         enter = ig.IsKeyPressed(lib.ImGuiKey_Enter, false) || ig.IsKeyPressed(lib.ImGuiKey_KeypadEnter, false)
         ok |= typing && enter && ok_enabled
     end
     # The next dialog opens inside this one.
-    level < length(dialogs) && draw_modal(app, dialogs[level+1])
+    !broken && level < length(dialogs) && draw_modal(app, dialogs[level+1])
     ig.EndPopup()
+    broken && return nothing
     if cancel
         guarded(app, _ -> on_cancel())
     elseif ok
         guarded(app, _ -> on_ok())
+    end
+    return nothing
+end
+
+"""
+    run_body(f, app) -> Bool
+
+Run the dialog body `f()`. When it throws, put back the ImGui stacks (windows, ids,
+groups, styles, fonts) as they were before it, show the error as a toast and return
+true; the dialog then closes. So a broken form never ends the app.
+"""
+function run_body(f, app)::Bool
+    state = Ref{lib.ImGuiErrorRecoveryState}()
+    lib.igErrorRecoveryStoreState(state)
+    try
+        f()
+        return false
+    catch e
+        e isa InterruptException && rethrow()
+        bt = catch_backtrace()
+        recover_imgui_state(state)
+        toast!(app, :error, safe_user_message(e, bt))
+        return true
+    end
+end
+
+# ImGui's recovery, without its asserts, log lines and tooltip: the caller reports the error.
+function recover_imgui_state(state::Ref{lib.ImGuiErrorRecoveryState})
+    io = Ptr{lib.ImGuiIO}(ig.GetIO())
+    old = (unsafe_load(io.ConfigErrorRecoveryEnableAssert), unsafe_load(io.ConfigErrorRecoveryEnableDebugLog),
+        unsafe_load(io.ConfigErrorRecoveryEnableTooltip))
+    io.ConfigErrorRecoveryEnableAssert = false
+    io.ConfigErrorRecoveryEnableDebugLog = false
+    io.ConfigErrorRecoveryEnableTooltip = false
+    try
+        lib.igErrorRecoveryTryToRecoverState(state)
+    finally
+        io.ConfigErrorRecoveryEnableAssert = old[1]
+        io.ConfigErrorRecoveryEnableDebugLog = old[2]
+        io.ConfigErrorRecoveryEnableTooltip = old[3]
     end
     return nothing
 end

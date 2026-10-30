@@ -49,6 +49,16 @@ function UI.draw_modal(app, d::NameDialog)
     end
 end
 
+# A dialog whose body breaks after pushing on the ImGui stacks.
+struct BrokenDialog end
+function UI.draw_modal(app, d::BrokenDialog)
+    UI.draw_dialog(app, d; title = "Broken", on_ok = () -> nothing) do
+        ig.PushID("half done")
+        ig.BeginGroup()
+        throw(ArgumentError("the form broke"))
+    end
+end
+
 kangaroo() = session_with(lines = 60, channels = 24, name = "Kangaroo Hills 2024",
     project = "Kangaroo Hills 2024")
 
@@ -125,6 +135,20 @@ window_testset("shell") do
         @test Core.status(job) == Core.JOB_DONE
     end
 
+    @testset "a shortcut whose command throws shows an error toast" begin
+        with_project_app(kangaroo()) do ctx, app
+            UI.commands(app)   # fills the cache
+            cache = app.command_cache
+            broken = UI.Command("test.broken", "Broken", a -> throw(ArgumentError("the shortcut broke"));
+                shortcut = "Ctrl+F2")
+            app.command_cache = UI.CommandCache(cache.sizes, [cache.commands; broken])
+            ctx.key("Ctrl+F2")
+            ctx.wait_until(() -> !isempty(app.toasts))
+            @test last(app.toasts).kind == :error && last(app.toasts).text == "The shortcut broke."
+            ctx.frames(2)   # the app keeps drawing
+        end
+    end
+
     @testset "Ctrl+Z undoes through the ImGui key path" begin
         with_project_app(kangaroo()) do ctx, app
             id = app.ui.current_db
@@ -197,6 +221,14 @@ window_testset("shell") do
             ctx.frames(2)
             ctx.click(ref * "/Break")
             @test isempty(app.ui.dialogs) && last(app.toasts).text == "The name is taken."
+            # A dialog body that throws leaves the ImGui stacks whole: the dialog closes with
+            # an error toast and the app keeps running.
+            UI.push_dialog!(app, BrokenDialog())
+            ctx.frames(3)
+            @test isempty(app.ui.dialogs) && last(app.toasts).text == "The form broke."
+            @test open_popups(ctx) == 0
+            ctx.click("JuliaMag/left/Jobs")
+            @test app.ui.left_tab == :jobs
             # Dialogs of a project do not outlive it.
             UI.confirm!(app, "Gone?", "With the project."; action = "OK", on_yes = a -> nothing)
             ctx.frames(2)
@@ -207,27 +239,40 @@ window_testset("shell") do
 
     @testset "toasts: at most three, oldest goes first, they expire and close" begin
         with_project_app(kangaroo()) do ctx, app
+            # Long lifetimes: the first toast frames compile code, which must not expire them.
             for k in 1:4
-                UI.toast!(app, :info, "Toast $k")
+                UI.toast!(app, :info, "Toast $k"; ms = 60_000)
             end
             ctx.frames(2)
             @test [t.text for t in app.toasts] == ["Toast 2", "Toast 3", "Toast 4"]
-            @test te.ItemExists("//###toast3/Close")
-            ctx.click("//###toast3/Close")
-            @test [t.text for t in app.toasts] == ["Toast 2", "Toast 3"]   # toast3 was "Toast 4"
+            newest = last(app.toasts)
+            @test te.ItemExists(UI.toast_ref(newest) * "/Close")
+            ctx.click(UI.toast_ref(newest) * "/Close")
+            @test [t.text for t in app.toasts] == ["Toast 2", "Toast 3"]
+            # A toast keeps its window when an older one goes.
+            keep = last(app.toasts)
+            popfirst!(app.toasts)
+            ctx.frames(2)
+            @test te.ItemExists(UI.toast_ref(keep) * "/Close")
             # An action button runs its action and closes the toast.
             ran = Ref(false)
             empty!(app.toasts)
-            UI.toast!(app, :error, "Import failed"; sub = "No file.",
-                actions = ["Report" => a -> (ran[] = true)])
+            t = UI.toast!(app, :error, "Import failed"; sub = "No file.",
+                actions = ["Report" => a -> (ran[] = true)], ms = 60_000)
             ctx.frames(2)
-            ctx.click("//###toast1/Report##action1")
+            ctx.click(UI.toast_ref(t) * "/Report##action1")
             @test ran[] && isempty(app.toasts)
             # A toast goes when its time is up, with no input. (The mouse leaves the corner
             # first: over a toast, its clock stops.)
             te.MouseMove("JuliaMag/left/Data")
             UI.toast!(app, :ok, "Short"; ms = 300)
             ctx.wait_until(() -> isempty(app.toasts); timeout = 5)
+            # The mouse over a new toast stops its clock, but not its slide-in.
+            t = UI.toast!(app, :ok, "Hovered"; ms = 60_000)
+            ctx.frames(1)
+            te.MouseMove(UI.toast_ref(t) * "/Close")
+            ctx.wait_until(() -> time() - t.shown > 2 * UI.TOAST_SLIDE)
+            @test UI.toast_slide(t) == 1 && t.born > t.shown
         end
     end
 
@@ -243,7 +288,8 @@ window_testset("shell") do
 
     @testset "at 900 by 560 the title drops and the pill keeps clear of the toolbar" begin
         long = "Kangaroo Hills 2024 aeromagnetic survey, final located and levelled data"
-        s = session_with(lines = 2, channels = 2, name = "Survey", project = long)
+        s = session_with(lines = 2, channels = 2, project = long,
+            name = long * ", contractor delivery of all flights")
         with_project_app(s; size = (900, 560)) do ctx, app
             layout = Ref{Any}(nothing)
             ctx.on_render(w -> begin
@@ -255,7 +301,23 @@ window_testset("shell") do
             l = layout[]
             @test l.title === nothing && !l.pill_round
             @test l.pill.x0 >= last(l.qat).x1 + 12
-            ctx.shot(joinpath(SHELL_SHOTS, "shell-900x560.png"))
+            path = ctx.shot(joinpath(SHELL_SHOTS, "shell-900x560.png"))
+            # The long database name is cut short with "..." and plain status bar stays
+            # between it and the right side. No separator stands alone after it.
+            layout = Ref{Any}(nothing)
+            left_w = Ref(0f0)
+            ctx.on_render(w -> begin
+                layout[] = UI.status_layout(UI.Box(0, 534, 900, 560), w.scale, UI.text_width,
+                    UI.status_texts(app))
+                left_w[] = UI.text_width(UI.FONT_REGULAR, 11.5, layout[].left)
+            end)
+            l = layout[]
+            @test endswith(l.left, "...") && 10 + left_w[] <= l.right_x - 10
+            img = PNGFiles.load(path)
+            bar = rgb255(LIGHT.status_bar)
+            plain(x) = all(y -> near(rgb255(img[y, x+1]), bar; tol = 2), 538:557)
+            @test !plain(12)   # the left text starts at 10 px
+            @test all(plain, ceil(Int, 10 + left_w[]) + 1:floor(Int, l.right_x) - 1)
         end
     end
 
@@ -275,7 +337,7 @@ window_testset("shell") do
                 UI.toast!(app, :error, "Import failed"; sub = "Data file not found.",
                     actions = ["Report" => a -> nothing, "Run Again..." => a -> nothing])
                 UI.toast!(app, :ok, "Saved")
-                ctx.wait_until(() -> time() - last(app.toasts).born > 2 * UI.TOAST_SLIDE)
+                ctx.wait_until(() -> time() - last(app.toasts).shown > 2 * UI.TOAST_SLIDE)
                 ctx.shot(joinpath(SHELL_SHOTS, "shell-toasts-$name.png"))
                 empty!(app.toasts)
                 UI.confirm!(app, "Remove Kangaroo Hills 2024?",

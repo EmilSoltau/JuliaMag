@@ -47,11 +47,72 @@ jobs_text(running::Integer) = running == 0 ? "No jobs running" :
     string(running, running == 1 ? " job" : " jobs", " running")
 
 """
+    StatusLayout
+
+Where the status bar parts go, in device pixels: the `left` text (cut short with "..."
+when it would reach the right side), the left edge `x` of each right item (`nothing`
+when it is not shown), the separators' `seps`, the spinner and text widths of the jobs
+item, and `right_x`, where the right side starts.
+"""
+struct StatusLayout
+    left::String
+    mode_x::Float32
+    busy_x::Union{Nothing,Float32}
+    jobs_x::Float32
+    spin::Float32
+    jobs_w::Float32
+    selected_x::Union{Nothing,Float32}
+    seps::Vector{Float32}
+    right_x::Float32
+end
+
+"""
+    status_layout(b, scale, measure, texts) -> StatusLayout
+
+Lay out the status bar in box `b`, as the prototype's `#status`: padding 10, 10 px
+between the items and around the 1 px separators. The right side is laid out from the
+right edge; the left text gets the room that is left, at least 10 px from the right side.
+`measure(role, size, text)` is the text width in device pixels.
+"""
+function status_layout(b::Box, scale::Real, measure, texts::StatusTexts)::StatusLayout
+    p(v) = px(scale, v)
+    hl = hairline(scale)
+    seps = Float32[]
+    x = b.x1 - p(10)
+    mode = texts.software ? "Software" : "GPU"
+    x -= measure(FONT_MONO, 11, mode)
+    mode_x = x
+    busy_x = nothing
+    if texts.busy !== nothing
+        x -= p(10) + hl
+        push!(seps, x)
+        x -= p(10) + measure(FONT_REGULAR, 11.5, texts.busy)
+        busy_x = x
+    end
+    x -= p(10) + hl
+    push!(seps, x)
+    jobs_w = measure(FONT_REGULAR, 11.5, jobs_text(texts.running))
+    spin = texts.running > 0 ? p(12 + 6) : 0f0
+    x -= p(10) + jobs_w + spin
+    jobs_x = x
+    selected_x = nothing
+    if !isempty(texts.selected)
+        x -= p(10) + hl
+        push!(seps, x)
+        x -= p(10) + measure(FONT_REGULAR, 11.5, texts.selected)
+        selected_x = x
+    end
+    room = x - p(10) - (b.x0 + p(10))
+    left = elide(measure, texts.database, room; role = FONT_REGULAR, size = 11.5)
+    return StatusLayout(left, mode_x, busy_x, jobs_x, spin, jobs_w, selected_x, seps, x)
+end
+
+"""
     draw_status_bar(app, dl, b)
 
-Draw the status bar in box `b`, as the prototype's `#status`: 26 high, `status_bar` fill,
-a 1 px `border` line on top, padding 10, 10 px between the items, text 11.5 `text_dim`,
-1 by 14 separators in `border_strong`. A click on the jobs text opens the Jobs tab.
+Draw the status bar in box `b` (see `status_layout`): 26 high, `status_bar` fill, a 1 px
+`border` line on top, text 11.5 `text_dim`, 1 by 14 separators in `border_strong`.
+A click on the jobs text opens the Jobs tab.
 """
 function draw_status_bar(app, dl, b::Box)
     w = app.window::Window
@@ -63,58 +124,40 @@ function draw_status_bar(app, dl, b::Box)
     ig.AddRectFilled(dl, (b.x0, b.y0), (b.x1, b.y0 + hl), u32(t.border))
     mid = (b.y0 + hl + b.y1) / 2
     texts = status_texts(app)
+    l = status_layout(b, s, text_width, texts)
     dim = u32(t.text_dim)
-    sep(x) = ig.AddRectFilled(dl, (x, round(mid - p(7))), (x + hl, round(mid - p(7)) + p(14)),
-        u32(t.border_strong))
+    for x in l.seps
+        ig.AddRectFilled(dl, (x, round(mid - p(7))), (x + hl, round(mid - p(7)) + p(14)),
+            u32(t.border_strong))
+    end
     ig.PushID("status")
+    draw_text_mid(dl, FONT_REGULAR, 11.5, b.x0 + p(10), mid, dim, l.left)
 
-    x = b.x0 + p(10)
-    x += draw_text_mid(dl, FONT_REGULAR, 11.5, x, mid, dim, texts.database) + p(10)
-    sep(x)
-    left_end = x + hl
-
-    # The right side, from the right edge leftwards.
-    x = b.x1 - p(10)
     mode = texts.software ? "Software" : "GPU"
-    mw = text_width(FONT_MONO, 11, mode)
-    x -= mw
-    draw_text_mid(dl, FONT_MONO, 11, x, mid, u32(texts.software ? t.amber : t.accent_text), mode)
-    hit("Render Mode", Box(x, b.y0, x + mw, b.y1))
+    mw = draw_text_mid(dl, FONT_MONO, 11, l.mode_x, mid,
+        u32(texts.software ? t.amber : t.accent_text), mode)
+    hit("Render Mode", Box(l.mode_x, b.y0, l.mode_x + mw, b.y1))
     ig.IsItemHovered() && item_tip!(app, "Map rendering";
         help = texts.software ? "Software rendering: the graphics card is not used." :
                "The graphics card draws the maps.")
-    if texts.busy !== nothing
-        x -= p(10) + hl
-        sep(x)
-        bw = text_width(FONT_REGULAR, 11.5, texts.busy)
-        x -= p(10) + bw
-        draw_text_mid(dl, FONT_REGULAR, 11.5, x, mid, dim, texts.busy)
-    end
-    x -= p(10) + hl
-    sep(x)
+    busy = texts.busy
+    (l.busy_x === nothing || busy === nothing) ||
+        draw_text_mid(dl, FONT_REGULAR, 11.5, l.busy_x, mid, dim, busy)
+
+    x = l.jobs_x
     jt = jobs_text(texts.running)
-    jw = text_width(FONT_REGULAR, 11.5, jt)
-    spin = texts.running > 0 ? p(12 + 6) : 0f0
-    x -= p(10) + jw + spin
-    jobs = Box(x, b.y0 + hl, x + spin + jw, b.y1)
-    clicked, hovered, _ = hit("Jobs", jobs)
+    clicked, hovered, _ = hit("Jobs", Box(x, b.y0 + hl, x + l.spin + l.jobs_w, b.y1))
     if texts.running > 0
         draw_spinner(app, dl, x + p(6), mid)
         request_frames!(w, 0.05)
     end
     jcol = texts.running > 0 ? t.accent_text : hovered ? t.text : t.text_dim
-    draw_text_mid(dl, FONT_REGULAR, 11.5, x + spin, mid, u32(jcol), jt)
-    hovered && ig.AddRectFilled(dl, (x + spin, round(mid + p(6))), (x + spin + jw, round(mid + p(6)) + hl),
-        u32(jcol))
+    draw_text_mid(dl, FONT_REGULAR, 11.5, x + l.spin, mid, u32(jcol), jt)
+    hovered && ig.AddRectFilled(dl, (x + l.spin, round(mid + p(6))),
+        (x + l.spin + l.jobs_w, round(mid + p(6)) + hl), u32(jcol))
     clicked && (app.ui.left_tab = :jobs)
     hovered && item_tip!(app, "Jobs"; help = "Click to show the Jobs pane.")
-    if !isempty(texts.selected)
-        x -= p(10) + hl
-        sep(x)
-        sw = text_width(FONT_REGULAR, 11.5, texts.selected)
-        x -= p(10) + sw
-        x > left_end + p(10) && draw_text_mid(dl, FONT_REGULAR, 11.5, x, mid, dim, texts.selected)
-    end
+    l.selected_x === nothing || draw_text_mid(dl, FONT_REGULAR, 11.5, l.selected_x, mid, dim, texts.selected)
     ig.PopID()
     return nothing
 end

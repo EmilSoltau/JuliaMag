@@ -17,6 +17,7 @@ end
     central_state(app) -> CentralState
 
 Without a project: the first lines of the Start page with New Project and Open Project.
+With a project whose first snapshot is not in yet: nothing, so no text flashes.
 With a project that has no items: the hint to import, with the two import buttons.
 Else: no view is open yet.
 """
@@ -25,7 +26,9 @@ function central_state(app)::CentralState
         return CentralState("Welcome to JuliaMag",
             ["Process airborne magnetic line data: import, correct, level, grid and map."],
             ["New Project" => "project.new", "Open Project" => "project.open"], true)
-    elseif app.snap !== nothing && isempty(app.snap.items)
+    elseif app.snap === nothing
+        return CentralState("", String[], Pair{String,String}[], false)
+    elseif isempty(app.snap.items)
         return CentralState("", ["Import line data or a grid to start."],
             ["Import Line Data..." => "import.database", "Import Grid..." => "import.grid"], false)
     end

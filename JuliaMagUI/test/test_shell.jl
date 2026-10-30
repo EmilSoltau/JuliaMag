@@ -91,6 +91,14 @@ end
         many = ["Tab $k" for k in 1:40]
         m = tab_layout(Box(0, 34, 900, 66), 1, fake_measure, many, ["Settings", "Help"])
         @test length(m.tabs) < 40 && last(last(m.tabs)).x1 <= last(first(m.pinned)).x0
+        # The active tab never drops out: tabs before it give way.
+        a = tab_layout(Box(0, 34, 900, 66), 1, fake_measure, many, ["Settings", "Help"]; active = "Tab 35")
+        names = first.(a.tabs)
+        @test "Tab 35" in names && last(names) == "Tab 35"
+        @test last(last(a.tabs)).x1 <= last(first(a.pinned)).x0
+        @test all(i -> last(a.tabs[i]).x1 + 2 == last(a.tabs[i+1]).x0, 1:length(a.tabs)-1)
+        @test first.(tab_layout(Box(0, 34, 900, 66), 1, fake_measure, many, ["Settings", "Help"];
+            active = "Tab 2").tabs) == first.(m.tabs)   # a visible active tab changes nothing
     end
 
     @testset "toast layout" begin
@@ -110,9 +118,16 @@ end
     end
 
     @testset "status bar texts" begin
-        @test software_renderer("llvmpipe (LLVM 17.0.6, 256 bits)")
-        @test software_renderer("softpipe") && software_renderer("Microsoft Basic Render Driver Software")
-        @test !software_renderer("D3D12 (NVIDIA GeForce RTX 3060)") && !software_renderer("")
+        # Real GL_RENDERER strings of software renderers (Mesa, ANGLE, Windows).
+        for name in ("llvmpipe (LLVM 15.0.7, 256 bits)", "softpipe",
+                "Google SwiftShader", "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero)), SwiftShader driver)",
+                "GDI Generic", "Microsoft Basic Render Driver")
+            @test software_renderer(name)
+        end
+        for name in ("NVIDIA GeForce RTX 3060/PCIe/SSE2", "D3D12 (Intel(R) UHD Graphics 620)",
+                "AMD Radeon RX 6700 XT (radeonsi, navi22, LLVM 15.0.7, DRM 3.49)", "")
+            @test !software_renderer(name)
+        end
         @test UI.jobs_text(0) == "No jobs running" && UI.jobs_text(1) == "1 job running" &&
               UI.jobs_text(2) == "2 jobs running"
         with_app(test_app_state(nothing)) do app
@@ -135,6 +150,20 @@ end
         end
     end
 
+    @testset "status bar left text never reaches the right side" begin
+        @test UI.elide(fake_measure, "abcdefghij", 70) == "abcdefghij"
+        @test UI.elide(fake_measure, "abcdefghij", 69) == "abcdef..."
+        @test UI.elide(fake_measure, "abcdefghij", 10) == ""
+        long = UI.StatusTexts("A very long database name from a contractor survey 2024 final: 60 lines, 24 channels",
+            "Selected lines: 60 of 60", 2, "Import Geosoft XYZ", true)
+        b = Box(0, 534, 900, 560)
+        l = UI.status_layout(b, 1, fake_measure, long)
+        @test endswith(l.left, "...") && 10 + fake_measure(FONT_REGULAR, 11.5, l.left) <= l.right_x - 10
+        short = UI.StatusTexts("Survey: 2 lines, 2 channels", "Selected lines: 2 of 2", 0, nothing, false)
+        @test UI.status_layout(Box(0, 894, 1480, 920), 1, fake_measure, short).left ==
+              "Survey: 2 lines, 2 channels"
+    end
+
     @testset "central empty state" begin
         with_app(test_app_state(nothing)) do app
             st = central_state(app)
@@ -149,6 +178,11 @@ end
         end
         with_app(app_with_database()) do app
             @test central_state(app).lines[1] == "No view is open." && isempty(central_state(app).buttons)
+        end
+        # A project whose first snapshot is not in yet shows nothing, so no text flashes.
+        with_app(test_app_state(fresh_session())) do app
+            st = central_state(app)
+            @test app.snap === nothing && st.title == "" && isempty(st.lines) && isempty(st.buttons)
         end
     end
 

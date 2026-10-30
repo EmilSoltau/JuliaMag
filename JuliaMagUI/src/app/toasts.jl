@@ -15,8 +15,10 @@ A short message.
 - `text`: the message; `sub`: a second line in a dimmer colour, or `""`.
 - `actions`: buttons, as label => function. Each function takes the app.
 - `ms`: how long it stays. The default is $(TOAST_MS) ms, or $(TOAST_ACTIONS_MS) ms with actions.
-- `born`: the `time()` it was made. While the mouse is over the toast, its clock stops:
-  `born` moves forward by the time the mouse stays.
+- `born`: the start of its lifetime, first the `time()` it was made. While the mouse is
+  over the toast, its clock stops: `born` moves forward by the time the mouse stays.
+- `shown`: the `time()` it was made; it never moves, and drives the slide-in.
+- `id`: a serial number, unique in the process; it names the toast's ImGui window.
 """
 mutable struct Toast
     kind::Symbol
@@ -25,6 +27,8 @@ mutable struct Toast
     actions::Vector{Pair{String,Function}}
     ms::Int
     born::Float64
+    shown::Float64
+    id::Int
     function Toast(kind::Symbol, text::AbstractString; sub::AbstractString = "",
             actions::AbstractVector = Pair{String,Function}[],
             ms::Union{Nothing,Integer} = nothing, born::Real = time())
@@ -32,9 +36,20 @@ mutable struct Toast
             throw(ArgumentError("a toast kind is one of $(join(TOAST_KINDS, ", ")), not :$kind"))
         acts = Pair{String,Function}[String(first(a)) => last(a) for a in actions]
         t = ms === nothing ? (isempty(acts) ? TOAST_MS : TOAST_ACTIONS_MS) : Int(ms)
-        return new(kind, String(text), String(sub), acts, t, Float64(born))
+        return new(kind, String(text), String(sub), acts, t, Float64(born), Float64(born),
+            Threads.atomic_add!(TOAST_SERIAL, 1) + 1)
     end
 end
+
+const TOAST_SERIAL = Threads.Atomic{Int}(0)
+
+"""
+    toast_ref(t) -> String
+
+The test engine reference of toast `t`'s window; its items are `toast_ref(t) * "/Close"`
+and so on. The name stays while older toasts come and go.
+"""
+toast_ref(t::Toast) = "//###toast$(t.id)"
 
 "True when toast `t` has been shown for its full time at `now`."
 toast_expired(t::Toast, now::Real = time())::Bool = now - t.born >= t.ms / 1000
@@ -133,6 +148,9 @@ end
 # Ease-out, close to CSS `ease-out`.
 ease_out(x::Real) = 1 - (1 - clamp(Float32(x), 0f0, 1f0))^2
 
+"How far toast `t` has slid in at `now`: 0 at first, 1 when it is in place."
+toast_slide(t::Toast, now::Real = time())::Float32 = ease_out((now - t.shown) / TOAST_SLIDE)
+
 """
     draw_toasts(app)
 
@@ -158,7 +176,7 @@ function draw_toasts(app)
     run = nothing
     for i in reverse(eachindex(app.toasts))
         toast, l = app.toasts[i], layouts[i]
-        k = ease_out((now - toast.born) / TOAST_SLIDE)
+        k = toast_slide(toast, now)
         k < 1 && request_frames!(w, 0.05)
         dy = round(px(s, 6) * (1 - k))
         b = Box(right - l.width, bottom - l.height + dy, right, bottom + dy)
@@ -167,10 +185,10 @@ function draw_toasts(app)
         ig.SetNextWindowSize((width(b), height(b)))
         ig.PushStyleVar(ig.ImGuiStyleVar_WindowPadding, (0, 0))
         ig.PushStyleVar(ig.ImGuiStyleVar_WindowBorderSize, 0)
-        ig.Begin("###toast$i", C_NULL, TOAST_WINDOW_FLAGS)
+        ig.Begin("###toast$(toast.id)", C_NULL, TOAST_WINDOW_FLAGS)
         ig.PopStyleVar(2)
         if ig.IsWindowHovered()
-            toast.born += unsafe_load(ig.GetIO().DeltaTime)   # the clock stops
+            toast.born += unsafe_load(ig.GetIO().DeltaTime)   # the lifetime stops, the slide goes on
         end
         act, closed = draw_toast(app, dl, toast, l, b, k)
         ig.End()

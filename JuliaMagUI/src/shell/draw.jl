@@ -74,6 +74,24 @@ function draw_text_mid(dl, role::FontRole, size::Real, x::Real, mid_y::Real, col
 end
 
 """
+    elide(measure, text, max_width; role = FONT_REGULAR, size = 12.5) -> String
+
+`text`, or as much of it as fits in `max_width` device pixels followed by "...", as CSS
+`text-overflow: ellipsis` cuts it. When not even one character and "..." fit, `""`.
+`measure(role, size, text)` is the text width in device pixels.
+"""
+function elide(measure, text::AbstractString, max_width::Real; role::FontRole = FONT_REGULAR,
+        size::Real = BODY_FONT_SIZE)::String
+    measure(role, size, text) <= max_width && return String(text)
+    chars = collect(text)
+    for n in length(chars)-1:-1:1
+        cut = rstrip(String(chars[1:n])) * "..."
+        measure(role, size, cut) <= max_width && return cut
+    end
+    return ""
+end
+
+"""
     wrap_lines(role, size, text, max_width) -> Vector{String}
 
 Break `text` into lines no wider than `max_width` device pixels, at spaces.

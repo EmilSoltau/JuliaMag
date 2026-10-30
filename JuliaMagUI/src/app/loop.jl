@@ -259,10 +259,12 @@ end
 """
     software_renderer(name) -> Bool
 
-Is the OpenGL renderer `name` (`GL_RENDERER`) a software one, such as Mesa's `llvmpipe`?
+Is the OpenGL renderer `name` (`GL_RENDERER`) a software one? Mesa's `llvmpipe` and
+`softpipe`, Google's SwiftShader, and on Windows "GDI Generic" (no graphics driver) and
+"Microsoft Basic Render Driver".
 """
-software_renderer(name::AbstractString)::Bool =
-    any(k -> occursin(k, name), ("llvmpipe", "softpipe", "Software"))
+software_renderer(name::AbstractString)::Bool = any(k -> occursin(k, name),
+    ("llvmpipe", "softpipe", "SwiftShader", "GDI Generic", "Microsoft Basic Render Driver", "Software"))
 
 const MOUSE_PASSTHROUGH = 0x0002000D   # GLFW 3.4; GLFW.jl has no name for it
 

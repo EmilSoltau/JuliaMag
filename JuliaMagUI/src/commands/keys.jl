@@ -85,8 +85,9 @@ end
 """
     handle_shortcuts!(app)
 
-Run the command of the chord pressed in this frame, if it can run. Call it once per frame
-on the render thread, after the frame's widgets, so `WantTextInput` is current.
+Run the command of the chord pressed in this frame, if it can run. An error in the command
+becomes an error toast, as for a click (`guarded`). Call it once per frame on the render
+thread, after the frame's widgets, so `WantTextInput` is current.
 """
 function handle_shortcuts!(app)
     cmds = commands(app)
@@ -96,7 +97,7 @@ function handle_shortcuts!(app)
         chord_pressed(chord) || continue
         cmd = shortcut_command(cmds, chord, modal, text)
         cmd === nothing && continue
-        cmd.enabled(app) === nothing && cmd.run(app)
+        cmd.enabled(app) === nothing && guarded(app, cmd.run)
         return nothing
     end
     return nothing

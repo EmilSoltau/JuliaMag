@@ -15,16 +15,18 @@ struct TabLayout
 end
 
 """
-    tab_layout(b, scale, measure, tabs, pinned) -> TabLayout
+    tab_layout(b, scale, measure, tabs, pinned; active = nothing) -> TabLayout
 
 Lay out the strip in box `b` as the prototype's `#tabs`: padding 8, the Project button
 (26 high, semibold text + 26 wide), 8 px, the `tabs` 2 px apart, and at the right the
 `pinned` tabs, 6 px, then the 24 by 24 chevron. A tab is as wide as its semibold text
 plus 22, so it never moves when it turns active.
+Tabs that do not fit are left out, but never the `active` tab: the tabs just before it
+give way.
 `measure(role, size, text)` is the text width in device pixels.
 """
 function tab_layout(b::Box, scale::Real, measure, tabs::AbstractVector{<:AbstractString},
-        pinned::AbstractVector{<:AbstractString})::TabLayout
+        pinned::AbstractVector{<:AbstractString}; active = nothing)::TabLayout
     p(v) = px(scale, v)
     mid = centre_y(b)
     tab_w(name) = round(measure(FONT_SEMIBOLD, BODY_FONT_SIZE, name) + p(22))
@@ -46,6 +48,13 @@ function tab_layout(b::Box, scale::Real, measure, tabs::AbstractVector{<:Abstrac
         push!(placed, String(name) => Box(x, b.y0, x + tw, b.y1))
         x += tw + p(2)
     end
+    if active in tabs && !any(t -> first(t) == active, placed)
+        tw = tab_w(active)
+        while !isempty(placed) && x + tw > right
+            x = last(pop!(placed)).x0
+        end
+        push!(placed, String(active) => Box(x, b.y0, x + tw, b.y1))
+    end
     return TabLayout(project, placed, fixed, chevron)
 end
 
@@ -66,7 +75,7 @@ function draw_tab_strip(app, dl, b::Box)
     tabs = tab_order(commands(app), app.config.hidden_tabs)
     ui.tab in tabs || ui.tab in PINNED_TABS ||
         (ui.tab = isempty(tabs) ? first(PINNED_TABS) : first(tabs))
-    l = tab_layout(b, s, text_width, tabs, PINNED_TABS)
+    l = tab_layout(b, s, text_width, tabs, PINNED_TABS; active = ui.tab)
     ig.PushID("tabs")
 
     # The Project button.
