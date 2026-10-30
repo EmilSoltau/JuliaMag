@@ -63,11 +63,14 @@ What a test function of `with_test_app` gets. Each action is a field you call:
 - `ctx.wait_until(pred; timeout = 10)`: draw frames until `pred()`; an error after `timeout` s.
 - `ctx.on_render(f)`: run `f(window)` on the render thread in the next frame, and wait for it.
 - `ctx.window`: the app's `Window`.
+- `ctx.app_state()`: the app's `AppState`. Read and change it only in the test function or
+  in `on_render`, which both run while the render loop waits.
 
 Each action is also a function that takes the context first, such as `click(ctx, ref)`.
 """
 struct TestContext
     window::UI.Window
+    app::UI.AppState
     render_queue::Vector{Any}
     deadline::Float64   # `time()` when the whole test runs out of time
 end
@@ -96,7 +99,7 @@ const TEST_TIMEOUT = Ref(0.0)   # the `timeout` of the running `with_test_app`
 # One frame, after checking the time limit.
 next_frame(ctx::TestContext, n::Integer = 1) = (check_time(ctx); te.Yield(n); nothing)
 
-const TEST_ACTIONS = (:click, :type, :key, :frames, :shot, :wait_until, :on_render)
+const TEST_ACTIONS = (:click, :type, :key, :frames, :shot, :wait_until, :on_render, :app_state)
 
 function Base.getproperty(ctx::TestContext, name::Symbol)
     name in TEST_ACTIONS || return getfield(ctx, name)
@@ -126,6 +129,8 @@ key(ctx::TestContext, chord::AbstractString) =
     (check_time(ctx); te.KeyPress(key_chord(chord)); nothing)
 
 frames(ctx::TestContext, n::Integer = 1) = next_frame(ctx, n)
+
+app_state(ctx::TestContext) = getfield(ctx, :app)
 
 function shot(ctx::TestContext, path::AbstractString)
     rm(path; force = true)
@@ -207,6 +212,7 @@ function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGH
     UI.save_config(config, config_dir)
 
     window = Ref{Union{Nothing,UI.Window}}(nothing)
+    app = Ref{Union{Nothing,UI.AppState}}(nothing)
     queue = Any[]
     function hook(w)
         window[] = w
@@ -236,14 +242,14 @@ function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGH
                     te.Yield()
                 end
                 window[] === nothing && error("the app drew no frame")
-                result[] = f(TestContext(window[], queue, deadline))
+                result[] = f(TestContext(window[], something(app[]), queue, deadline))
             catch e
                 failure[] = CapturedException(e, catch_backtrace())
             end
             return nothing
         end
-        UI.main(; project, config_dir, extra_ui = hook, size, scale, fonts = :bundled,
-            engine, passive = true)
+        UI.main(; project, config_dir, extra_ui = hook, on_app = a -> (app[] = a), size, scale,
+            fonts = :bundled, engine, passive = true)
         summary = te.GetResultSummary(engine)
         failure[] === nothing && time() > deadline && throw(TestTimeout(timeout))
         if failure[] === nothing && (summary.CountTested != 1 || summary.CountSuccess != 1)

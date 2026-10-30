@@ -392,38 +392,3 @@ function draw_empty(w::Window)
     end
     return nothing
 end
-
-"""
-    main(; project = nothing, config_dir = config_dir(), extra_ui = nothing,
-         size = (1480, 920), scale = nothing, fonts = :system, engine = nothing,
-         passive = false)
-
-Start the app. Today it opens the empty window; later tasks fill it and open `project`.
-The theme comes from the settings in `config_dir`.
-
-The other keywords are for tests, screenshots and benchmarks:
-`extra_ui(w)` is drawn after the app in every frame, and `size`, `scale`, `fonts`,
-`engine` and `passive` go to `run_window`.
-"""
-function main(; project::Union{Nothing,AbstractString} = nothing,
-        config_dir::AbstractString = JuliaMagUI.config_dir(), extra_ui = nothing,
-        size::Tuple{Integer,Integer} = (1480, 920), scale::Union{Nothing,Real} = nothing,
-        fonts::Symbol = :system, engine = nothing, passive::Bool = false)
-    project === nothing || @debug "Opening a project is not built yet" project
-    config, _ = load_config(config_dir)   # a broken settings file gives the defaults
-    dark = config.theme == THEME_SYSTEM ? system_dark() : false
-    tokens = tokens_for(config.theme, dark)
-    run_window(AppFrame(extra_ui); tokens, size, scale, fonts, engine, passive)
-    return nothing
-end
-
-# One frame of the app, plus the optional test hook.
-struct AppFrame
-    extra_ui::Any
-end
-
-function (a::AppFrame)(w::Window)
-    draw_empty(w)
-    a.extra_ui === nothing || a.extra_ui(w)
-    return nothing
-end

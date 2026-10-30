@@ -47,13 +47,18 @@ window_testset("harness") do
         path = joinpath(HARNESS_SHOTS, "harness-database.png")
         icon_at = (40, 40)
         seen = Ref{Any}(nothing)
+        app = Ref{Any}(nothing)
         draw = w -> draw_icon(ig.GetBackgroundDrawList(), "database", icon_at, 32)
         with_test_app(; theme = THEME_LIGHT, extra_ui = draw) do ctx
             seen[] = ctx.window
+            app[] = ctx.app_state()
+            @test app[].window === ctx.window && app[].session === nothing
             ctx.frames(2)
             @test ctx.shot(path) == path
         end
         @test seen[] isa UI.Window
+        # The app closed: its window is gone and its worker has ended.
+        @test app[] isa UI.AppState && app[].window === nothing && istaskdone(app[].queue.task)
         @test isfile(path)
         img = PNGFiles.load(path)
         @test size(img) == (920, 1480)

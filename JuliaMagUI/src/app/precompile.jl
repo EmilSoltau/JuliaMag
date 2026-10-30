@@ -3,8 +3,9 @@
 
 @setup_workload begin
     @compile_workload begin
-        # One frame without a window: style, fonts and the empty app.
+        # One frame without a window: style, fonts, the app state and the empty app.
         ctx = ig.CreateContext()
+        app = AppState(AppConfig(), LIGHT)
         try
             io = ig.GetIO()
             io.DisplaySize = ig.ImVec2(800, 600)
@@ -16,10 +17,12 @@
             load_fonts!(w, :bundled)
             for _ in 1:2
                 ig.NewFrame()
-                AppFrame(nothing)(w)
+                AppFrame(app, nothing)(w)
                 ig.Render()
             end
         finally
+            app.window = nothing
+            stop_worker!(app.queue)
             forget_fonts!(ctx)
             ig.DestroyContext(ctx)
         end
