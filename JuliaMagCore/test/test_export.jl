@@ -127,7 +127,7 @@ end
     # The current line.
     set_cursor!(s, Cursor(id, LineId(TIE, 901, 0), 1))
     @test export_xyz(s, id, joinpath(dir, "cur.xyz"); lines = "current").lines == 1
-    set_cursor!(s, Cursor("db-99", LineId(TIE, 901, 0), 1))
+    s.cursor = Cursor("db-99", LineId(TIE, 901, 0), 1)   # set_cursor! refuses this, so set the field
     @test_throws ToolError export_xyz(s, id, joinpath(dir, "cur.xyz"); lines = "current")
 end
 

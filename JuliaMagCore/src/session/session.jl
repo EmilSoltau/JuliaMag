@@ -682,9 +682,153 @@ function set_line_selected!(s::Session, item_id::AbstractString, id::LineId, fla
     end
 end
 
-"Move the cursor. Not undoable and not recorded."
+"""
+    set_lines_selected!(s, item_id, lines, flag)
+
+Select or deselect many lines at once and save `database.json`. One undo step and
+one history entry, `"database.set_lines_selected"`, for all of them. Lines that are
+in that state already are left out, and nothing is pushed when none is left.
+Throws `ItemBusyError` while a job or an export uses the database, and
+`DatabaseError` for a line that is not in it.
+"""
+function set_lines_selected!(s::Session, item_id::AbstractString, ids::AbstractVector{LineId}, flag::Bool)
+    check_open(s)
+    lock(s.lock) do
+        check_open(s)
+        check_not_busy(s, item_id)
+        db = database(s.project, item_id)
+        changing = LineId[id for id in unique(ids) if line(db, id).selected != flag]
+        isempty(changing) && return nothing
+        put(v::Bool) = () -> lock(s.lock) do
+            d = database(s.project, item_id)
+            foreach(id -> line(d, id).selected = v, changing)
+            save_meta(d)
+            nothing
+        end
+        put(flag)()
+        n = length(changing)
+        push_undo!(s, UndoStep("select $n lines", put(!flag), put(flag), () -> nothing, [String(item_id)]))
+        record!(s, "database.set_lines_selected", Dict("item" => String(item_id),
+                                                       "lines" => [line_args(id) for id in changing],
+                                                       "selected" => flag))
+        return nothing
+    end
+end
+
+# ---- position pairs ----------------------------------------------------------
+
+"A copy of the position pairs, so that an undo step is not changed by later edits."
+copy_pairs(ps) = PositionPair[PositionPair(p.x, p.y, p.crs) for p in ps]
+
+"""
+Change the position pairs of database `key` to `pairs` and `current` now, as one undo step
+that goes back to the pairs and current pair as they are now. The caller holds `s.lock`.
+"""
+function change_pairs!(s::Session, key::String, label::String, pairs::Vector{PositionPair}, current::Int)
+    db = database(s.project, key)
+    before, was = copy_pairs(db.pairs), db.current_pair
+    apply(ps, cur) = () -> lock(s.lock) do      # `undo!` runs it without the lock
+        d = database(s.project, key)
+        empty!(d.pairs)
+        append!(d.pairs, copy_pairs(ps))
+        d.current_pair = cur
+        save_meta(d)
+        nothing
+    end
+    step = UndoStep(label, apply(before, was), apply(pairs, current), () -> nothing, [key])
+    step.redo()
+    push_undo!(s, step)
+    return nothing
+end
+
+"""
+    add_pair!(s, id, x, y; crs = "")
+
+Add the position pair of channels `x` and `y` of database `id`, with coordinate system
+`crs` (a code such as `"EPSG:7855"`, or `""` when unknown). It becomes the current pair
+when there was none. Undoable and recorded as `"database.add_pair"`.
+Throws `ArgumentError` when a channel is not a plain numeric channel (not text, not an
+array) or the pair is there already, `DatabaseError` when a channel is missing, and
+`ItemBusyError` while a job or an export uses the database.
+"""
+function add_pair!(s::Session, id::AbstractString, x::AbstractString, y::AbstractString; crs::AbstractString = "")
+    check_open(s)
+    key, xn, yn, code = String(id), String(x), String(y), String(crs)
+    lock(s.lock) do
+        check_open(s)
+        check_not_busy(s, key)
+        db = database(s.project, key)
+        for n in (xn, yn)
+            c = channel(db, n)
+            (c.eltype <: Number && c.arraylen == 1) ||
+                throw(ArgumentError("channel $n cannot be part of a position pair: it must be a numeric channel and not an array"))
+        end
+        any(p -> p.x == xn && p.y == yn, db.pairs) &&
+            throw(ArgumentError("database $key has the position pair $xn,$yn already"))
+        pairs = vcat(copy_pairs(db.pairs), PositionPair(xn, yn, code))
+        change_pairs!(s, key, "add position pair $xn,$yn", pairs, db.current_pair == 0 ? length(pairs) : db.current_pair)
+        record!(s, "database.add_pair", Dict{String,Any}("item" => key, "x" => xn, "y" => yn, "crs" => code))
+        return nothing
+    end
+end
+
+"""
+    remove_pair!(s, id, x, y)
+
+Remove the position pair of channels `x` and `y`. The channels stay. The current pair
+stays the same pair, or becomes 0 when the current pair is the one removed. Undoable and
+recorded as `"database.remove_pair"`.
+Throws `ArgumentError` when there is no such pair, and `ItemBusyError` while a job or
+an export uses the database.
+"""
+function remove_pair!(s::Session, id::AbstractString, x::AbstractString, y::AbstractString)
+    check_open(s)
+    key, xn, yn = String(id), String(x), String(y)
+    lock(s.lock) do
+        check_open(s)
+        check_not_busy(s, key)
+        db = database(s.project, key)
+        k = findfirst(p -> p.x == xn && p.y == yn, db.pairs)
+        k === nothing && throw(ArgumentError("database $key has no position pair $xn,$yn"))
+        cur = db.current_pair
+        current = cur == k ? 0 : cur > k ? cur - 1 : cur
+        pairs = copy_pairs(db.pairs)
+        deleteat!(pairs, k)
+        change_pairs!(s, key, "remove position pair $xn,$yn", pairs, current)
+        record!(s, "database.remove_pair", Dict{String,Any}("item" => key, "x" => xn, "y" => yn))
+        return nothing
+    end
+end
+
+# ---- cursor and marks --------------------------------------------------------
+
+"The number of rows of `line_id` in database `item_id`, or 0 when there is no such database or line."
+function line_rows(s::Session, item_id::AbstractString, line_id::LineId)::Int
+    k = findfirst(i -> i.id == item_id && i.kind == ITEM_DATABASE, s.project.items)
+    k === nothing && return 0
+    db = database(s.project, item_id)
+    p = line_position(db, line_id)
+    return p == 0 ? 0 : db.lines[p].nrows
+end
+
+"""
+    set_cursor!(s, c)
+
+Move the cursor. Not undoable and not recorded.
+Throws `ArgumentError` when the item is not a database of the project, the line is not
+in it, or the row is not between 1 and the number of rows of the line.
+"""
 function set_cursor!(s::Session, c::Cursor)
     lock(s.lock) do
+        k = findfirst(i -> i.id == c.item, s.project.items)
+        (k !== nothing && s.project.items[k].kind == ITEM_DATABASE) ||
+            throw(ArgumentError("the cursor needs a database, and $(c.item) is not one"))
+        db = database(s.project, c.item)
+        p = line_position(db, c.line)
+        p == 0 && throw(ArgumentError("database $(c.item) has no line $(line_name(c.line))"))
+        n = db.lines[p].nrows
+        1 <= c.row <= n ||
+            throw(ArgumentError("row $(c.row) is not on line $(line_name(c.line)), which has rows 1 to $n"))
         s.cursor = c
         bump!(s)
         return nothing
@@ -696,12 +840,20 @@ end
 
 Set the marked range, a stretch of rows on the current line, as `(first, last)`,
 or clear it with `nothing`. Not undoable and not recorded, like `set_cursor!`.
-Throws `ArgumentError` when `first` is above `last`.
+Throws `ArgumentError` when there is no cursor, or when the range is not
+`1 <= first <= last <= nrows` of the cursor line.
 """
 function set_marked!(s::Session, range::Union{Nothing,Tuple{Int,Int}})
-    range === nothing || range[1] <= range[2] ||
-        throw(ArgumentError("the marked range must not end before it starts: $(range[1]) to $(range[2])"))
     lock(s.lock) do
+        if range !== nothing
+            c = s.cursor
+            c === nothing && throw(ArgumentError("rows can be marked only when the cursor is on a line"))
+            range[1] <= range[2] ||
+                throw(ArgumentError("the marked range must not end before it starts: $(range[1]) to $(range[2])"))
+            n = line_rows(s, c.item, c.line)
+            1 <= range[1] && range[2] <= n ||
+                throw(ArgumentError("the marked rows $(range[1]) to $(range[2]) are not on line $(line_name(c.line)), which has rows 1 to $n"))
+        end
         s.marked = range
         bump!(s)
         return nothing

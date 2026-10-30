@@ -121,7 +121,8 @@ end
 const CORE_COMMANDS = ("database.set_cell", "database.set_line_selected", "session.undo", "session.redo",
                        "grid.set_georef", "grid.set_style", "project.remove_item", "project.rename_item",
                        "database.set_channel_protected", "database.rename_channel", "database.delete_channel",
-                       "database.set_channel_info")
+                       "database.set_channel_info", "database.set_lines_selected", "database.add_pair",
+                       "database.remove_pair")
 
 # True for an entry of `set_grid_crs!`: `"grid.set_grid_crs"`. History files from
 # before that name wrote it as `"grid.set_crs"` with an `"item"` and no `"inputs"`;
@@ -162,6 +163,15 @@ function command_text(c::String, args::AbstractDict, vars::AbstractDict)::String
                "$(literal(a["row"])), $(literal(a["value"])))"
     elseif c == "database.set_line_selected"
         return "set_line_selected!(s, $(literal(a["item"])), $(line_expr(a["line"])), $(literal(a["selected"])))"
+    elseif c == "database.set_lines_selected"
+        ls = get(a, "lines", nothing)
+        ls isa AbstractVector || throw(ArgumentError("the lines are not a list"))
+        return "set_lines_selected!(s, $(literal(a["item"])), [$(join((line_expr(l) for l in ls), ", "))], " *
+               "$(literal(a["selected"])))"
+    elseif c == "database.add_pair"
+        return "add_pair!(s, $(literal(a["item"])), $(literal(a["x"])), $(literal(a["y"])); crs = $(literal(a["crs"])))"
+    elseif c == "database.remove_pair"
+        return "remove_pair!(s, $(literal(a["item"])), $(literal(a["x"])), $(literal(a["y"])))"
     elseif c == "session.undo"
         return "undo!(s)"
     elseif c == "session.redo"

@@ -4,6 +4,7 @@
 using Test
 using JuliaMagCore
 isdefined(@__MODULE__, :fresh_session) || include(joinpath(@__DIR__, "support", "synthetic.jl"))
+isdefined(@__MODULE__, :add_test_grid!) || include(joinpath(@__DIR__, "support", "grids.jl"))
 
 @testset "UI support: revision, warnings and closed sessions" begin
     small = joinpath(mktempdir(), "small.xyz")
@@ -237,4 +238,155 @@ end
         @test occursin("wait_job(" * script_call(job.command, job.args) * "; check = true)", text)
     end
     close_session!(s)
+end
+
+@testset "UI support: position pairs, checked cursor and marks, many lines" begin
+    xyz = joinpath(mktempdir(), "small.xyz")
+    write_synthetic_xyz(xyz; lines = 4, ties = 0, rows_per_line = 20)
+    # An import gives several lines and the pair X,Y as the current pair.
+    function pair_session()
+        s = fresh_session()
+        id = only(wait_job(import_file(s, xyz; mode = "new"); check = true).outputs)
+        return s, id
+    end
+    pairs_of(s, id) = [(p.x, p.y) for p in database(s.project, id).pairs]
+
+    @testset "add_pair! and remove_pair!" begin
+        s, id = pair_session()
+        @test pairs_of(s, id) == [("X", "Y")] && database(s.project, id).current_pair == 1
+        r = revision(s)
+        add_pair!(s, id, "MAG", "ALT"; crs = "EPSG:7855")
+        @test revision(s) > r
+        db = database(s.project, id)
+        @test pairs_of(s, id) == [("X", "Y"), ("MAG", "ALT")] && db.current_pair == 1
+        @test db.pairs[2].crs == "EPSG:7855"
+        @test s.history[end].command == "database.add_pair"
+        @test_throws ArgumentError add_pair!(s, id, "MAG", "ALT")          # there already
+        @test_throws JuliaMagCore.DatabaseError add_pair!(s, id, "MAG", "NOPE")
+        remove_pair!(s, id, "X", "Y")
+        db = database(s.project, id)
+        @test pairs_of(s, id) == [("MAG", "ALT")] && db.current_pair == 0
+        @test s.history[end].command == "database.remove_pair"
+        @test all(n -> any(c -> c.name == n, db.channels), ("X", "Y"))        # the channels stay
+        undo!(s)
+        @test database(s.project, id).current_pair == 1 && pairs_of(s, id) == [("X", "Y"), ("MAG", "ALT")]
+        redo!(s)
+        @test database(s.project, id).current_pair == 0
+        undo!(s)
+        # Removing another pair keeps the current pair on the same pair.
+        add_pair!(s, id, "ALT", "MAG")
+        d = database(s.project, id)
+        d.current_pair = 2
+        save_meta(d)                                    # a database is read from disk on each call
+        remove_pair!(s, id, "X", "Y")
+        @test database(s.project, id).current_pair == 1 && pairs_of(s, id)[1] == ("MAG", "ALT")
+        @test_throws ArgumentError remove_pair!(s, id, "X", "Y")
+        undo!(s)
+        @test database(s.project, id).current_pair == 2
+        close_session!(s)
+    end
+
+    @testset "add_pair! checks the channels and a busy database" begin
+        s, id = pair_session()
+        db = database(s.project, id)
+        add_channel!(db, ChannelInfo("NAME", "NAME", String, "", ROLE_NONE, :normal, 10, -1, false, 1))
+        add_channel!(db, ChannelInfo("ARR", "ARR", Float64, "", ROLE_NONE, :normal, 10, -1, false, 3))
+        save_meta(db)
+        @test_throws ArgumentError add_pair!(s, id, "MAG", "NAME")
+        @test_throws ArgumentError add_pair!(s, id, "ARR", "MAG")
+        @test_throws ArgumentError add_pair!(s, id, "MAG", "ARR")
+        @test length(database(s.project, id).pairs) == 1
+        JuliaMagCore.mark_busy!(s, id)
+        @test_throws ItemBusyError add_pair!(s, id, "MAG", "ALT")
+        @test_throws ItemBusyError remove_pair!(s, id, "X", "Y")
+        @test_throws ItemBusyError set_lines_selected!(s, id, [first(db.lines).id], false)
+        close_session!(s)
+    end
+
+    @testset "the first pair becomes current" begin
+        s = fresh_session()
+        id = make_test_database!(s)
+        @test isempty(database(s.project, id).pairs)
+        add_pair!(s, id, "MAG", "MAGP")
+        @test database(s.project, id).current_pair == 1
+        undo!(s)
+        db = database(s.project, id)
+        @test isempty(db.pairs) && db.current_pair == 0
+        close_session!(s)
+    end
+
+    @testset "set_lines_selected!" begin
+        s, id = pair_session()
+        ls = [l.id for l in database(s.project, id).lines]
+        @test length(ls) == 4
+        set_lines_selected!(s, id, ls, false)
+        @test !any(l.selected for l in database(s.project, id).lines)
+        @test count(e -> e.command == "database.set_lines_selected", s.history) == 1
+        undo!(s)                                         # one step for all lines
+        @test all(l.selected for l in database(s.project, id).lines)
+        redo!(s)
+        @test !any(l.selected for l in database(s.project, id).lines)
+        # Lines in that state already are left out; an empty change pushes nothing.
+        n, r = length(s.history), revision(s)
+        set_lines_selected!(s, id, ls, false)
+        set_lines_selected!(s, id, LineId[], true)
+        @test length(s.history) == n && revision(s) == r
+        set_lines_selected!(s, id, ls[1:2], true)
+        e = s.history[end]
+        @test length(e.args["lines"]) == 2
+        set_lines_selected!(s, id, ls, true)             # only the two that are off
+        @test length(s.history[end].args["lines"]) == 2
+        @test all(l.selected for l in database(s.project, id).lines)
+        undo!(s)
+        @test count(l -> l.selected, database(s.project, id).lines) == 2
+        @test_throws JuliaMagCore.DatabaseError set_lines_selected!(s, id, [LineId(LINE, 9999, 0)], true)
+        close_session!(s)
+    end
+
+    @testset "set_cursor! and set_marked! check their input" begin
+        s, id = pair_session()
+        ls = [l.id for l in database(s.project, id).lines]
+        @test_throws ArgumentError set_cursor!(s, Cursor(id, first(ls), 0))
+        @test_throws ArgumentError set_cursor!(s, Cursor(id, first(ls), 21))
+        @test_throws ArgumentError set_cursor!(s, Cursor("db-99", first(ls), 1))
+        @test_throws ArgumentError set_cursor!(s, Cursor(id, LineId(LINE, 9999, 0), 1))
+        @test s.cursor === nothing
+        @test_throws ArgumentError set_marked!(s, (1, 3))                # no cursor yet
+        set_cursor!(s, Cursor(id, first(ls), 20))
+        @test s.cursor.row == 20
+        set_cursor!(s, Cursor(id, first(ls), 1))
+        @test_throws ArgumentError set_marked!(s, (0, 3))
+        @test_throws ArgumentError set_marked!(s, (1, 10^9))
+        @test_throws ArgumentError set_marked!(s, (5, 3))
+        set_marked!(s, (1, 20))
+        @test s.marked == (1, 20)
+        set_marked!(s, nothing)
+        @test s.marked === nothing
+        # A project item that is not a database is refused too.
+        gid = add_test_grid!(s, Float32[1 2; 3 4])
+        @test_throws ArgumentError set_cursor!(s, Cursor(gid, first(ls), 1))
+        close_session!(s)
+    end
+
+    @testset "the three edits replay by script" begin
+        s = fresh_session()
+        copy_folder = joinpath(mktempdir(), "copy")       # the project before the import
+        cp(s.project.folder, copy_folder)
+        rm(joinpath(copy_folder, LOCK_FILE); force = true)
+        id = only(wait_job(import_file(s, xyz; mode = "new"); check = true).outputs)
+        ls = [l.id for l in database(s.project, id).lines]
+        add_pair!(s, id, "MAG", "ALT"; crs = "EPSG:7855")
+        set_lines_selected!(s, id, ls[1:2], false)
+        remove_pair!(s, id, "X", "Y")
+        text = replace(script_text(s), repr(s.project.folder) => repr(copy_folder))
+        @test occursin("\nadd_pair!(s, db_1, \"MAG\", \"ALT\"; crs = \"EPSG:7855\")\n", text)
+        @test occursin("\nset_lines_selected!(s, db_1, [LineId(LINE, 1001, 0), LineId(LINE, 1002, 0)], false)\n", text)
+        @test occursin("\nremove_pair!(s, db_1, \"X\", \"Y\")\n", text)
+        close_session!(s)
+        # The copy was made after the import, so the script replays on it.
+        include_string(Module(), text)
+        db = database(open_project(copy_folder), "db-1")
+        @test [(p.x, p.y) for p in db.pairs] == [("MAG", "ALT")] && db.current_pair == 0
+        @test [l.selected for l in db.lines] == [false, false, true, true]
+    end
 end

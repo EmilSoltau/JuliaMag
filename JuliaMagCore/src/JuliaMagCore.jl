@@ -64,6 +64,7 @@ export open_session, new_session, close_session!, check_not_busy, push_undo!, un
 export revision, warnings, SessionClosedError
 export record!, set_cell!, set_line_selected!, set_cursor!, script_text, script_call
 export rename_item!, set_marked!, set_channel_protected!, rename_channel!, delete_channel!, set_channel_info!
+export add_pair!, remove_pair!, set_lines_selected!
 export eachfileline, ImportWarning, ImportResult, Progress, report, is_cancelled, NO_PROGRESS
 export GridHeader, GridSink, put_rows!, put_columns!, import_grid
 export georef_from_affine, affine_from_grid, read_gdal_grid
