@@ -226,7 +226,7 @@ The outputs of an entry (the items a job or a direct import made) are bound to
 variables named after their ids:
 `db_1 = only(wait_job(import_file(s, "..."; ...); check = true).outputs)`, or
 `grid_1 = only(wait_job(run_tool(s, "..."; ...); check = true)[3])` for a quick
-tool, which returns `(ok, message, outputs)`. Later lines name the
+tool, which returns `(ok, message, outputs)` with item ids. Later lines name the
 item by the variable. So the script replays on the same project as well as on a
 copy: each run makes new items. Items that existed before the first history
 entry are named by their ids.

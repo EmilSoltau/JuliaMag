@@ -205,7 +205,7 @@ end
 
         # a run that works: the data changes, undo works, the run is recorded
         ok, msg, out = run_tool(s, "test.scale_data"; inputs = Dict("database" => id), in = "MAG", factor = 3)
-        @test ok && msg == "Scaled MAG by 3.0." && out == ProjectItem[]
+        @test ok && msg == "Scaled MAG by 3.0." && out == String[]
         @test mag() == [3.0, 6.0, 9.0]
         @test undo!(s) && mag() == [1.0, 2.0, 3.0] && redo!(s) && mag() == [3.0, 6.0, 9.0]
         e = s.history[nh+1]
@@ -358,14 +358,17 @@ end
         end))
         s = fresh_session()
         ok, _, out = run_tool(s, "test.make_item")
-        @test ok && length(out) == 1
-        @test s.history[end].command == "test.make_item" && s.history[end].outputs == [only(out).id]
+        @test ok && out == ["grid-1"]                   # item ids, as in `Job.outputs`
+        @test s.history[end].command == "test.make_item" && s.history[end].outputs == out
+        rename_item!(s, only(out), "renamed")           # a later step uses the new item
         # The script binds the output, and replays on the same project.
         text = script_text(s)
         @test occursin("grid_1 = only(wait_job(run_tool(s, \"test.make_item\"); check = true)[3])", text)
+        @test occursin("rename_item!(s, grid_1, \"renamed\")", text)
         close_session!(s)
         include_string(Module(), text)
-        @test with_session(s2 -> [i.id for i in s2.project.items], s.project.folder) == ["grid-1", "grid-2"]
+        names = with_session(s2 -> [(i.id, i.name) for i in s2.project.items], s.project.folder)
+        @test names == [("grid-1", "renamed"), ("grid-2", "renamed")]
     finally
         unregister_tool!("test.make_item")
     end

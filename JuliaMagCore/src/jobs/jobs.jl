@@ -107,10 +107,10 @@ With `check = true` it throws a `JobFailedError` when the job failed or was
 cancelled, so a script stops there. Every job line of `script_text` uses it.
 
 `run_tool` returns a tuple `(ok, message, outputs)`, not a job, for a `:quick`
-tool and for a tool it refused. `wait_job` returns such a tuple when `ok`, and
-throws a `ToolError` with the message when not (also with `check = false`). So
-a script line `wait_job(run_tool(...); check = true)` stops the script at a
-tool that did not run.
+tool and for a tool it refused. `outputs` are item ids, as in `Job.outputs`.
+`wait_job` returns such a tuple when `ok`, and throws a `ToolError` with the
+message when not (also with `check = false`). So a script line
+`wait_job(run_tool(...); check = true)` stops the script at a tool that did not run.
 """
 function wait_job(r::Tuple{Bool,AbstractString,Any}; check::Bool = false)
     r[1] || throw(ToolError(String(r[2])))

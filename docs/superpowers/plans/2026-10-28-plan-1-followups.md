@@ -69,6 +69,9 @@ These are the open points from the reviews that later plans must handle.
   Done in the final review fixes of plan 2: a job's undo step has a `commit` too, and `note_job_undo!` takes one.
   At close, the commit deletes the replaced folders and the side folder.
   Commits run only while the project lock is still ours; after a forced open elsewhere the files are kept, with a warning.
+- A quick tool returned its outputs as items, while a job gives item ids.
+  So a script line that bound a quick tool's output gave an item, and a later line that used it failed on replay.
+  Done in the commit "Return item ids from quick tools": a quick tool returns item ids now, as a job does.
 
 ## Checks on real systems
 
@@ -77,6 +80,8 @@ These are the open points from the reviews that later plans must handle.
 - Open a `.grd` written by JuliaMag in Oasis montaj.
   Check that the values, the position and the coordinate system (from `.grd.xml` alone, without `.gi`) are right.
   The research could not confirm that Oasis reads the coordinate system from `.xml` alone.
+  The Oasis manual says Oasis keeps the projection of a grid in its `.gi` file, and that without it a grid "can appear in the incorrect location and/or orientation".
+  If this check fails, JuliaMag must write a `.grd.gi` file too, as its own task.
   Check a rotated grid too: Oasis adds a `<warp>` for the rotation to its own `.grd.xml`, and JuliaMag does not.
 - Open a rotated ER Mapper `.ers` (from Oasis or ER Mapper) in JuliaMag and check that the rotation direction is right.
   JuliaMag reads the `Rotation` field itself as degrees counter-clockwise; no rotated sample file was available to confirm the sign.

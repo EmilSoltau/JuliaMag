@@ -228,7 +228,8 @@ Inputs are item ids by input name, such as `inputs = Dict("database" => "db-1")`
 The settings are checked first. With problems, nothing runs and the result is
 `(false, <the problems>, nothing)`, and nothing is remembered.
 
-- A `:quick` tool runs now and returns `(ok, message, outputs)`. Nothing is
+- A `:quick` tool runs now and returns `(ok, message, outputs)`, where
+  `outputs` are the ids of the items it made, as in `Job.outputs`. Nothing is
   thrown: a `ToolError` gives its own message, other errors give
   `"Tool failed: <message>"`. A run that worked is recorded in the history,
   and only then are its settings remembered.
@@ -265,14 +266,15 @@ function run_quick(s::Session, spec::ToolSpec, ins::Dict{String,String}, values:
         return (false, failure_message(e), nothing)
     end
     remember_settings!(s, spec.id, values)
+    ids = String[it.id for it in outputs]
     try
-        record!(s, spec.id, args; outputs = String[it.id for it in outputs])
+        record!(s, spec.id, args; outputs = ids)
     catch e
         e isa InterruptException && rethrow()
         session_warning!(s, "the run of $(spec.id) could not be recorded: $(sprint(showerror, e))")
     end
     text = strip(String(take!(report)))
-    return (true, isempty(text) ? "$(spec.name) is done." : String(text), outputs)
+    return (true, isempty(text) ? "$(spec.name) is done." : String(text), ids)
 end
 
 """
