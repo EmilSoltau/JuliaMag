@@ -335,13 +335,13 @@ register_tool!(ToolSpec("coordinates.reproject", "Reproject",
 
 register_tool!(ToolSpec("coordinates.set_current", "Set current pair",
     "Make a position pair the current one. Maps and tools use the current pair.", "pair",
-    [Place(COORDINATES_TAB, "Position pairs"), Place("Database", "Channels")], DATABASE_INPUT,
+    [Place(COORDINATES_TAB, "Position pairs"; size = :small), Place("Database", "Channels")], DATABASE_INPUT,
     SettingSpec[PairSetting("pair", "Position pair")],
     :quick, run_set_current))
 
 register_tool!(ToolSpec("coordinates.guess_utm", "Guess UTM zone",
     "Say which UTM zone most points are in, from longitude and latitude.", "globe",
-    [Place(COORDINATES_TAB, "Coordinate system")], DATABASE_INPUT,
+    [Place(COORDINATES_TAB, "Coordinate system"; size = :small)], DATABASE_INPUT,
     SettingSpec[PairSetting("pair", "Position pair";
                             help = "Blank uses the current pair, or else a pair with longitude and latitude.")],
     :quick, run_guess_utm))

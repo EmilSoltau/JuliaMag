@@ -4,10 +4,22 @@
 # Tools from other packages register here too. Registering an id again
 # replaces the old tool, so a reloaded package updates its tools.
 
-"Where a tool shows in the ribbon: a tab and a group on it."
+"""
+    Place(tab, group; size = :big, order = 0)
+
+Where a tool shows in the ribbon: a tab and a group on it. `size` is `:big` (a
+big button) or `:small` (a small one, three to a column). `order` sorts the
+buttons of a group: lower comes first, and equal ones keep the order of registration.
+"""
 struct Place
     tab::String
     group::String
+    size::Symbol
+    order::Int
+    function Place(tab, group; size::Symbol = :big, order::Integer = 0)
+        size in (:big, :small) || throw(ArgumentError("a place has size :big or :small, not :$size"))
+        return new(String(tab), String(group), size, Int(order))
+    end
 end
 
 """
@@ -42,6 +54,7 @@ struct ToolSpec
         isempty(id) && throw(ArgumentError("a tool needs an id"))
         mode in (:quick, :job) || throw(ArgumentError("tool \"$id\": mode must be :quick or :job, not :$mode"))
         check_setting_keys(settings, "tool \"$id\"")
+        check_when(settings, "tool \"$id\"")
         names = first.(inputs)
         allunique(names) || throw(ArgumentError("tool \"$id\" has two inputs with the same name"))
         for st in settings
@@ -121,7 +134,26 @@ Empty means the settings are fine. A missing setting takes its default.
 With a `session`, an `ItemSetting` must name an item of its kind in the project.
 """
 validate(spec::ToolSpec, settings::AbstractDict; session::Union{Nothing,Session} = nothing)::Vector{String} =
-    validate_settings(spec.settings, settings, spec.name; session)
+    last.(setting_problems(spec, settings; session))
+
+"""
+    setting_problems(spec, values; session = nothing, inputs = nothing)::Vector{Pair{String,String}}
+
+The problems with `values`, one pair for each, as `key => sentence`, in setting
+order. `validate` returns the sentences only. A setting that is not used (see
+`is_active`) is skipped. A key that is not a setting is a problem under its own key.
+
+For a tool, the inputs are checked first when they are given, as `inputs` or as
+`values["inputs"]`; an input problem has the input's name as its key.
+"""
+function setting_problems(spec::ToolSpec, values::AbstractDict; session::Union{Nothing,Session} = nothing,
+                          inputs::Union{Nothing,AbstractDict} = nothing)::Vector{Pair{String,String}}
+    given = get(values, "inputs", nothing)
+    ins = inputs !== nothing ? inputs : given isa AbstractDict ? given : nothing
+    rest = ins === nothing ? values : Dict{String,Any}(String(k) => v for (k, v) in values if k != "inputs")
+    own = ins === nothing ? Pair{String,String}[] : input_problem_pairs(spec, ins)
+    return vcat(own, settings_problems(spec.settings, rest, spec.name; session))
+end
 
 # ---- remembered settings ---------------------------------------------------
 
@@ -182,15 +214,20 @@ end
 
 "The problems with the inputs: each input of the tool needs an item id, and no others are allowed."
 function input_problems(spec::ToolSpec, inputs::AbstractDict)::Vector{String}
-    problems = String[]
+    return last.(input_problem_pairs(spec, inputs))
+end
+
+"`input_problems` as `input name => sentence`."
+function input_problem_pairs(spec::ToolSpec, inputs::AbstractDict)::Vector{Pair{String,String}}
+    problems = Pair{String,String}[]
     for (name, kind) in spec.inputs
         v = get(inputs, name, "")
         (v isa AbstractString && !isempty(v)) ||
-            push!(problems, "$(spec.name) needs a $(KIND_NAMES[kind]) as input \"$name\".")
+            push!(problems, name => "$(spec.name) needs a $(KIND_NAMES[kind]) as input \"$name\".")
     end
     names = Set(first.(spec.inputs))
     for k in sort!([String(k) for k in keys(inputs)])
-        k in names || push!(problems, "$(spec.name) has no input \"$k\".")
+        k in names || push!(problems, k => "$(spec.name) has no input \"$k\".")
     end
     return problems
 end
@@ -250,6 +287,7 @@ function run_tool(s::Session, id::AbstractString; inputs::AbstractDict = Dict{St
     end
     problems = vcat(input_problems(spec, inputs), validate(spec, values; session = s))
     isempty(problems) || return (false, join(problems, " "), nothing)
+    values = deactivate_settings(spec.settings, values)
     ins = Dict{String,String}(String(k) => String(v) for (k, v) in inputs)
     args = tool_args(values, ins)
     if spec.mode == :job
@@ -298,6 +336,7 @@ function tool_rerun_work(s::Session, spec::ToolSpec, a::Dict{String,Any})::Funct
         st = findfirst(x -> x.key == k, spec.settings)
         values[k] = st === nothing ? v : setting_value(spec.settings[st], v)
     end
+    values = deactivate_settings(spec.settings, values)
     problems = vcat(input_problems(spec, inputs), validate(spec, values; session = s))
     isempty(problems) || return (_, _) -> throw(ToolError(join(problems, " ")))
     ins = Dict{String,String}(String(k) => String(v) for (k, v) in inputs)

@@ -62,7 +62,7 @@ export UndoStep, HistoryEntry, Cursor, Session, ProtectedError, ItemBusyError
 export LOCK_FILE, ProjectLockedError
 export open_session, new_session, close_session!, check_not_busy, push_undo!, undo!, redo!, can_undo, can_redo
 export revision, warnings, SessionClosedError
-export record!, set_cell!, set_line_selected!, set_cursor!, script_text
+export record!, set_cell!, set_line_selected!, set_cursor!, script_text, script_call
 export rename_item!, set_marked!, set_channel_protected!, rename_channel!, delete_channel!, set_channel_info!
 export eachfileline, ImportWarning, ImportResult, Progress, report, is_cancelled, NO_PROGRESS
 export GridHeader, GridSink, put_rows!, put_columns!, import_grid
@@ -82,7 +82,7 @@ export SettingSpec, NumberSetting, TextSetting, ExprSetting, ChoiceSetting, Bool
     ChannelSetting, ChannelListSetting, LinesSetting, CRSSetting, PairSetting, ExtentSetting, PointSetting,
     ItemSetting
 export Place, ToolSpec, ToolError, register_tool!, unregister_tool!, tools, tool, tabs
-export default_settings, validate, last_settings, reset_settings!, run_tool
+export default_settings, validate, setting_problems, is_active, last_settings, reset_settings!, run_tool
 export valid_crs, crs_name, crs_from_wkt, crs_from_name, crs_wkt, guess_utm, reproject_xy
 export parse_channel_expr, ChannelStats, channel_stats, grid_stats
 export set_grid_crs!, set_grid_georef!, set_grid_style!

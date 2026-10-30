@@ -569,6 +569,8 @@ function import_file(s::Session, path::AbstractString; kwargs...)::Job
     spec = importer_for(path)
     spec === nothing && return start_job!(s, "import", args, (_, _) -> throw(ArgumentError(
         "no importer for the file type of $path")))
+    settings = deactivate_settings(spec.settings, settings)
+    args = merge(settings, Dict{String,Any}("path" => String(path)))
     return start_job!(s, spec.id, args, import_work(s, spec, String(path), settings))
 end
 
@@ -607,6 +609,7 @@ function rerun!(s::Session, job::Job; args::AbstractDict = job.args, replace::Bo
     k = findfirst(i -> i.id == job.command, known)
     if k !== nothing
         spec = known[k]
+        a = deactivate_settings(spec.settings, a)
         path = get(a, "path", "")
         if path isa AbstractString && !isempty(path)
             settings = Dict{String,Any}(key => v for (key, v) in a if key != "path")
@@ -617,6 +620,7 @@ function rerun!(s::Session, job::Job; args::AbstractDict = job.args, replace::Bo
     end
     e = exporter_for(job.command)
     if e !== nothing && e.id == job.command
+        a = deactivate_settings(e.settings, a)
         item_id, path = get(a, "item", ""), get(a, "path", "")
         if item_id isa AbstractString && path isa AbstractString && !isempty(item_id) && !isempty(path)
             settings = Dict{String,Any}(key => v for (key, v) in a if !(key in ("item", "path")))
@@ -627,7 +631,10 @@ function rerun!(s::Session, job::Job; args::AbstractDict = job.args, replace::Bo
             "the job args have no item or no file path, so \"$(job.command)\" cannot run again")); undoable = false)
     end
     t = find_tool(job.command)
-    t !== nothing && t.mode == :job && return start_job!(s, job.command, a, tool_rerun_work(s, t, a), old)
+    if t !== nothing && t.mode == :job
+        a = deactivate_settings(t.settings, a)
+        return start_job!(s, job.command, a, tool_rerun_work(s, t, a), old)
+    end
     return start_job!(s, job.command, a, (_, _) -> throw(ArgumentError(
         "the command \"$(job.command)\" cannot be run again")), old)
 end
@@ -670,6 +677,8 @@ function export_file(s::Session, item_id::AbstractString, path::AbstractString; 
         end
         return start_job!(s, "export", args, (_, _) -> throw(ArgumentError(what)); undoable = false)
     end
+    settings = deactivate_settings(spec.settings, settings)
+    args = merge(settings, Dict{String,Any}("item" => String(item_id), "path" => String(path)))
     return start_job!(s, spec.id, args, export_work(s, spec, String(item_id), String(path), settings);
                       undoable = false)
 end

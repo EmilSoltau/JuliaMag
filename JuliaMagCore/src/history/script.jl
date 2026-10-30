@@ -137,24 +137,26 @@ The args of entry `e` with each item id that has a variable in `vars` (id to
 name) replaced by a `ScriptVar`: the `"item"` of an edit or an export, the
 values of `"inputs"`, and the item settings (`ItemSetting`) of an importer or a tool.
 """
-function bind_items(e::HistoryEntry, vars::AbstractDict)::Dict{String,Any}
-    a = copy(e.args)
+function bind_items(command::String, args::AbstractDict, vars::AbstractDict)::Dict{String,Any}
+    a = Dict{String,Any}(String(k) => v for (k, v) in args)
     isempty(vars) && return a
     ref(x) = x isa AbstractString && haskey(vars, x) ? ScriptVar(vars[x]) : x
     haskey(a, "item") && (a["item"] = ref(a["item"]))
     ins = get(a, "inputs", nothing)
     ins isa AbstractDict && (a["inputs"] = Dict{String,Any}(String(k) => ref(v) for (k, v) in ins))
-    for st in command_settings(e.command)
+    for st in command_settings(command)
         st isa ItemSetting && haskey(a, st.key) && (a[st.key] = ref(a[st.key]))
     end
     return a
 end
 
-function command_text(e::HistoryEntry, vars::AbstractDict = Dict{String,String}())::String
-    c = e.command
+command_text(e::HistoryEntry, vars::AbstractDict = Dict{String,String}())::String =
+    command_text(e.command, e.args, vars)
+
+function command_text(c::String, args::AbstractDict, vars::AbstractDict)::String
     # The kind of call is told from the args as recorded; `a` names items by their variables.
-    crs_call, import_call, export_call = is_grid_crs_call(c, e.args), is_import(c, e.args), is_export(c, e.args)
-    a = bind_items(e, vars)
+    crs_call, import_call, export_call = is_grid_crs_call(c, args), is_import(c, args), is_export(c, args)
+    a = bind_items(c, args, vars)
     if c == "database.set_cell"
         return "set_cell!(s, $(literal(a["item"])), $(line_expr(a["line"])), $(literal(a["channel"])), " *
                "$(literal(a["row"])), $(literal(a["value"])))"
@@ -199,6 +201,18 @@ function command_text(e::HistoryEntry, vars::AbstractDict = Dict{String,String}(
     kw = kwtext(c, a, keys(a))
     return isempty(kw) ? "run_tool(s, $(repr(c)))" : "run_tool(s, $(repr(c)); $kw)"
 end
+
+"""
+    script_call(command, args)::String
+
+The line `script_text` writes for one history entry, without the `wait_job` wrapper
+and without the variable that holds its outputs, such as
+`run_tool(s, "database.statistics"; channel = "MAG", inputs = Dict("database" => "db-1"))`.
+`args` are the args of the history entry. The dialog shows this line.
+Throws `ArgumentError` for args that cannot be written (see `script_text`).
+"""
+script_call(command::AbstractString, args::AbstractDict)::String =
+    command_text(String(command), args, Dict{String,String}())
 
 "The keywords of a `\"database.set_channel_info\"` entry, sorted. `format` is written as a symbol."
 function channel_info_text(a::AbstractDict)::String

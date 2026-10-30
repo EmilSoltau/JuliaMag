@@ -71,6 +71,10 @@ struct ImporterSpec
     kind::ItemKind
     settings::Vector{SettingSpec}
     run::Function
+    function ImporterSpec(id, name, extensions, kind, settings, run)
+        check_when(settings, "importer \"$id\"")
+        return new(id, name, extensions, kind, settings, run)
+    end
 end
 
 "The default value of each setting of the importer, by key."
@@ -78,7 +82,11 @@ default_settings(spec::ImporterSpec)::Dict{String,Any} = default_settings(spec.s
 
 "The problems with importer settings, as plain sentences. Empty means fine. See `validate` of a tool."
 validate(spec::ImporterSpec, settings::AbstractDict; session::Union{Nothing,Session} = nothing)::Vector{String} =
-    validate_settings(spec.settings, settings, spec.name; session)
+    last.(setting_problems(spec, settings; session))
+
+"The problems with importer settings as `key => sentence`. See `setting_problems` of a tool."
+setting_problems(spec::ImporterSpec, values::AbstractDict; session::Union{Nothing,Session} = nothing) =
+    settings_problems(spec.settings, values, spec.name; session)
 
 const IMPORTERS = ImporterSpec[]
 const IMPORTERS_LOCK = ReentrantLock()
@@ -151,6 +159,10 @@ struct ExporterSpec
     kind::ItemKind
     settings::Vector{SettingSpec}
     run::Function
+    function ExporterSpec(id, name, extension, kind, settings, run)
+        check_when(settings, "exporter \"$id\"")
+        return new(id, name, extension, kind, settings, run)
+    end
 end
 
 "The default value of each setting of the exporter, by key."
@@ -158,7 +170,11 @@ default_settings(spec::ExporterSpec)::Dict{String,Any} = default_settings(spec.s
 
 "The problems with exporter settings, as plain sentences. Empty means fine. See `validate` of a tool."
 validate(spec::ExporterSpec, settings::AbstractDict; session::Union{Nothing,Session} = nothing)::Vector{String} =
-    validate_settings(spec.settings, settings, spec.name; session)
+    last.(setting_problems(spec, settings; session))
+
+"The problems with exporter settings as `key => sentence`. See `setting_problems` of a tool."
+setting_problems(spec::ExporterSpec, values::AbstractDict; session::Union{Nothing,Session} = nothing) =
+    settings_problems(spec.settings, values, spec.name; session)
 
 const EXPORTERS = ExporterSpec[]
 const EXPORTERS_LOCK = ReentrantLock()
