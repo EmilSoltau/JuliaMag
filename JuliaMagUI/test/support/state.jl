@@ -224,3 +224,80 @@ function kangaroo_data(; vmin::Real = -260.3, vmax::Real = 607.1)
     Core.save_project(p)
     return s
 end
+
+"""
+    with_tools(f, specs)
+
+Register the test tools `specs`, run `f()`, and take them out again, all of them, also
+when a register or an unregister throws (the first error is thrown again at the end).
+"""
+function with_tools(f, specs::Vector{Core.ToolSpec})
+    try
+        foreach(Core.register_tool!, specs)
+        return f()
+    finally
+        failure = nothing
+        for spec in specs
+            try
+                Core.unregister_tool!(spec.id)
+            catch e
+                failure === nothing && (failure = e)
+            end
+        end
+        failure === nothing || throw(failure)
+    end
+end
+
+"""
+    open_form_now(app, owner; kwargs...) -> Form
+
+`open_form(app, owner; kwargs...)`, then wait for the worker, so the dialog is open.
+Returns the form of the new top dialog.
+"""
+function open_form_now(app::UI.AppState, owner; kwargs...)
+    n = length(app.ui.dialogs)
+    UI.open_form(app, owner; kwargs...)
+    wait_drained(app)
+    length(app.ui.dialogs) == n + 1 || error("open_form_now: no dialog opened")
+    return last(app.ui.dialogs).form
+end
+
+"""
+    every_setting_tool(; id = "test.every_setting", mode = :quick) -> ToolSpec
+
+A test tool with one setting of every type, for the widget shots. Its run writes one
+line of report text.
+"""
+every_setting_tool(; id::AbstractString = "test.every_setting", mode::Symbol = :quick) =
+    Core.ToolSpec(id, "Every setting", "A test tool with one setting of every type.", "tools",
+        [Core.Place("Test", "Test")], ["database" => Core.ITEM_DATABASE],
+        Core.SettingSpec[
+            Core.NumberSetting("factor", "Factor"; default = 2.5, min = 0, unit = "nT",
+                help = "A number with a unit."),
+            Core.NumberSetting("cell", "Cell size"; default = nothing, auto = true, unit = "m"),
+            Core.TextSetting("note", "Note"; default = "Survey 2024", help = "Free text."),
+            Core.ExprSetting("expr", "Expression"; default = "OUT = MAG * 2"),
+            Core.ChoiceSetting("method", "Method", ["near", "linear"]; labels = ["Nearest", "Linear"]),
+            Core.ChoiceSetting("table", "Colour table", ["rainbow", "geosoft", "grey", "clra"];
+                labels = ["Rainbow", "Geosoft", "Grey", "Clra"]),
+            Core.BoolSetting("protect", "Protect the output"; default = true),
+            Core.FileSetting("file", "File"; extensions = [".xyz"], default = "/data/survey.xyz"),
+            Core.ChannelSetting("channel", "Channel"),
+            Core.ChannelSetting("out", "Output channel"; allow_new = true, default = "MAG_OUT"),
+            Core.ChannelListSetting("channels", "Channels"),
+            Core.LinesSetting("lines", "Lines"),
+            Core.CRSSetting("crs", "Coordinate system"; default = "EPSG:7855"),
+            Core.PairSetting("pair", "Position pair"),
+            Core.ExtentSetting("area", "Area"; default = [1.0, 2.0, 3.0, 4.0]),
+            Core.PointSetting("origin", "Origin"),
+            Core.ItemSetting("grid", "Grid", Core.ITEM_GRID; optional = true),
+        ], mode, (s, ins, st, progress, report) -> (println(report, "Every setting ran."); nothing))
+
+"""
+    sleep_tool(seconds; id = "test.sleep") -> ToolSpec
+
+A quick test tool that sleeps `seconds` and then says so.
+"""
+sleep_tool(seconds::Real; id::AbstractString = "test.sleep") =
+    Core.ToolSpec(id, "Sleep", "Sleeps.", "clock", Core.Place[], ["database" => Core.ITEM_DATABASE],
+        Core.SettingSpec[], :quick, (s, ins, st, progress, report) -> (sleep(seconds); println(report, "Slept."); nothing))

@@ -81,25 +81,30 @@ const DIALOG_FLAGS = ig.ImGuiWindowFlags_NoTitleBar | ig.ImGuiWindowFlags_NoResi
     ig.ImGuiWindowFlags_AlwaysAutoResize | ig.ImGuiWindowFlags_NoScrollbar
 
 """
-    draw_dialog(f, app, d; title, icon = "", width = 520, ok_label = "OK", ok_enabled = true,
-                on_ok, on_cancel = () -> pop_dialog!(app), footer_left = nothing,
-                cancel_label = "Cancel")
+    draw_dialog(f, app, d; title, icon = "", subtitle = "", width = 520, ok_label = "OK",
+                ok_enabled = true, ok_busy = false, on_ok, on_cancel = () -> pop_dialog!(app),
+                footer_left = nothing, cancel_label = "Cancel") -> Union{Nothing,Box}
 
 The frame of modal dialog `d`, as the prototype's `openDialog`: centred over the
 `backdrop`, `width` px wide, radius 10, `menu` fill, 1 px `border_strong`, shadow.
-The header is 46 high: a 22 px `icon`, the `title` (15 semibold) and a close x; drag it to
-move the dialog. `f()` draws the body, padded 14 by 16. The footer holds what
-`footer_left()` draws on the left, then Cancel and the primary button (`ok_label`, greyed
-when `ok_enabled` is false). With `cancel_label = nothing` there is no Cancel button (Esc
-and the close x still call `on_cancel`).
+The header is 46 high: a 22 px `icon`, the `title` (15 semibold), the `subtitle` (mono 11
+`text_disabled`, such as a tool id) at the right, and a close x; drag it to move the
+dialog. `f()` draws the body, padded 14 by 16. The footer holds what `footer_left()`
+draws on the left, then Cancel and the primary button (`ok_label`, greyed when
+`ok_enabled` is false, a spinner and no clicks while `ok_busy`). With
+`cancel_label = nothing` there is no Cancel button (Esc and the close x still call
+`on_cancel`).
 
 Esc, Cancel and the close x call `on_cancel()`; the primary button calls `on_ok()`, and so
-does Enter while a text field of the dialog is active. `on_ok` decides whether the dialog
-closes (`pop_dialog!`). Errors in the callbacks become error toasts.
+does Enter while a one-line text field of the dialog is active (Enter in a multi-line field
+makes a new line). While a menu of the dialog is open, Esc and Enter belong to the menu.
+`on_ok` decides whether the dialog closes (`pop_dialog!`). Errors in the callbacks become
+error toasts. Returns the box of the primary button, or `nothing` when nothing was drawn.
 """
 function draw_dialog(f, app, d; title::AbstractString, icon::AbstractString = "",
-        width::Real = 520, ok_label::AbstractString = "OK", ok_enabled::Bool = true,
-        on_ok::Function, on_cancel::Function = () -> pop_dialog!(app),
+        subtitle::AbstractString = "", width::Real = 520, ok_label::AbstractString = "OK",
+        ok_enabled::Bool = true, ok_busy::Bool = false, on_ok::Function,
+        on_cancel::Function = () -> pop_dialog!(app),
         footer_left::Union{Nothing,Function} = nothing,
         cancel_label::Union{Nothing,AbstractString} = "Cancel")
     dialogs = app.ui.dialogs
@@ -134,6 +139,8 @@ function draw_dialog(f, app, d; title::AbstractString, icon::AbstractString = ""
 
     top = level == length(dialogs)
     typing = unsafe_load(ig.GetIO()).WantTextInput
+    m = app.ui.menu
+    menu_here = m isa OpenMenu && m.level == level   # Esc and Enter go to the menu
     pos = ig.GetWindowPos()
     size = ig.GetWindowSize()
     b = Box(pos.x, pos.y, pos.x + dw, pos.y + size.y)
@@ -156,7 +163,14 @@ function draw_dialog(f, app, d; title::AbstractString, icon::AbstractString = ""
         draw_icon(dl, icon, (x, mid - p(11)), 22)
         x += p(22 + 10)
     end
-    ig.PushClipRect(dl, (x, head.y0), (close.x0 - p(10), head.y1), true)
+    title_end = close.x0 - p(10)
+    if !isempty(subtitle)   # `.dlg-h .mono`: right of the title, 10 px before the close x
+        sw = text_width(FONT_MONO, 11, subtitle)
+        sx = max(x, title_end - sw)
+        draw_text_mid(dl, FONT_MONO, 11, sx, mid, u32(t.text_disabled), subtitle)
+        title_end = sx - p(10)
+    end
+    ig.PushClipRect(dl, (x, head.y0), (title_end, head.y1), true)
     draw_text_mid(dl, FONT_SEMIBOLD, 15, x, mid, u32(t.text), title)
     ig.PopClipRect(dl)
     cancel = false
@@ -176,7 +190,9 @@ function draw_dialog(f, app, d; title::AbstractString, icon::AbstractString = ""
     ig.PopItemWidth()
     ig.PopTextWrapPos()
     ig.EndGroup()
-    body_end = ig.GetItemRectMax().y + p(14)
+    # A body of fractional height (hint lines are 14.85 px) puts the footer line on a
+    # whole pixel, as a browser snaps the border it paints.
+    body_end = rnd(ig.GetItemRectMax().y + fpx(s, 14))
 
     # Footer: the left buttons, then Cancel and the primary button on the right.
     ig.AddRectFilled(dl, (head.x0, body_end), (head.x1, body_end + hl), u32(t.border))
@@ -193,19 +209,21 @@ function draw_dialog(f, app, d; title::AbstractString, icon::AbstractString = ""
         cancel_w = round(button_width(app, cancel_label))
         cancel |= button(app, cancel_label, cancel_label, ok_x - p(8) - cancel_w, by)
     end
-    ok = button(app, ok_label, ok_label, ok_x, by; primary = true, enabled = ok_enabled)
+    ok = button(app, ok_label, ok_label, ok_x, by; primary = true, enabled = ok_enabled, busy = ok_busy)
+    ok_box = Box(ok_x, by, ok_x + ok_w, by + p(26))
     footer_end = by + p(26 + 12) + hl
     ig.SetCursorScreenPos((b.x0, footer_end))
     ig.Dummy((dw, 0f0))
     ig.AddRect(dl, (b.x0, b.y0), (b.x1, footer_end), u32(t.border_strong), p(10), hl)
 
-    if top && !broken
+    if top && !broken && !menu_here
         cancel |= ig.IsKeyPressed(lib.ImGuiKey_Escape, false)
         enter = ig.IsKeyPressed(lib.ImGuiKey_Enter, false) || ig.IsKeyPressed(lib.ImGuiKey_KeypadEnter, false)
-        ok |= typing && enter && ok_enabled
+        ok |= typing && enter && ok_enabled && !ok_busy && !multiline_active()
     end
-    # The next dialog opens inside this one.
+    # The next dialog opens inside this one; the top one holds its open menu.
     !broken && level < length(dialogs) && draw_modal(app, dialogs[level+1])
+    !broken && top && draw_dialog_menu(app, level)
     ig.EndPopup()
     broken && return nothing
     if cancel
@@ -213,7 +231,16 @@ function draw_dialog(f, app, d; title::AbstractString, icon::AbstractString = ""
     elseif ok
         guarded(app, _ -> on_ok())
     end
-    return nothing
+    return ok_box
+end
+
+# Is a multi-line text field active? Enter there makes a new line (review finding 8 of Task 9).
+function multiline_active()::Bool
+    id = lib.igGetActiveID()
+    id == 0 && return false
+    st = lib.igGetInputTextState(id)
+    st == C_NULL && return false
+    return (unsafe_load(st).Flags & Int(lib.ImGuiInputTextFlags_Multiline)) != 0
 end
 
 """

@@ -162,17 +162,16 @@ function draw_status_bar(app, dl, b::Box)
     return nothing
 end
 
-# A 12 px spinner centred at (x, y): a faint accent ring with a turning accent arc.
-function draw_spinner(app, dl, x::Real, y::Real)
+# A 12 px spinner centred at (x, y): a faint ring with a turning arc, in `col`.
+function draw_spinner(app, dl, x::Real, y::Real; col::NTuple{4,Float32} = app.tokens.accent)
     s = app.window.scale
-    t = app.tokens
     r = px(s, 5)
     th = px(s, 2)
     # ImGui strokes closed shapes inside their outline; this ring, like the arc, is
     # stroked on its centre line: from radius 4 to 6, as the CSS 2 px border of a 12 px box.
-    ig.AddCircle(dl, (x, y), r, u32(t.accent, 0.3), 24, th, Int(lib.ImDrawFlags_StrokeCenter))
+    ig.AddCircle(dl, (x, y), r, u32(col, 0.3), 24, th, Int(lib.ImDrawFlags_StrokeCenter))
     a = 2π * mod(time(), 0.9) / 0.9 - 3π / 4
     ig.PathArcTo(dl, (x, y), r, a, a + π / 2, 8)
-    ig.PathStroke(dl, u32(t.accent), th)
+    ig.PathStroke(dl, u32(col), th)
     return nothing
 end

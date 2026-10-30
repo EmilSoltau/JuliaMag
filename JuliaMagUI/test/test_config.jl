@@ -17,13 +17,15 @@ using JuliaMagUI: AppConfig, load_config, save_config, add_recent!, config_dir,
             c.window = (10, 20, 1200, 700)
             c.left_width = 300f0
             c.distance_units = "ft"
+            @test c.last_folder == ""
+            c.last_folder = "/data/surveys"
             save_config(c)
             c2, err2 = load_config()
             @test err2 === nothing
             @test c2.theme == THEME_DARK && c2.recent == [realpath(pwd())]
             @test c2.hidden_tabs == ["Jobs"] && c2.advanced_open == ["coordinates.reproject"]
             @test c2.window == (10, 20, 1200, 700) && c2.left_width == 300f0
-            @test c2.distance_units == "ft"
+            @test c2.distance_units == "ft" && c2.last_folder == "/data/surveys"
             # No temp file is left behind.
             @test readdir(config_dir()) == ["settings.json"]
         end

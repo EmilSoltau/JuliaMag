@@ -157,32 +157,40 @@ function set_field!(buf::Vector{UInt8}, text::AbstractString)
 end
 
 """
-    text_input!(app, id, buffer, b; flags = 0, size = 12.5, focus = false) -> (changed, active)
+    text_input!(app, id, buffer, b; flags = 0, size = 12.5, role = FONT_REGULAR,
+                focus = false, input = false) -> (changed, active)
 
 An ImGui text field for `buffer` that fills box `b` with no frame of its own: the caller
-draws the frame. The text sits where a browser puts the text of an input of that height.
-`focus` gives it the keyboard focus. Returns whether the text changed and whether the
-field has the focus.
+draws the frame. The text sits where a browser puts it, in font `role` (`FONT_MONO` for
+code and paths): centred as a line of `b`'s height, or with `input` as the text of an
+`<input>` taller than its line (`input_text_y`). `focus` gives it the keyboard focus.
+While text is selected the caret is hidden, as in Chromium.
+Returns whether the text changed and whether the field has the focus.
 """
 function text_input!(app, id::AbstractString, buf::Vector{UInt8}, b::Box; flags::Integer = 0,
-        size::Real = BODY_FONT_SIZE, focus::Bool = false)
-    changed = with_font(FONT_REGULAR, size) do
-        pad_y = max(text_y(FONT_REGULAR, size, centre_y(b)) - b.y0, 0f0)
+        size::Real = BODY_FONT_SIZE, role::FontRole = FONT_REGULAR, focus::Bool = false,
+        input::Bool = false)
+    changed = with_font(role, size) do
+        top = input ? input_text_y(role, size, centre_y(b)) : text_y(role, size, centre_y(b))
+        pad_y = max(top - b.y0, 0f0)
         ig.PushStyleVar(ig.ImGuiStyleVar_FramePadding, (0f0, pad_y))
         ig.PushStyleVar(ig.ImGuiStyleVar_FrameBorderSize, 0f0)
         # No frame, and no selection fill of ImGui's (it is 3 px taller than Chromium's):
-        # `draw_selected_text` draws it.
+        # `draw_selected_text` draws it. No caret over a selection (the state of the last frame).
+        st = lib.igGetInputTextState(ig.GetID(id))
+        selecting = st != C_NULL && lib.ImGuiInputTextState_HasSelection(st)
         for slot in (ig.ImGuiCol_FrameBg, ig.ImGuiCol_FrameBgHovered, ig.ImGuiCol_FrameBgActive,
                 ig.ImGuiCol_TextSelectedBg)
             ig.PushStyleColor(slot, (0f0, 0f0, 0f0, 0f0))
         end
+        selecting && ig.PushStyleColor(lib.ImGuiCol_InputTextCursor, (0f0, 0f0, 0f0, 0f0))
         ig.SetCursorScreenPos((b.x0, b.y0))
         ig.SetNextItemWidth(max(width(b), 1f0))
         focus && ig.SetKeyboardFocusHere()
         c = ig.InputText(id, buf, length(buf), flags)
-        ig.PopStyleColor(4)
+        ig.PopStyleColor(selecting ? 5 : 4)
         ig.PopStyleVar(2)
-        ig.IsItemActive() && draw_selected_text(app, buf, b, size)
+        ig.IsItemActive() && draw_selected_text(app, buf, b, size, top; role)
         c
     end
     return changed, ig.IsItemActive()
@@ -191,8 +199,9 @@ end
 # Selected text of the active field (the last item) as Chromium draws it: white on
 # `text_selection`, over ImGui's own text. The box is as high as the rounded ascender plus
 # descender (`text_baseline`) and centred in the field, a half pixel rounded up, as the
-# prototype's render shows. Call it inside `with_font(FONT_REGULAR, size)`.
-function draw_selected_text(app, buf::Vector{UInt8}, b::Box, size::Real)
+# prototype's render shows. `top` is where ImGui put the text. Call it inside `with_font(role, size)`.
+function draw_selected_text(app, buf::Vector{UInt8}, b::Box, size::Real, top::Real;
+        role::FontRole = FONT_REGULAR)
     st = lib.igGetInputTextState(ig.GetItemID())
     (st == C_NULL || !lib.ImGuiInputTextState_HasSelection(st)) && return nothing
     i, j = minmax(Int(lib.ImGuiInputTextState_GetSelectionStart(st)),
@@ -203,10 +212,9 @@ function draw_selected_text(app, buf::Vector{UInt8}, b::Box, size::Real)
     scroll = unsafe_load(st).Scroll.x
     x0 = b.x0 - scroll + ig.CalcTextSize(String(bytes[1:i])).x
     x1 = b.x0 - scroll + ig.CalcTextSize(String(bytes[1:j])).x
-    _, ascender, descender = text_baseline(FONT_REGULAR, size, centre_y(b))
+    _, ascender, descender = text_baseline(role, size, centre_y(b))
     y0 = rnd(centre_y(b) - (ascender + descender) / 2)
     y1 = y0 + ascender + descender
-    top = text_y(FONT_REGULAR, size, centre_y(b))   # where ImGui put the text
     dl = ig.GetWindowDrawList()
     ig.PushClipRect((b.x0, b.y0), (b.x1, b.y1), true)
     ig.AddRectFilled(dl, (round(x0), y0), (round(x1), y1), u32(app.tokens.text_selection))
@@ -313,17 +321,18 @@ function button_width(app, label::AbstractString; primary::Bool = false, small::
 end
 
 """
-    button(app, id, label, x, y; primary = false, small = false, enabled = true,
+    button(app, id, label, x, y; primary = false, small = false, enabled = true, busy = false,
            alpha = 1, dl = window draw list) -> Bool
 
 A prototype `.btn` at `(x, y)`: 26 high (22 when `small`), radius 6 (5), 1 px
 `input_border` on `input`; `hover` and `border_strong` on hover, `pressed` when held.
 A `primary` button is `accent` with semibold `on_accent` text; it is lighter on hover and
-half transparent when disabled. Returns true when clicked while enabled.
+half transparent when disabled. A `busy` button keeps its width, shows a spinner in place
+of its label and takes no clicks. Returns true when clicked while enabled.
 """
 function button(app, id::AbstractString, label::AbstractString, x::Real, y::Real;
-        primary::Bool = false, small::Bool = false, enabled::Bool = true, alpha::Real = 1,
-        dl = ig.GetWindowDrawList())::Bool
+        primary::Bool = false, small::Bool = false, enabled::Bool = true, busy::Bool = false,
+        alpha::Real = 1, dl = ig.GetWindowDrawList())::Bool
     w = app.window::Window
     t = app.tokens
     s = w.scale
@@ -331,6 +340,7 @@ function button(app, id::AbstractString, label::AbstractString, x::Real, y::Real
     b = Box(round(Float32(x)), round(Float32(y)), round(Float32(x)) + round(bw),
         round(Float32(y)) + px(s, small ? 22 : 26))
     clicked, hovered, held = hit(id, b)
+    enabled &= !busy
     on = enabled && hovered
     a = Float32(alpha) * (primary && !enabled ? 0.5f0 : 1f0)
     radius = px(s, small ? 5 : 6)
@@ -346,8 +356,13 @@ function button(app, id::AbstractString, label::AbstractString, x::Real, y::Real
     size = small ? 11.5 : BODY_FONT_SIZE
     role = primary ? FONT_SEMIBOLD : FONT_REGULAR
     col = primary ? t.on_accent : enabled ? t.text : t.text_disabled
-    tw = text_width(role, size, label)
-    draw_text_mid(dl, role, size, b.x0 + (width(b) - tw) / 2, centre_y(b), u32(col, a), label)
+    if busy
+        draw_spinner(app, dl, (b.x0 + b.x1) / 2, centre_y(b); col = primary ? t.on_accent : t.accent)
+        request_frames!(w)   # the spinner turns
+    else
+        tw = text_width(role, size, label)
+        draw_text_mid(dl, role, size, b.x0 + (width(b) - tw) / 2, centre_y(b), u32(col, a), label)
+    end
     w.input_frames == 0 && hovered && request_frames!(w)
     return clicked && enabled
 end

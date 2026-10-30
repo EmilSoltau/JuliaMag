@@ -8,13 +8,19 @@ const FORM_GAP_Y = 8
 const FIELD_H = 24
 
 """
-    text_field!(app, id, buffer, b; focus = false, flags = 0) -> Bool
+    text_field!(app, id, buffer, b; focus = false, flags = 0, role = FONT_REGULAR, size = 12.5,
+                placeholder = "", right = false, error = false) -> Bool
 
 A prototype `.inp` in box `b`: 24 high, `input` fill, 1 px `input_border`, radius 5, text
-7 px in; an `accent` ring while it has the focus. Returns true when the text changed.
+7 px in; an `accent` ring while it has the focus. `role` and `size` set the font (`.inp.mono`
+is `FONT_MONO` at 12). `placeholder` shows in `text_disabled` while the field is empty.
+`right` puts the text at the right end (a number field); a click anywhere in the field
+still edits it. With `error` the frame and ring are `red` (`.inp.err`).
+Returns true when the text changed.
 """
 function text_field!(app, id::AbstractString, buf::Vector{UInt8}, b::Box; focus::Bool = false,
-        flags::Integer = 0)
+        flags::Integer = 0, role::FontRole = FONT_REGULAR, size::Real = BODY_FONT_SIZE,
+        placeholder::AbstractString = "", right::Bool = false, error::Bool = false)
     s = app.window.scale
     t = app.tokens
     hl = hairline(s)
@@ -22,9 +28,25 @@ function text_field!(app, id::AbstractString, buf::Vector{UInt8}, b::Box; focus:
     r = fpx(s, 5)
     ig.AddRectFilled(dl, (b.x0, b.y0), (b.x1, b.y1), u32(t.input), r)
     inner = Box(b.x0 + hl + fpx(s, 7), b.y0 + hl, b.x1 - hl - fpx(s, 7), b.y1 - hl)
-    changed, active = text_input!(app, id, buf, inner; flags, focus)
-    if active
-        ig.AddRect(dl, (b.x0 - hl / 2, b.y0 - hl / 2), (b.x1 + hl / 2, b.y1 + hl / 2), u32(t.accent),
+    field = inner
+    if right
+        # ImGui has no right-aligned field: the field starts where the text starts, and a
+        # click on the empty part left of it gives it the focus.
+        tw = text_width(role, size, field_text(buf))
+        field = Box(max(inner.x0, inner.x1 - tw - fpx(s, 2)), inner.y0, inner.x1, inner.y1)
+        first(hit(id * "##area", Box(b.x0, b.y0, field.x0, b.y1); overlap = true)) && (focus = true)
+    end
+    changed, active = text_input!(app, id, buf, field; flags, focus, role, size, input = true)
+    if buf[1] == 0x00 && !isempty(placeholder)   # where the text would be
+        with_font(role, size) do
+            pw = Float32(ig.CalcTextSize(placeholder).x)
+            ig.AddText(dl, (round(right ? inner.x1 - pw : inner.x0), input_text_y(role, size, centre_y(field))),
+                u32(t.text_disabled), String(placeholder))
+        end
+    end
+    if error || active
+        ring = error ? t.red : t.accent
+        ig.AddRect(dl, (b.x0 - hl / 2, b.y0 - hl / 2), (b.x1 + hl / 2, b.y1 + hl / 2), u32(ring),
             r + hl / 2, 2 * hl)
     else
         ig.AddRect(dl, (b.x0, b.y0), (b.x1, b.y1), u32(t.input_border), r, hl)
@@ -38,9 +60,15 @@ function form_row(app, h::Real)
     return Box(pos.x, pos.y, pos.x + Float32(ig.CalcItemWidth()), pos.y + Float32(h))
 end
 
-# Take the space of a form row and the gap under it.
-end_form_row(app, b::Box; gap::Real = FORM_GAP_Y) =
-    (ig.SetCursorScreenPos((b.x0, b.y0)); ig.Dummy((width(b), height(b) + fpx(app.window.scale, gap))); nothing)
+# Take the space of a form row and the gap under it. ImGui adds its item spacing after
+# the row, so the row takes that much less: the next row starts `gap` px under it, as the
+# prototype's `.form` row gap. A last row (`gap = 0`) keeps its full height.
+function end_form_row(app, b::Box; gap::Real = FORM_GAP_Y)
+    ig.SetCursorScreenPos((b.x0, b.y0))
+    spacing = unsafe_load(Ptr{lib.ImGuiStyle}(ig.GetStyle()).ItemSpacing).y
+    ig.Dummy((width(b), gap > 0 ? height(b) + fpx(app.window.scale, gap) - spacing : height(b)))
+    return nothing
+end
 
 # A form label in the label column of row `b`.
 form_label(app, b::Box, text::AbstractString) =
@@ -207,38 +235,16 @@ function draw_modal(app, d::ChannelPropsDialog)
     return nothing
 end
 
-# The Format row: a segmented control (the prototype's `.seg`) of the four formats.
+# The Format row: a combo of the four formats (four choices are more than a segmented
+# control holds, by the rule of the tool forms).
 function format_row!(app, d::ChannelPropsDialog, h::Real)
-    s = app.window.scale
-    t = app.tokens
-    hl = hairline(s)
-    dl = ig.GetWindowDrawList()
     b = form_row(app, h)
     form_label(app, b, "Format")
-    c = control_box(app, b)
-    x = c.x0
-    r = fpx(s, 5)
-    widths = [text_width(FONT_SEMIBOLD, BODY_FONT_SIZE, name) + fpx(s, 20) for (_, name) in FORMAT_CHOICES]
-    outer = snap(Box(x, c.y0, x + 2 * hl + sum(widths) + (length(widths) - 1) * hl, c.y1))
-    ig.AddRectFilled(dl, (outer.x0, outer.y0), (outer.x1, outer.y1), u32(t.input), r)
-    x = outer.x0 + hl
-    for (k, (key, name)) in enumerate(FORMAT_CHOICES)
-        k > 1 && (ig.AddRectFilled(dl, (x, outer.y0), (x + hl, outer.y1), u32(t.input_border)); x += hl)
-        seg = Box(x, outer.y0 + hl, rnd(x + widths[k]), outer.y1 - hl)
-        clicked, hovered, _ = hit(name, seg)
-        clicked && (d.format[] = key)
-        on = d.format[] === key
-        corners = Int(k == 1 ? lib.ImDrawFlags_RoundLeft :
-            k == length(FORMAT_CHOICES) ? lib.ImDrawFlags_RoundRight : lib.ImDrawFlags_RoundNone)
-        (on || hovered) && ig.AddRectFilled(dl, (seg.x0, seg.y0), (seg.x1, seg.y1),
-            u32(on ? t.checked : t.hover), r - hl, corners)
-        role = on ? FONT_SEMIBOLD : FONT_REGULAR
-        tw = text_width(role, BODY_FONT_SIZE, name)
-        draw_text_mid(dl, role, BODY_FONT_SIZE, seg.x0 + (width(seg) - tw) / 2, centre_y(seg),
-            u32(on ? t.accent_text : t.text), name)
-        x = seg.x1
-    end
-    ig.AddRect(dl, (outer.x0, outer.y0), (outer.x1, outer.y1), u32(t.input_border), r, hl)
+    k = findfirst(c -> first(c) === d.format[], FORMAT_CHOICES)
+    text = k === nothing ? string(d.format[]) : last(FORMAT_CHOICES[k])
+    combo!(app, "Format", control_box(app, b), text; items = () ->
+        [MenuItem(name; checked = key === d.format[], action = _ -> (d.format[] = key; nothing))
+         for (key, name) in FORMAT_CHOICES])
     end_form_row(app, b)
     return nothing
 end

@@ -229,6 +229,26 @@ end
 loaded_font(which::FontRole) = LOADED_FONTS[ig.GetCurrentContext()][Int(which) + 1]
 
 """
+    input_text_y(which, size, mid_y; line = 1.25) -> Float32
+
+`text_y` for the text inside a text field that is taller than its line (an `.inp`):
+Blink centres the line box in the field with fractions and rounds the baseline once, from
+the font's own ascender and descender. That puts it up to a pixel lower than `text_y`
+(measured: 12.5 px Inter in a 24 px field is 1 px lower; 12 px Cousine is the same).
+Call it inside `with_font(which, size)`.
+"""
+function input_text_y(which::FontRole, size::Real, mid_y::Real; line::Real = 1.25)::Float32
+    loaded = loaded_font(which)
+    style = Ptr{ig.lib.ImGuiStyle}(ig.GetStyle())
+    em = Float32(size) * unsafe_load(style.FontScaleDpi)
+    ascender = em * loaded.ratio * loaded.ascent
+    descender = em * loaded.ratio * (1 - loaded.ascent)
+    box = Float32(line) * em
+    baseline = floor(Float32(mid_y) - box / 2 + (box - ascender - descender) / 2 + ascender + 0.5f0)
+    return round(baseline - unsafe_load(ig.GetFontBaked().Ascent))
+end
+
+"""
     text_y(which, size, mid_y; line = 1.25) -> Float32
 
 The top for ImGui text of font `which` at `size` (logical px) in a CSS line box `line`

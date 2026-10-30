@@ -8,17 +8,6 @@ using JuliaMagUI: LIGHT, DARK, THEME_LIGHT, THEME_DARK
 
 const DATA_SHOTS = joinpath(@__DIR__, "..", "shots")
 
-"""
-    tree_ref(key, part = "row") -> String
-
-The test engine reference of a part of a Data tree row: `"row"`, `"check"` or `"chevron"`.
-A `/` in the key is escaped, since the reference uses `/` between ids.
-"""
-tree_ref(key::AbstractString, part::AbstractString = "row") =
-    "JuliaMag/left/tree/" * replace(key, "/" => "\\/") * "/" * part
-
-right_click(ref) = te.ItemClick(ref, 1)
-
 # A right click on `ref` 100 px from the window's left, where the prototype shots click.
 function right_click_at_100(ref)
     te.MouseMove(ref)
@@ -275,7 +264,13 @@ window_testset("data tab") do
             @test length(app.ui.dialogs) == 1   # a bad number: Apply is greyed
             fill_field("//###dialog1/##Decimals", "auto")
             fill_field("//###dialog1/##Units", "  nT/m ")   # spaces are stripped
-            ctx.click("//###dialog1/Exponential")
+            # Format is a combo; its menu opens over the dialog (T11-C4).
+            ctx.click("//###dialog1/Format")
+            ctx.frames(2)
+            @test app.ui.menu !== nothing && app.ui.menu.level == 1
+            ctx.click("//" * app.ui.menu.ref * "/Exponential")
+            ctx.frames(2)
+            @test app.ui.menu === nothing && only(app.ui.dialogs).format[] === :exponential
             ctx.click("//###dialog1/Apply")
             ch() = only(c for c in app.snap.databases[db].channels if c.name == "IGRF")
             ctx.wait_until(() -> ch().units == "nT/m")

@@ -9,29 +9,6 @@ using JuliaMagUI: LIGHT, DARK, THEME_LIGHT, THEME_DARK
 
 const RIBBON_SHOTS = joinpath(@__DIR__, "..", "shots")
 
-"""
-    with_tools(f, specs)
-
-Register the test tools `specs`, run `f()`, and take them out again, all of them, also
-when a register or an unregister throws (the first error is thrown again at the end).
-"""
-function with_tools(f, specs::Vector{Core.ToolSpec})
-    try
-        foreach(Core.register_tool!, specs)
-        return f()
-    finally
-        failure = nothing
-        for spec in specs
-            try
-                Core.unregister_tool!(spec.id)
-            catch e
-                failure === nothing && (failure = e)
-            end
-        end
-        failure === nothing || throw(failure)
-    end
-end
-
 test_tool(id, name, places) = Core.ToolSpec(id, name, "A test tool.", "math", places,
     ["database" => Core.ITEM_DATABASE], Core.SettingSpec[], :quick,
     (s, ins, st, progress, report) -> nothing)
@@ -50,8 +27,7 @@ with_wide_tools(f, n::Integer) =
     request_log() -> (log, app_ref, hook)
 
 `hook` is an `extra_ui` that copies the requests of each frame of the app in `app_ref` into
-`log`. Requests live for one frame (nobody handles a tool request before Task 13), so a
-test reads the log.
+`log`. Requests live for one frame (the next frame handles them), so a test reads the log.
 """
 function request_log()
     log = Any[]
@@ -71,9 +47,16 @@ window_testset("ribbon") do
             app_ref[] = app
             ctx.click("JuliaMag/tabs/Database Tools")
             ctx.click("JuliaMag/ribbon/Channel Math")
-            ctx.wait_until(() -> any(r -> r isa UI.OpenToolDialog, log); timeout = 5)
-            r = only(filter(r -> r isa UI.OpenToolDialog, log))
-            @test r.id == "database.channel_math" && r.item == app.ui.current_db != ""
+            # The request opens the tool dialog (Task 13), for the current database.
+            ctx.wait_until(() -> !isempty(app.ui.dialogs); timeout = 5)
+            d = last(app.ui.dialogs)
+            @test d isa UI.ToolDialog && d.form.owner.id == "database.channel_math"
+            @test d.form.inputs["database"] == app.ui.current_db != ""
+            ctx.frames(2)
+            @test te.ItemExists("//###dialog1/Run")
+            ctx.key("Escape")
+            ctx.frames(2)
+            @test isempty(app.ui.dialogs)
 
             # No grid in the project: Grid Statistics is greyed, does nothing, and says why.
             ctx.click("JuliaMag/tabs/Grid and Image")
@@ -189,8 +172,13 @@ window_testset("ribbon") do
                 app_ref[] = app
                 ctx.frames(2)
                 @test exists("JuliaMag/ribbon/Twice Tool") && exists("JuliaMag/ribbon/Twice Tool##2")
-                ctx.click("JuliaMag/ribbon/Twice Tool")
-                ctx.click("JuliaMag/ribbon/Twice Tool##2")
+                # Each click opens the tool dialog; Esc closes it before the next click.
+                for ref in ("JuliaMag/ribbon/Twice Tool", "JuliaMag/ribbon/Twice Tool##2")
+                    ctx.click(ref)
+                    ctx.wait_until(() -> !isempty(app.ui.dialogs); timeout = 5)
+                    ctx.key("Escape")
+                    ctx.frames(2)
+                end
                 ctx.wait_until(() -> count(r -> r isa UI.OpenToolDialog, log) == 2; timeout = 5)
                 @test all(r -> r.id == "test.twice", filter(r -> r isa UI.OpenToolDialog, log))
             end

@@ -1,19 +1,25 @@
 # Drop-down menus, as the prototype's `.menu`: the menu of a split button, the list of a
 # combo. One menu is open at a time (`app.ui.menu`). The control that opened it is its
 # owner: it calls `keep_menu!` in every frame it is drawn, and the menu closes when the
-# owner is not drawn, on a click outside, on Esc and when a dialog opens.
+# owner is not drawn, on a click outside, on Esc and when a dialog opens or closes.
+#
+# A menu opened from a dialog (a combo in a form) belongs to that dialog: the dialog
+# draws it as an ImGui popup of its own modal, so it sits above the dialog and takes
+# input while the modal blocks everything under it (`draw_dialog_menu`).
 
 const MENU_MIN_WIDTH = 200
 const MENU_MAX_WIDTH = 360
 
 """
     MenuItem(label; icon = "", shortcut = "", checked = nothing, reason = nothing, help = "",
-             id = "", danger = false, action = app -> nothing)
+             id = "", danger = false, stay = false, action = app -> nothing)
 
 One row of a menu. `checked` is `nothing` for a plain row, else the row shows a check
 mark or a blank. `reason` is why the row cannot run (it is greyed), or `nothing`.
+`shortcut` is the dim text at the right: a key chord, or a hint such as a channel's units.
 `help` and `id` go into its tooltip. A `danger` row (such as Remove) is red.
-`action(app)` runs on a click. `menu_separator()` makes the line between groups of rows.
+`action(app)` runs on a click; the menu then closes, unless the row says `stay` (the rows
+of a checklist). `menu_separator()` makes the line between groups of rows.
 """
 struct MenuItem
     label::String
@@ -25,19 +31,20 @@ struct MenuItem
     id::String
     danger::Bool
     separator::Bool
+    stay::Bool
     action::Function
 end
 
 MenuItem(label::AbstractString; icon::AbstractString = "", shortcut::AbstractString = "",
         checked::Union{Nothing,Bool} = nothing, reason::Union{Nothing,AbstractString} = nothing,
         help::AbstractString = "", id::AbstractString = "", danger::Bool = false,
-        action::Function = app -> nothing) =
+        stay::Bool = false, action::Function = app -> nothing) =
     MenuItem(String(label), String(icon), String(shortcut), checked,
         reason === nothing ? nothing : String(reason), String(help), String(id), danger, false,
-        action)
+        stay, action)
 
 "The line between two groups of menu rows (the prototype's `.msep`)."
-menu_separator() = MenuItem("", "", "", nothing, nothing, "", "", false, true, app -> nothing)
+menu_separator() = MenuItem("", "", "", nothing, nothing, "", "", false, true, false, app -> nothing)
 
 const MENU_ROW_H = 24
 const MENU_SEPARATOR_H = 9   # 1 px line, 4 px above and below
@@ -48,6 +55,9 @@ const MENU_SEPARATOR_H = 9   # 1 px line, 4 px above and below
 The open menu: its `owner` (an id of the control that opened it), the `anchor` box of
 that control, the `items`, the smallest width and the `gap` to the anchor in logical
 pixels, and whether the owner was drawn in this frame (`seen`). `box` is where the menu was drawn last.
+`level` is the number of dialogs open when it opened: 0 for a menu of the shell, k for a
+menu of the dialog at level k. `ref` is the ImGui name of its window, where test engine
+references to its rows start (`"###menu"` for the shell's menu).
 """
 mutable struct OpenMenu
     owner::String
@@ -58,6 +68,8 @@ mutable struct OpenMenu
     seen::Bool
     fresh::Bool
     box::Box
+    level::Int
+    ref::String
 end
 
 """
@@ -114,12 +126,12 @@ end
     open_menu!(app, owner, anchor, items; min_width = 200, gap = 2)
 
 Open a menu for the control `owner` under its box `anchor`, `gap` px below it. It replaces
-any open menu.
+any open menu. Opened while a dialog is open, it belongs to the top dialog.
 """
 function open_menu!(app, owner::AbstractString, anchor::Box, items::Vector{MenuItem};
         min_width::Real = MENU_MIN_WIDTH, gap::Real = 2)
     app.ui.menu = OpenMenu(String(owner), anchor, items, Float32(min_width), Float32(gap), true,
-        true, anchor)
+        true, anchor, length(app.ui.dialogs), "###menu")
     return nothing
 end
 
@@ -174,25 +186,20 @@ const MENU_FLAGS = ig.ImGuiWindowFlags_NoDecoration | ig.ImGuiWindowFlags_NoMove
 """
     draw_menu(app) -> Bool
 
-Draw the open menu as its own window "###menu" on top of the shell, and act on its clicks.
+Draw the open menu of the shell as its own window "###menu" on top of the shell, and act on
+its clicks. A menu of a dialog is drawn by the dialog (`draw_dialog_menu`). A menu closes
+when its owner was not drawn or when a dialog opened or closed since it opened.
 Returns true when a menu was open at the start of the call.
 """
 function draw_menu(app)::Bool
     m = app.ui.menu
     m isa OpenMenu || return false
-    if !m.seen || !isempty(app.ui.dialogs)
+    if !m.seen || m.level != length(app.ui.dialogs)
         close_menu!(app)
         return true
     end
-    s = app.window.scale
-    t = app.tokens
-    p(v) = px(s, v)
-    hl = hairline(s)
-    vp = unsafe_load(ig.GetMainViewport())
-    view = Box(vp.Pos.x, vp.Pos.y, vp.Pos.x + vp.Size.x, vp.Pos.y + vp.Size.y)
-    l = menu_layout(m.anchor, m.items, view, s, (text, size) -> text_width(FONT_REGULAR, size, text);
-        min_width = m.min_width, gap = m.gap)
-    m.box = l.box
+    m.level > 0 && return false   # the top dialog drew it
+    l = place_menu!(app, m)
     b = l.box
     m.fresh && ig.SetNextWindowFocus()
     m.fresh = false
@@ -203,8 +210,76 @@ function draw_menu(app)::Bool
     ig.PushStyleVar(ig.ImGuiStyleVar_WindowRounding, 0)
     ig.Begin("###menu", C_NULL, MENU_FLAGS)
     ig.PopStyleVar(3)
+    chosen = draw_menu_rows(app, m, l)
+    ig.End()
+    act_on_menu!(app, m, chosen)
+    return true
+end
+
+"""
+    draw_dialog_menu(app, level)
+
+Draw the open menu of the dialog at `level` as an ImGui popup of its modal, and act on its
+clicks. Call it inside the modal of the top dialog, after its body. With no menu of this
+dialog open, it closes the popup if ImGui still has it.
+"""
+function draw_dialog_menu(app, level::Integer)
+    m = app.ui.menu
+    id = ig.GetID("###menu")
+    if !(m isa OpenMenu && m.level == level && m.seen)
+        m isa OpenMenu && m.level == level && close_menu!(app)   # its owner was not drawn
+        k = popup_level(id)
+        k >= 0 && lib.igClosePopupToLevel(k, true)
+        return nothing
+    end
+    l = place_menu!(app, m)
+    b = l.box
+    popup_level(id) >= 0 || ig.OpenPopup("###menu")
+    ig.SetNextWindowPos((b.x0, b.y0))
+    ig.SetNextWindowSize((width(b), height(b)))
+    ig.PushStyleVar(ig.ImGuiStyleVar_WindowPadding, (0, 0))
+    ig.PushStyleVar(ig.ImGuiStyleVar_PopupBorderSize, 0)
+    ig.PushStyleVar(ig.ImGuiStyleVar_PopupRounding, 0)
+    ig.PushStyleColor(ig.ImGuiCol_PopupBg, (0f0, 0f0, 0f0, 0f0))   # the rows draw the fill
+    open = ig.BeginPopup("###menu", MENU_FLAGS)
+    ig.PopStyleColor()
+    ig.PopStyleVar(3)
+    if !open   # ImGui closed it: a click outside
+        close_menu!(app)
+        return nothing
+    end
+    m.ref = unsafe_string(unsafe_load(lib.igGetCurrentWindow().Name))
+    m.fresh = false
+    chosen = draw_menu_rows(app, m, l)
+    # The window keeps the size of the whole menu (a popup sizes itself to what is in it).
+    ig.SetCursorScreenPos((b.x0, b.y0))
+    ig.Dummy((width(b), height(b)))
+    ig.EndPopup()
+    act_on_menu!(app, m, chosen)
+    return nothing
+end
+
+# Lay out menu `m` in the main viewport and remember where it goes.
+function place_menu!(app, m::OpenMenu)::MenuLayout
+    s = app.window.scale
+    vp = unsafe_load(ig.GetMainViewport())
+    view = Box(vp.Pos.x, vp.Pos.y, vp.Pos.x + vp.Size.x, vp.Pos.y + vp.Size.y)
+    l = menu_layout(m.anchor, m.items, view, s, (text, size) -> text_width(FONT_REGULAR, size, text);
+        min_width = m.min_width, gap = m.gap)
+    m.box = l.box
+    return l
+end
+
+# Draw the menu box and its rows in the current window. Returns the row clicked, or `nothing`.
+function draw_menu_rows(app, m::OpenMenu, l::MenuLayout)
+    s = app.window.scale
+    t = app.tokens
+    p(v) = px(s, v)
+    hl = hairline(s)
+    b = l.box
+    vp = unsafe_load(ig.GetMainViewport())
     dl = ig.GetWindowDrawList()
-    ig.PushClipRect(dl, (view.x0, view.y0), (view.x1, view.y1), false)
+    ig.PushClipRect(dl, (vp.Pos.x, vp.Pos.y), (vp.Pos.x + vp.Size.x, vp.Pos.y + vp.Size.y), false)
     draw_shadow(dl, b, p(8), p(6), p(18), t.shadow)
     ig.PopClipRect(dl)
     ig.AddRectFilled(dl, (b.x0, b.y0), (b.x1, b.y1), u32(t.menu), p(8))
@@ -240,16 +315,19 @@ function draw_menu(app)::Bool
             reason = it.reason, id = it.id)
         clicked && enabled && (chosen = it)
     end
-    ig.End()
+    return chosen
+end
 
+# Run the row clicked, or close the menu on Esc or a click outside it and its anchor.
+function act_on_menu!(app, m::OpenMenu, chosen)
     if chosen !== nothing
-        close_menu!(app)
+        chosen.stay || close_menu!(app)
         guarded(app, chosen.action)
     elseif ig.IsKeyPressed(lib.ImGuiKey_Escape, false)
         close_menu!(app)
     elseif any(i -> ig.IsMouseClicked(i), 0:2)
         mouse = unsafe_load(ig.GetIO().MousePos)
-        inside(b, mouse.x, mouse.y) || inside(m.anchor, mouse.x, mouse.y) || close_menu!(app)
+        inside(m.box, mouse.x, mouse.y) || inside(m.anchor, mouse.x, mouse.y) || close_menu!(app)
     end
-    return true
+    return nothing
 end

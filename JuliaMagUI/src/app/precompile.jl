@@ -15,6 +15,10 @@
                 Threads.Atomic{Bool}(false), 0.0, 0, false, nothing, "")
             apply_style!(LIGHT, 1f0)
             load_fonts!(w, :bundled)
+            # A tool dialog, so the first one the user opens draws at once.
+            spec = Core.find_tool("database.statistics")
+            spec === nothing || push_dialog!(app, ToolDialog(app,
+                build_form(app, spec, Core.default_settings(spec), nothing)))
             for _ in 1:2
                 ig.NewFrame()
                 AppFrame(app, nothing)(w)

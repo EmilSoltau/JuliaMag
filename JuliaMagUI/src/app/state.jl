@@ -356,6 +356,8 @@ What the UI shows and where, apart from the project data. Changed on the render 
 - `menu`: the open drop-down menu (an `OpenMenu`, see menu.jl), or `nothing`.
 - `ribbon_cache`: the ribbon's layout and widths for the last key (a `RibbonModel`, see
   ribbon.jl), or `nothing`.
+- `jobs_shown`: a job started from a dialog has switched the left pane to Jobs in this
+  session (it does that once per session).
 """
 Base.@kwdef mutable struct UiState
     tab::String = "Database"
@@ -391,6 +393,7 @@ Base.@kwdef mutable struct UiState
     ribbon_scroll_tab::String = ""
     menu::Any = nothing
     ribbon_cache::Any = nothing
+    jobs_shown::Bool = false
 end
 
 """
@@ -431,6 +434,8 @@ and the worker hands results back through `drain!`.
 - `draw_ns`: how long the last `draw_app` took, in nanoseconds (tests and benchmarks read it).
 - `draw_errors`: each different error that cut a frame short (see `guarded_frame`), with
   how often it came. At most `MAX_DRAW_ERRORS`. Tests fail when it is not empty.
+- `pick_file`: asks the user for a file, as `pick_file(; save, title, extensions, start)`
+  (see `native_pick_file`): the path, or `""` when the user cancelled. Tests replace it.
 
 The constructor starts the worker. Stop it with `stop_worker!(app.queue)`.
 """
@@ -450,12 +455,13 @@ mutable struct AppState
     command_cache::Any
     draw_ns::Int
     draw_errors::Vector{DrawError}
+    pick_file::Function
 end
 
 AppState(config::AppConfig, tokens::Tokens; session::Union{Nothing,Core.Session} = nothing,
         config_dir::AbstractString = JuliaMagUI.config_dir()) =
     AppState(config, tokens, session, nothing, false, Worker(), UiState(), Toast[], nothing, 0,
-        nothing, String(config_dir), nothing, 0, DrawError[])
+        nothing, String(config_dir), nothing, 0, DrawError[], native_pick_file)
 
 """
     set_session!(app, s)
@@ -464,8 +470,8 @@ Make `s` (a session or `nothing`) the app's project. This is the only way to cha
 `app.session`. It drops everything that belongs to the old project: the snapshot (a
 build of the old session that comes back later is dropped too), the count of shown
 warnings, a failed build, the Data tree's current database, selection, expanded
-nodes, filter, scroll and cached rows, the open dialogs and menu, and the requests not handled yet (they were
-made for the old project). Call it on the render thread. It does not close the old session.
+nodes, filter, scroll and cached rows, the open dialogs and menu, the requests not handled yet (they were
+made for the old project), and whether a job has shown the Jobs pane. Call it on the render thread. It does not close the old session.
 """
 function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     app.session = s
@@ -488,5 +494,6 @@ function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     empty!(ui.dialogs)   # the next frame also closes their ImGui popups
     empty!(ui.requests)
     ui.menu = nothing
+    ui.jobs_shown = false
     return nothing
 end

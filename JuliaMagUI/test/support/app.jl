@@ -205,6 +205,7 @@ Start the real app (`JuliaMagUI.main`) with the bundled fonts and an ImGuiTestEn
 context, run `f(ctx::TestContext)` as one registered test, then close the app.
 `theme` is saved in the settings of `config_dir` before the app starts.
 `extra_ui(w)` is drawn after the app in every frame.
+The app's `pick_file` returns `""` (a cancelled file dialog) unless the test sets another.
 An error in `f` is thrown again once the window is closed. Returns what `f` returns.
 
 An error while drawing a frame does not end the app (the frame guard turns it into a
@@ -262,7 +263,9 @@ function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGH
             end
             return nothing
         end
-        UI.main(; project, config_dir, extra_ui = hook, on_app = a -> (app[] = a), size, scale,
+        # Tests never open a native file dialog: a test that needs a file sets its own picker.
+        on_app = a -> (a.pick_file = (; kw...) -> ""; app[] = a)
+        UI.main(; project, config_dir, extra_ui = hook, on_app, size, scale,
             fonts = :bundled, engine, passive = true)
         summary = te.GetResultSummary(engine)
         failure[] === nothing && time() > deadline && throw(TestTimeout(timeout))
@@ -280,3 +283,14 @@ function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGH
     end
     return result[]
 end
+
+"""
+    tree_ref(key, part = "row") -> String
+
+The test engine reference of a part of a Data tree row: `"row"`, `"check"` or `"chevron"`.
+A `/` in the key is escaped, since the reference uses `/` between ids.
+"""
+tree_ref(key::AbstractString, part::AbstractString = "row") =
+    "JuliaMag/left/tree/" * replace(key, "/" => "\\/") * "/" * part
+
+right_click(ref) = te.ItemClick(ref, 1)

@@ -10,6 +10,8 @@ const THEME_NAMES = ("light" => THEME_LIGHT, "dark" => THEME_DARK, "system" => T
 The settings the app remembers between runs.
 `recent` holds project folders, newest first, at most $MAX_RECENT.
 A `window` of `(0, 0, w, h)` means centred.
+`advanced_open` lists the tools whose dialog shows its Advanced settings.
+`last_folder` is the folder of the last file picked for an import or an export.
 """
 Base.@kwdef mutable struct AppConfig
     theme::ThemeMode = THEME_SYSTEM
@@ -25,6 +27,7 @@ Base.@kwdef mutable struct AppConfig
     right_width::Float32 = 300
     ribbon_collapsed::Bool = false
     advanced_open::Vector{String} = String[]
+    last_folder::String = ""
 end
 
 """
@@ -98,6 +101,7 @@ function config_from_json(obj)::AppConfig
     c.right_width = Float32(field_or(obj, :right_width, Real, d.right_width))
     c.ribbon_collapsed = field_or(obj, :ribbon_collapsed, Bool, d.ribbon_collapsed)
     c.advanced_open = string_list(obj, :advanced_open)
+    c.last_folder = field_or(obj, :last_folder, String, d.last_folder)
     return c
 end
 
@@ -125,7 +129,8 @@ function config_to_dict(c::AppConfig)
         grid_colours = c.grid_colours, temp_folder = c.temp_folder,
         software_rendering = c.software_rendering, window = collect(c.window),
         left_width = c.left_width, right_width = c.right_width,
-        ribbon_collapsed = c.ribbon_collapsed, advanced_open = c.advanced_open)
+        ribbon_collapsed = c.ribbon_collapsed, advanced_open = c.advanced_open,
+        last_folder = c.last_folder)
 end
 
 """

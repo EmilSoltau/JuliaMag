@@ -8,6 +8,7 @@ import ModernGL as GL
 import PNGFiles
 import Cairo
 import Rsvg
+import NativeFileDialog
 using JSON3
 using PrecompileTools: @setup_workload, @compile_workload
 
@@ -35,6 +36,9 @@ include("shell/statusbar.jl")
 include("shell/central.jl")
 include("panes/data.jl")
 include("dialogs/item_dialogs.jl")
+include("dialogs/form.jl")
+include("dialogs/widgets.jl")
+include("dialogs/tool_dialog.jl")
 
 """
     main(; project = nothing, config_dir = config_dir(), extra_ui = nothing, on_app = nothing,
