@@ -28,6 +28,37 @@ function right_click_at_100(ref)
     return nothing
 end
 
+# Dialogs that break inside `draw_app`, past the guard of a dialog body (`run_body`):
+# in the footer of a modal, in a child window, in a popup.
+struct BreakInFooter end
+struct BreakInChild end
+struct BreakInPopup end
+function UI.draw_modal(app, d::BreakInFooter)
+    UI.draw_dialog(app, d; title = "Breaks", on_ok = () -> nothing,
+        footer_left = () -> error("the footer broke")) do
+        UI.paragraph(app, "A footer that breaks.")
+    end
+end
+function UI.draw_modal(app, ::BreakInChild)
+    ig.BeginChild("breaking child", (200f0, 100f0))
+    ig.PushID("deep")
+    error("the child broke")
+end
+function UI.draw_modal(app, ::BreakInPopup)
+    ig.IsPopupOpen("breaking popup") || ig.OpenPopup("breaking popup")
+    if ig.BeginPopup("breaking popup")
+        ig.BeginGroup()
+        error("the popup broke")
+    end
+end
+
+# How many popups ImGui has open now.
+function popups_open(ctx)
+    n = Ref(-1)
+    ctx.on_render(w -> (n[] = unsafe_load(Ptr{ig.lib.ImGuiContext}(ig.GetCurrentContext()).OpenPopupStack).Size))
+    return n[]
+end
+
 "Put `text` into the text field `ref` without pressing Enter (which would press OK)."
 fill_field(ref, text) = (te.ItemClick(ref); te.KeyCharsReplace(text); nothing)
 
@@ -435,6 +466,51 @@ window_testset("data tab") do
             end
         end
         @test count(r -> r.level == Base.CoreLogging.Error, logger.logs) == 1
+    end
+
+    @testset "the frame guard inside a modal, a child window and a popup" begin
+        for (d, text) in ((BreakInFooter(), "the footer broke"), (BreakInChild(), "the child broke"),
+                (BreakInPopup(), "the popup broke"))
+            logger = Test.TestLogger(min_level = Base.CoreLogging.Error)
+            Base.CoreLogging.with_logger(logger) do
+                with_project_app(kangaroo_data(); draw_errors_ok = true) do ctx, app
+                    UI.push_dialog!(app, d)
+                    ctx.frames(5)   # it breaks in every frame
+                    e = only(app.draw_errors)
+                    @test e.count >= 5 && e.reports == 1 && e.text == "Something went wrong: $text"
+                    @test count(t -> t.kind === :error, app.toasts) == 1
+                    empty!(app.ui.dialogs)
+                    ctx.frames(3)
+                    # ImGui is balanced: a dialog and a menu work as before.
+                    @test popups_open(ctx) == 0
+                    UI.confirm!(app, "Go on?", "A normal dialog."; action = "Go", on_yes = a -> (a.ui.tab = "Help"))
+                    ctx.frames(2)
+                    ctx.click("//###dialog1/Go")
+                    ctx.frames(2)
+                    @test app.ui.tab == "Help" && isempty(app.ui.dialogs)
+                    ctx.click("JuliaMag/tabs/Database")
+                    ctx.click("JuliaMag/ribbon/More import formats")
+                    ctx.frames(1)
+                    @test UI.menu_open(app, "import.database")
+                    ctx.key("Escape")
+                    @test only(app.draw_errors).count == e.count   # nothing broke since
+                end
+            end
+            @test count(r -> r.level == Base.CoreLogging.Error, logger.logs) == 1
+        end
+    end
+
+    @testset "a filter without matches says so" begin
+        with_project_app(kangaroo_data()) do ctx, app
+            ctx.type("JuliaMag/left/##Filter", "zzz")
+            ctx.frames(2)
+            @test app.ui.tree_drawn == 0
+            img = PNGFiles.load(ctx.shot(joinpath(DATA_SHOTS, "data-no-matches-light.png")))
+            # Dim text in the first row's place, centred in the tree.
+            row = [img[202 + 4 + 13 + 1, x] for x in 1:271]
+            dim = [x for x in 1:271 if near(rgb255(row[x]), rgb255(LIGHT.text_dim); tol = 40)]
+            @test !isempty(dim) && abs((first(dim) + last(dim)) / 2 - 136) <= 3
+        end
     end
 
     @testset "chevrons and checkboxes belong to their row" begin

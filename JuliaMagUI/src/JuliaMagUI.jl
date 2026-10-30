@@ -81,6 +81,7 @@ function (a::AppFrame)(w::Window)
     app.window = w
     drain!(app)
     refresh!(app)
+    settle_draw_errors!(app)
     guarded_frame(app) do
         t = time_ns()
         draw_app(app)
@@ -111,40 +112,79 @@ function guarded_frame(f, app)
     return nothing
 end
 
-const MAX_DRAW_ERRORS = 100   # different errors kept; more are only logged at debug level
+const MAX_DRAW_ERRORS = 100   # different error sources kept; more are only logged at debug level
+const DRAW_ERROR_QUIET = 3.0  # s without the error before its sticky toast goes
 
 """
-    note_draw_error!(app, e, backtrace)
+    note_draw_error!(app, e, backtrace; now = time())
 
-Note an error that cut a frame short. The first time an error comes (by type and
-message) it is logged with its backtrace and shown as an error toast; after that it is
-only counted, so an error in every frame gives one toast and one log entry.
+Note an error that cut a frame short. Errors are told apart by their type and the place
+in JuliaMagUI they came from (`draw_error_key`), not by their message, so a message that
+changes in every frame is still one error.
+
+The first time, the error is logged with its backtrace and shown as a sticky error toast.
+While it keeps coming it is only counted and its toast stays. When it has not come for
+$(DRAW_ERROR_QUIET) s, `settle_draw_errors!` takes the toast away; if it comes back after
+that, it is logged and shown again.
 """
-function note_draw_error!(app, @nospecialize(e), bt)
-    key = draw_error_key(e)
+function note_draw_error!(app, @nospecialize(e), bt; now::Real = time())
+    key = draw_error_key(e, bt)
     k = findfirst(d -> d.key == key, app.draw_errors)
-    if k !== nothing
-        app.draw_errors[k].count += 1
-        return nothing
+    if k === nothing
+        if length(app.draw_errors) >= MAX_DRAW_ERRORS
+            @debug "Another error while drawing" key
+            return nothing
+        end
+        push!(app.draw_errors, DrawError(key, "", 0, 0, now, nothing))
+        k = length(app.draw_errors)
     end
-    if length(app.draw_errors) >= MAX_DRAW_ERRORS
-        @debug "Another error while drawing" key
-        return nothing
-    end
-    text = draw_error_text(e)
-    push!(app.draw_errors, DrawError(key, text, 1))
+    d = app.draw_errors[k]
+    d.count += 1
+    d.last_seen = Float64(now)
+    d.toast === nothing || return nothing   # still being reported
+    d.text = draw_error_text(e)
+    d.reports += 1
     @error "An error cut a frame short; the app goes on" exception = (e, bt)
-    toast!(app, :error, text)
+    d.toast = toast!(app, :error, d.text; ms = typemax(Int))
     return nothing
 end
 
-function draw_error_key(@nospecialize(e))::String
-    try
-        return string(typeof(e), ": ", sprint(showerror, e))
-    catch
-        return string(typeof(e))
+"""
+    settle_draw_errors!(app; now = time())
+
+Take away the sticky toast of each draw error that has not come for $(DRAW_ERROR_QUIET) s.
+Call it once per frame, before drawing.
+"""
+function settle_draw_errors!(app; now::Real = time())
+    for d in app.draw_errors
+        t = d.toast
+        (t === nothing || now - d.last_seen < DRAW_ERROR_QUIET) && continue
+        filter!(x -> x !== t, app.toasts)
+        d.toast = nothing
     end
+    return nothing
 end
+
+"""
+    draw_error_key(e, backtrace) -> String
+
+The exception type and the first place of the backtrace in JuliaMagUI's source, such as
+`"ArgumentError at tokens.jl:13"`. Without such a place, the first place of all.
+"""
+function draw_error_key(@nospecialize(e), bt)::String
+    place = "unknown place"
+    try
+        frames = stacktrace(bt)
+        src = SOURCE_DIR
+        k = findfirst(f -> startswith(String(f.file), src), frames)
+        k === nothing && !isempty(frames) && (k = 1)
+        k === nothing || (place = string(basename(String(frames[k].file)), ":", frames[k].line))
+    catch
+    end
+    return string(typeof(e), " at ", place)
+end
+
+const SOURCE_DIR = @__DIR__
 
 # The toast text of a draw error, as `user_message` gives it but without logging.
 function draw_error_text(@nospecialize(e))::String

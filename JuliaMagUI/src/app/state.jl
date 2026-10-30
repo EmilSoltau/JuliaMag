@@ -396,13 +396,21 @@ end
 """
     DrawError
 
-An error that cut frames short: `key` tells errors apart (type and message), `text` is
-what its toast said, `count` how many frames it cut.
+An error that cut frames short (see `note_draw_error!`).
+
+- `key`: tells errors apart: the exception type and the place in JuliaMagUI it came from.
+- `text`: what its toast says (from its first report, or its last after a quiet spell).
+- `count`: how many frames it cut; `reports`: how often it was logged and toasted.
+- `last_seen`: the `time()` it last cut a frame.
+- `toast`: its sticky toast while it keeps coming, else `nothing`.
 """
 mutable struct DrawError
     key::String
     text::String
     count::Int
+    reports::Int
+    last_seen::Float64
+    toast::Union{Nothing,Toast}
 end
 
 """
@@ -422,7 +430,7 @@ and the worker hands results back through `drain!`.
 - `command_cache`: what `commands(app)` built last (see commands.jl).
 - `draw_ns`: how long the last `draw_app` took, in nanoseconds (tests and benchmarks read it).
 - `draw_errors`: each different error that cut a frame short (see `guarded_frame`), with
-  how often it came. Tests fail when it is not empty.
+  how often it came. At most `MAX_DRAW_ERRORS`. Tests fail when it is not empty.
 
 The constructor starts the worker. Stop it with `stop_worker!(app.queue)`.
 """

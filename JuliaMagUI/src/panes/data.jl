@@ -125,16 +125,20 @@ exp_num(x::Real) = isfinite(x) ? string(round(Float64(x); sigdigits = 6)) : stri
     fmt_num(x, digits) -> String
 
 `x` with `digits` decimals and commas between thousands, as the prototype's `fmtNum`.
-A value of 1e15 or more, NaN and Inf are written as `exp_num` does (`"1.0e20"`, `"NaN"`).
+A value of 1e15 or more, NaN, Inf, and a value whose digits do not fit an `Int128` are
+written as `exp_num` does (`"1.0e20"`, `"NaN"`).
 """
 function fmt_num(x::Real, digits::Integer)::String
     (isfinite(x) && abs(x) < HUGE_NUMBER) || return exp_num(x)
     digits == 0 && return fmt_int(round(Int, x))
-    r = round(abs(Float64(x)); digits)
-    whole = floor(Int, r)
-    frac = round(Int, (r - whole) * 10^digits)
-    neg = x < 0 && (whole != 0 || frac != 0)
-    return (neg ? "-" : "") * fmt_int(whole) * "." * lpad(string(frac), digits, '0')
+    scaled = abs(Float64(x)) * 10.0^digits
+    scaled < 1e38 || return exp_num(x)
+    # Round once, in whole units of the last digit, so a fraction that rounds up carries
+    # into the whole part (99.995 gives 100.00, never 99.100).
+    n = round(Int128, scaled)
+    whole, frac = divrem(n, Int128(10)^digits)
+    sign = x < 0 && n != 0 ? "-" : ""
+    return sign * fmt_int(whole) * "." * lpad(string(frac), digits, '0')
 end
 
 # A number as short as it reads: 25 for 25.0; huge and non-finite values as `exp_num`.
@@ -237,6 +241,15 @@ function add_database_rows!(rows::Vector{TreeRow}, snap::Snapshot, it::ItemRow,
     end
     return nothing
 end
+
+"""
+    tree_empty_text(filter, rows) -> Union{Nothing,String}
+
+What the tree says when it has no rows: `"No matches"` while a filter is typed, else
+`nothing` (an empty project still shows its Databases and Grids folders).
+"""
+tree_empty_text(filter::AbstractString, rows::AbstractVector{TreeRow}) =
+    isempty(rows) && !isempty(strip(filter)) ? "No matches" : nothing
 
 """
     next_row(rows, key, delta) -> Union{Nothing,Int}
@@ -674,6 +687,12 @@ function draw_tree(app, dl, view::Box, rows::Vector{TreeRow})
         draw_tree_row(app, dl, rows[k], Box(view.x0, y, right, y + row_h), k == sel)
     end
     ui.tree_drawn = length(range)
+    empty = tree_empty_text(ui.filter, rows)
+    if empty !== nothing   # in the first row's place, centred, as the central empty state
+        tw = text_width(FONT_REGULAR, BODY_FONT_SIZE, empty)
+        draw_text_mid(dl, FONT_REGULAR, BODY_FONT_SIZE, view.x0 + (width(view) - tw) / 2,
+            view.y0 + pad + row_h / 2, u32(app.tokens.text_dim), empty)
+    end
     ig.PopClipRect()
     ig.PopID()
     # The context menu belongs to the selected row. It stays open while the tree draws

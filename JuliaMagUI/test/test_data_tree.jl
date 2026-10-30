@@ -100,6 +100,10 @@ row(rows, key) = rows[findfirst(r -> r.key == key, rows)]
         f = tree_rows(snap, Set{String}(), "regional")
         @test labels(f) == ["Grids", "Regional_TMI_GA2019"]
         @test isempty(tree_rows(snap, Set{String}(), "no such name"))
+        # The tree says so when a filter matches nothing; an empty project says nothing.
+        @test UI.tree_empty_text("no such name", TreeRow[]) == "No matches"
+        @test UI.tree_empty_text("", TreeRow[]) === nothing
+        @test UI.tree_empty_text("mag", tree_rows(snap, Set{String}(), "mag")) === nothing
         f = tree_rows(snap, Set{String}(), "  ")   # blank is no filter
         @test labels(f) == ["Databases", "Grids"]
     end
@@ -118,6 +122,12 @@ row(rows, key) = rows[findfirst(r -> r.key == key, rows)]
         @test fmt_num(Float64(typemax(Int)), 0) == "9.22337e18"
         @test fmt_num(Float64(Float32(1.70141e38)), 1) == "1.70141e38"
         @test fmt_num(NaN, 1) == "NaN" && fmt_num(Inf, 0) == "Inf" && fmt_num(-Inf, 1) == "-Inf"
+        # A fraction that rounds up carries into the whole part, never ".100".
+        @test fmt_num(99999999999999.995, 2) == "100,000,000,000,000.00"
+        @test fmt_num(99999999999999.9, 2) == "99,999,999,999,999.90"
+        @test fmt_num(0.999, 2) == "1.00" && fmt_num(-1.995, 2) == "-2.00" && fmt_num(1.005, 3) == "1.005"
+        @test fmt_num(5e-324, 2) == "0.00" && fmt_num(-5e-324, 2) == "0.00" && short_num(5e-324) == "5.0e-324"
+        @test fmt_num(123.456, 40) == "123.456"   # more digits than fit: as `exp_num`
         @test short_num(25.0) == "25" && short_num(12.5) == "12.5" && short_num(1e20) == "1.0e20" &&
               short_num(-3e38) == "-3.0e38" && short_num(Float64(typemax(Int))) == "9.22337e18" &&
               short_num(NaN) == "NaN" && short_num(Inf) == "Inf"
@@ -299,5 +309,47 @@ row(rows, key) = rows[findfirst(r -> r.key == key, rows)]
 
     finally
         Core.close_session!(s)
+    end
+end
+
+@testset "frame guard: one report per error source, sticky while it lasts" begin
+    app = test_app_state(nothing)
+    logger = Test.TestLogger(min_level = Base.CoreLogging.Error)
+    reports() = count(r -> r.level == Base.CoreLogging.Error, logger.logs)
+    try
+    Base.CoreLogging.with_logger(logger) do
+        # Messages that change every frame, from one place: one entry, one toast.
+        bad(k, t) = try
+            UI.hex_rgba("red$k")
+        catch err
+            UI.note_draw_error!(app, err, catch_backtrace(); now = t)
+        end
+        for k in 1:5
+            bad(k, 100.0 + 0.1k)
+        end
+        e = only(app.draw_errors)
+        @test e.count == 5 && e.reports == 1 && e.text == "Expected a colour like #RRGGBB, got \"red1\"."
+        t = only(app.toasts)
+        @test t.kind === :error && UI.toast_expired(t, 1e9) == false   # sticky
+        # While it keeps coming the toast stays; once it stops for a while it goes.
+        UI.settle_draw_errors!(app; now = 102.0)
+        @test only(app.toasts) === t
+        UI.settle_draw_errors!(app; now = 100.5 + UI.DRAW_ERROR_QUIET + 0.1)
+        @test isempty(app.toasts) && e.toast === nothing
+        # Back again after that: a new toast and a new report.
+        bad(6, 120.0)
+        @test e.reports == 2 && e.count == 6 && length(app.toasts) == 1 && e.toast === only(app.toasts)
+        # Another place is another entry.
+        try
+            UI.parse_chord("Ctrl+Nope")
+        catch err
+            UI.note_draw_error!(app, err, catch_backtrace(); now = 121.0)
+        end
+        @test length(app.draw_errors) == 2 && length(app.toasts) == 2
+    end
+    @test reports() == 3   # one log entry per report, with its backtrace
+    @test all(r -> r.kwargs[:exception] isa Tuple, logger.logs)
+    finally
+        UI.stop_worker!(app.queue)
     end
 end
