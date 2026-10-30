@@ -19,6 +19,7 @@ using Test
     include("test_jobs.jl")
     include("test_tools.jl")
     include("test_followups.jl")
+    include("test_ui_support.jl")
     include("test_export.jl")
     include("test_coordinates.jl")
     include("test_channel_math.jl")

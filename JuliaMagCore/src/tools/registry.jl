@@ -233,10 +233,13 @@ The settings are checked first. With problems, nothing runs and the result is
   thrown: a `ToolError` gives its own message, other errors give
   `"Tool failed: <message>"`. A run that worked is recorded in the history,
   and only then are its settings remembered.
+- On a closed session (see `isopen`) nothing runs and the result is
+  `(false, <the SessionClosedError message>, nothing)`.
 - A `:job` tool returns the `Job` at once. Its settings are remembered when the
   job starts. The job records itself in the history when it is done.
 """
 function run_tool(s::Session, id::AbstractString; inputs::AbstractDict = Dict{String,String}(), kwargs...)
+    isopen(s) || return (false, sprint(showerror, SessionClosedError(s.project.folder)), nothing)
     spec = find_tool(id)
     spec === nothing && return (false, "There is no tool \"$id\".", nothing)
     values = last_settings(s, spec.id)
@@ -251,7 +254,12 @@ function run_tool(s::Session, id::AbstractString; inputs::AbstractDict = Dict{St
     args = tool_args(values, ins)
     if spec.mode == :job
         remember_settings!(s, spec.id, values)
-        return start_job!(s, spec.id, args, tool_work(s, spec, ins, values))
+        try
+            return start_job!(s, spec.id, args, tool_work(s, spec, ins, values))
+        catch e
+            e isa SessionClosedError || rethrow()
+            return (false, sprint(showerror, e), nothing)
+        end
     end
     return run_quick(s, spec, ins, values, args)
 end

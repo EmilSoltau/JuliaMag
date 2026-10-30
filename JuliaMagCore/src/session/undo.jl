@@ -21,6 +21,7 @@ function push_undo!(s::Session, step::UndoStep)
         held = s.held_edits
         if held !== nothing
             push!(held, step)
+            bump!(s)
             return step
         end
         push!(s.undo_stack, step)
@@ -33,6 +34,7 @@ function push_undo!(s::Session, step::UndoStep)
             end
         end
         empty!(s.redo_stack)
+        bump!(s)
         return step
     end
 end
@@ -59,6 +61,7 @@ undo!(s::Session)::Bool = run_step!(s, true)
 redo!(s::Session)::Bool = run_step!(s, false)
 
 function run_step!(s::Session, undo::Bool)::Bool
+    check_open(s)
     from() = undo ? s.undo_stack : s.redo_stack
     to() = undo ? s.redo_stack : s.undo_stack
     lock(s.undo_lock) do
@@ -89,6 +92,7 @@ function run_step!(s::Session, undo::Bool)::Bool
                                                   Dict{String,Any}("step" => step.label))
                 finally
                     foreach(x -> add_held!(s, x), held)
+                    bump!(s)
                 end
             end
         end

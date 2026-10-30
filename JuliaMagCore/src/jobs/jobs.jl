@@ -68,16 +68,21 @@ start_job!(s::Session, command::AbstractString, args::AbstractDict, work::Functi
 
 function start_job!(s::Session, command::AbstractString, args::AbstractDict, work::Function,
                     replaces::Union{Nothing,Job}; undoable::Bool = true)::Job
+    check_open(s)
     a = Dict{String,Any}(String(k) => v for (k, v) in args)
     before = lock(() -> Set{String}(i.id for i in s.project.items), s.lock)
     # The lock makes `job.task` set before any other thread can see the job.
+    # `close_session!` sets the state before it lists the jobs (which takes this
+    # lock), so a job is either listed there or refused here.
     lock(s.jobs_lock) do
+        check_open(s)
         job = Job(reserve_job_id!(s), String(command), a, Threads.Atomic{Int}(Int(JOB_RUNNING)),
                   Threads.Atomic{Float64}(0.0), Threads.Atomic{Bool}(false), now_text(), "",
                   JobReport(), String[], String[], "", nothing)
         push!(s.jobs, job)
         save_job_quietly(s, job)
         job.task = Threads.@spawn run_job!(s, job, work, before, replaces, undoable)
+        bump!(s)
         return job
     end
 end
@@ -239,10 +244,12 @@ function finish_locked!(s::Session, job::Job, items::Vector{ProjectItem}, before
     job.finished = now_text()
     set_status!(job, JOB_DONE)
     save_job_quietly(s, job)
+    bump!(s)
     kept_old = replaces !== nothing && any(id -> any(i -> i.id == id, p.items), replaces.outputs)
     if replaces !== nothing && old_status == JOB_DONE && !kept_old
         set_status!(replaces, JOB_UNDONE)
         save_job_quietly(s, replaces)
+        bump!(s)
     end
     undoable || return nothing
     noted = copy(ctx.undos)
@@ -392,6 +399,7 @@ end
 function set_job_status!(s::Session, job::Job, st::JobStatus)
     set_status!(job, st)
     save_job_quietly(s, job)
+    bump!(s)
     return nothing
 end
 
@@ -425,6 +433,7 @@ function fail_job!(s::Session, job::Job, e, ctx::JobContext)
     job.finished = now_text()
     set_status!(job, cancelled ? JOB_CANCELLED : JOB_FAILED)
     quietly(() -> save_job_quietly(s, job))
+    bump!(s)
     return nothing
 end
 

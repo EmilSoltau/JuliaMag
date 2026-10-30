@@ -168,7 +168,51 @@ mutable struct Session
     the step, so they follow it. Else `nothing`. Guarded by `lock`.
     """
     held_edits::Union{Nothing,Vector{Union{UndoStep,HistoryEntry}}}
+    "Counts every change a UI shows (see `revision`). Read without a lock."
+    revision::Threads.Atomic{Int}
+    "0 open, 1 closing, 2 closed (see `isopen`)."
+    state::Threads.Atomic{Int}
 end
+
+"Thrown by an edit, `undo!`, `redo!` or `start_job!` on a session that is closing or closed."
+struct SessionClosedError <: Exception
+    folder::String
+end
+
+Base.showerror(io::IO, e::SessionClosedError) = print(io, "The project ", e.folder, " is closed.")
+
+const SESSION_OPEN = 0
+const SESSION_CLOSING = 1
+const SESSION_CLOSED = 2
+
+"""
+    revision(s)::Int
+
+A counter that goes up by at least one after every change a UI shows: an
+edit, an undo or redo, a cursor or marked range move, a warning, and a job
+starting or leaving `JOB_RUNNING`. Reading it takes no lock.
+"""
+revision(s::Session)::Int = s.revision[]
+
+bump!(s::Session) = (Threads.atomic_add!(s.revision, 1); nothing)
+
+"""
+    isopen(s)::Bool
+
+False from the moment `close_session!` starts.
+"""
+Base.isopen(s::Session)::Bool = s.state[] == SESSION_OPEN
+
+"Throw `SessionClosedError` unless the session is open. Call it before taking any lock."
+check_open(s::Session) = isopen(s) ? nothing : throw(SessionClosedError(s.project.folder))
+
+"""
+    warnings(s)::Vector{String}
+
+A copy of the session's warnings. It still works after `close_session!`,
+so a UI can show the warnings of the close.
+"""
+warnings(s::Session)::Vector{String} = lock(() -> copy(s.warnings), s.jobs_lock)
 
 const HISTORY_FILE = "history.jsonl"
 
@@ -179,7 +223,8 @@ function Session(p::Project)
     history = load_history(p, warnings)
     s = Session(p, UndoStep[], UndoStep[], history, nothing, nothing,
                 load_remembered(p, warnings), ReentrantLock(), warnings, Job[], 1,
-                ReentrantLock(), Dict{String,BusyMark}(), nothing, ReentrantLock(), nothing)
+                ReentrantLock(), Dict{String,BusyMark}(), nothing, ReentrantLock(), nothing,
+                Threads.Atomic{Int}(0), Threads.Atomic{Int}(SESSION_OPEN))
     load_jobs!(s)
     return s
 end
@@ -327,6 +372,8 @@ list those folders again, so they are kept, with a warning.
 The lock is removed also when ending the stacks is interrupted.
 """
 function close_session!(s::Session)
+    s.state[] = SESSION_CLOSING
+    bump!(s)
     running = filter(j -> status(j) == JOB_RUNNING, jobs(s))
     foreach(cancel!, running)
     foreach(wait_job, running)
@@ -336,6 +383,8 @@ function close_session!(s::Session)
     finally
         lock(() -> s.held_lock = nothing, s.jobs_lock)
         held === nothing || release_lock!(held)
+        s.state[] = SESSION_CLOSED
+        bump!(s)
     end
     return nothing
 end
@@ -448,9 +497,11 @@ function record!(s::Session, command::String, args::AbstractDict; job::String = 
         held = s.held_edits
         if held !== nothing
             push!(held, e)
+            bump!(s)
             return e
         end
         write_history!(s, e, line)
+        bump!(s)
         return e
     end
 end
@@ -476,7 +527,7 @@ function write_history!(s::Session, e::HistoryEntry, line::String = history_line
 end
 
 "Add a line to `s.warnings`. Safe from any thread."
-session_warning!(s::Session, msg::String) = (lock(() -> push!(s.warnings, msg), s.jobs_lock); nothing)
+session_warning!(s::Session, msg::String) = (lock(() -> push!(s.warnings, msg), s.jobs_lock); bump!(s); nothing)
 
 # ---- busy items ------------------------------------------------------------
 
@@ -587,6 +638,7 @@ Write one value now, make it undoable and record `"database.set_cell"`.
 Throws `ProtectedError` before anything is written if the channel is protected.
 """
 function set_cell!(s::Session, item_id::AbstractString, id::LineId, name::AbstractString, row::Integer, x)
+    check_open(s)
     lock(s.lock) do
         check_not_busy(s, item_id)
         db = database(s.project, item_id)
@@ -610,6 +662,7 @@ end
 Select or deselect a line and save `database.json`. Undoable and recorded.
 """
 function set_line_selected!(s::Session, item_id::AbstractString, id::LineId, flag::Bool)
+    check_open(s)
     lock(s.lock) do
         check_not_busy(s, item_id)
         old = line(database(s.project, item_id), id).selected
@@ -631,6 +684,7 @@ end
 function set_cursor!(s::Session, c::Cursor)
     lock(s.lock) do
         s.cursor = c
+        bump!(s)
         return nothing
     end
 end
@@ -647,6 +701,7 @@ function set_marked!(s::Session, range::Union{Nothing,Tuple{Int,Int}})
         throw(ArgumentError("the marked range must not end before it starts: $(range[1]) to $(range[2])"))
     lock(s.lock) do
         s.marked = range
+        bump!(s)
         return nothing
     end
 end
@@ -684,6 +739,7 @@ Throws `ItemBusyError` while a job or an export uses the item, and
 `ProjectError` when there is no such item.
 """
 function remove_item!(s::Session, id::AbstractString)
+    check_open(s)
     key = String(id)
     p = s.project
     lock(s.lock) do
@@ -732,6 +788,7 @@ Throws `ArgumentError` for a blank name, `ItemBusyError` while a job or an
 export uses the item, and `ProjectError` when there is no such item.
 """
 function rename_item!(s::Session, id::AbstractString, name::AbstractString)
+    check_open(s)
     key = String(id)
     new = String(strip(name))
     isempty(new) && throw(ArgumentError("the name of an item cannot be blank"))
@@ -802,6 +859,7 @@ of a protected channel cannot be edited. Undoable and recorded as
 export uses the database.
 """
 function set_channel_protected!(s::Session, id::AbstractString, name::AbstractString, flag::Bool)
+    check_open(s)
     key, ch = String(id), String(name)
     lock(s.lock) do
         edit_channel_meta!(c -> c.protected, (c, v) -> (c.protected = v), s, key, ch,
@@ -829,6 +887,7 @@ function set_channel_info!(s::Session, id::AbstractString, name::AbstractString;
                            units::Union{Nothing,AbstractString} = nothing,
                            decimals::Union{Nothing,Integer} = nothing, format::Union{Nothing,Symbol} = nothing,
                            width::Union{Nothing,Integer} = nothing)
+    check_open(s)
     format === nothing || format in CHANNEL_FORMATS ||
         throw(ArgumentError("format must be one of $(join(CHANNEL_FORMATS, ", ")), not $format"))
     decimals === nothing || decimals >= -1 || throw(ArgumentError("decimals must be -1 (not set) or more, not $decimals"))
@@ -868,6 +927,7 @@ another channel (case is ignored), or is a name that a position pair uses;
 when there is no channel `old`.
 """
 function rename_channel!(s::Session, id::AbstractString, old::AbstractString, new::AbstractString)
+    check_open(s)
     key, from, to = String(id), String(old), String(new)
     lock(s.lock) do
         check_not_busy(s, key)
@@ -911,6 +971,7 @@ that a position pair uses, `ItemBusyError` while a job or an export uses the
 database, and `DatabaseError` when there is no such channel.
 """
 function delete_channel!(s::Session, id::AbstractString, name::AbstractString)
+    check_open(s)
     key, ch = String(id), String(name)
     lock(s.lock) do
         check_not_busy(s, key)

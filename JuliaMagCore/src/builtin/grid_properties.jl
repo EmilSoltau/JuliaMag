@@ -73,6 +73,7 @@ Throws `ArgumentError` for a code PROJ does not know, and `ItemBusyError` while
 an import or an export uses the grid.
 """
 function set_grid_crs!(s::Session, id::AbstractString, crs::AbstractString)
+    check_open(s)
     code = String(strip(crs))
     isempty(code) || valid_crs(code) || throw(ArgumentError("coordinate system \"$code\" is not known"))
     lock(s.lock) do
@@ -99,6 +100,7 @@ not above 0, and `ItemBusyError` while an import or an export uses the grid.
 function set_grid_georef!(s::Session, id::AbstractString; x0::Union{Nothing,Real} = nothing,
                           y0::Union{Nothing,Real} = nothing, dx::Union{Nothing,Real} = nothing,
                           dy::Union{Nothing,Real} = nothing, rotation::Union{Nothing,Real} = nothing)
+    check_open(s)
     given = Dict{Symbol,Float64}()
     for (k, v) in zip(GEOREF_FIELDS, (x0, y0, dx, dy, rotation))
         v === nothing && continue
@@ -135,6 +137,7 @@ Throws `ArgumentError` for an unknown method or a shading number that is not
 finite, and `ItemBusyError` while an import or an export uses the grid.
 """
 function set_grid_style!(s::Session, id::AbstractString, style::GridStyle)
+    check_open(s)
     style.method in STYLE_METHODS ||
         throw(ArgumentError("the colour method must be one of $(join(STYLE_METHODS, ", ")), not $(style.method)"))
     for (k, v) in (("azimuth", style.azimuth), ("altitude", style.altitude), ("zfactor", style.zfactor))
