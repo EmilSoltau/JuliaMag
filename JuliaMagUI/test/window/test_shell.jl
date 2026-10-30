@@ -146,76 +146,76 @@ window_testset("shell") do
         # The broken dialog below is a draw error on purpose (T13-C6): one log entry.
         logger = Test.TestLogger(min_level = Base.CoreLogging.Error)
         Base.CoreLogging.with_logger(logger) do
-        with_project_app(kangaroo(); draw_errors_ok = true) do ctx, app
-            yes = Ref(0)
-            UI.confirm!(app, "Remove Kangaroo Hills 2024?", "It can be undone.";
-                action = "Remove", danger = true, on_yes = a -> (yes[] += 1))
-            ctx.frames(3)
-            ref = "//" * UI.dialog_ref(1)
-            @test te.ItemExists(ref * "/Remove") && te.ItemExists(ref * "/Cancel")
-            @test open_popups(ctx) == 1
-            ctx.key("Escape")
-            ctx.wait_until(() -> isempty(app.ui.dialogs))
-            @test open_popups(ctx) == 0   # the popup left ImGui too
-            collapsed = app.config.ribbon_collapsed
-            ctx.key("Escape")
-            ctx.frames(2)
-            @test isempty(app.ui.dialogs) && yes[] == 0 && app.config.ribbon_collapsed == collapsed
+            with_project_app(kangaroo(); draw_errors_ok = true) do ctx, app
+                yes = Ref(0)
+                UI.confirm!(app, "Remove Kangaroo Hills 2024?", "It can be undone.";
+                    action = "Remove", danger = true, on_yes = a -> (yes[] += 1))
+                ctx.frames(3)
+                ref = "//" * UI.dialog_ref(1)
+                @test te.ItemExists(ref * "/Remove") && te.ItemExists(ref * "/Cancel")
+                @test open_popups(ctx) == 1
+                ctx.key("Escape")
+                ctx.wait_until(() -> isempty(app.ui.dialogs))
+                @test open_popups(ctx) == 0   # the popup left ImGui too
+                collapsed = app.config.ribbon_collapsed
+                ctx.key("Escape")
+                ctx.frames(2)
+                @test isempty(app.ui.dialogs) && yes[] == 0 && app.config.ribbon_collapsed == collapsed
 
-            # The primary button runs the action and closes the box.
-            UI.confirm!(app, "Remove?", "It can be undone."; action = "Remove",
-                on_yes = a -> (yes[] += 1))
-            ctx.frames(3)
-            ctx.click(ref * "/Remove")
-            ctx.wait_until(() -> isempty(app.ui.dialogs))
-            @test yes[] == 1
-            # A dialog on a dialog: Esc closes the top one only.
-            UI.confirm!(app, "First?", "One."; action = "OK", on_yes = a -> nothing)
-            ctx.frames(2)
-            UI.confirm!(app, "Second?", "Two."; action = "OK", on_yes = a -> nothing)
-            ctx.frames(3)
-            @test te.ItemExists("//" * UI.dialog_ref(2) * "/Cancel") && open_popups(ctx) == 2
-            ctx.key("Escape")
-            ctx.wait_until(() -> length(app.ui.dialogs) == 1)
-            @test only(app.ui.dialogs).title == "First?" && open_popups(ctx) == 1
-            # Shortcuts other than Ctrl+K and Esc wait while a modal is open.
-            ctx.key("Ctrl+F1")
-            ctx.frames(2)
-            @test app.config.ribbon_collapsed == collapsed
-            ctx.click(ref * "/Cancel")
-            ctx.wait_until(() -> isempty(app.ui.dialogs))
-            # Enter in a text field presses the primary button.
-            d = UI.push_dialog!(app, NameDialog())
-            ctx.frames(2)
-            ctx.click(ref * "/Name")
-            ctx.type("Survey A")
-            ctx.frames(1)
-            @test d.ok[] == 0
-            ctx.key("Enter")
-            ctx.wait_until(() -> isempty(app.ui.dialogs))
-            @test d.ok[] == 1 && unsafe_string(pointer(d.buffer)) == "Survey A"
-            # An action that throws becomes an error toast; the app keeps running.
-            # (An ArgumentError is a user error: it shows its message and logs nothing.)
-            UI.confirm!(app, "Break?", "It throws."; action = "Break",
-                on_yes = a -> throw(ArgumentError("the name is taken")))
-            ctx.frames(2)
-            ctx.click(ref * "/Break")
-            @test isempty(app.ui.dialogs) && last(app.toasts).text == "The name is taken."
-            # A dialog body that throws leaves the ImGui stacks whole: the dialog closes with
-            # an error toast and the app keeps running.
-            UI.push_dialog!(app, BrokenDialog())
-            ctx.frames(3)
-            @test isempty(app.ui.dialogs) && last(app.toasts).text == "The form broke."
-            @test only(app.draw_errors).count == 1
-            @test open_popups(ctx) == 0
-            ctx.click("JuliaMag/left/Jobs")
-            @test app.ui.left_tab == :jobs
-            # Dialogs of a project do not outlive it.
-            UI.confirm!(app, "Gone?", "With the project."; action = "OK", on_yes = a -> nothing)
-            ctx.frames(2)
-            UI.set_session!(app, nothing)
-            @test isempty(app.ui.dialogs) && open_popups(ctx) == 0
-        end
+                # The primary button runs the action and closes the box.
+                UI.confirm!(app, "Remove?", "It can be undone."; action = "Remove",
+                    on_yes = a -> (yes[] += 1))
+                ctx.frames(3)
+                ctx.click(ref * "/Remove")
+                ctx.wait_until(() -> isempty(app.ui.dialogs))
+                @test yes[] == 1
+                # A dialog on a dialog: Esc closes the top one only.
+                UI.confirm!(app, "First?", "One."; action = "OK", on_yes = a -> nothing)
+                ctx.frames(2)
+                UI.confirm!(app, "Second?", "Two."; action = "OK", on_yes = a -> nothing)
+                ctx.frames(3)
+                @test te.ItemExists("//" * UI.dialog_ref(2) * "/Cancel") && open_popups(ctx) == 2
+                ctx.key("Escape")
+                ctx.wait_until(() -> length(app.ui.dialogs) == 1)
+                @test only(app.ui.dialogs).title == "First?" && open_popups(ctx) == 1
+                # Shortcuts other than Ctrl+K and Esc wait while a modal is open.
+                ctx.key("Ctrl+F1")
+                ctx.frames(2)
+                @test app.config.ribbon_collapsed == collapsed
+                ctx.click(ref * "/Cancel")
+                ctx.wait_until(() -> isempty(app.ui.dialogs))
+                # Enter in a text field presses the primary button.
+                d = UI.push_dialog!(app, NameDialog())
+                ctx.frames(2)
+                ctx.click(ref * "/Name")
+                ctx.type("Survey A")
+                ctx.frames(1)
+                @test d.ok[] == 0
+                ctx.key("Enter")
+                ctx.wait_until(() -> isempty(app.ui.dialogs))
+                @test d.ok[] == 1 && unsafe_string(pointer(d.buffer)) == "Survey A"
+                # An action that throws becomes an error toast; the app keeps running.
+                # (An ArgumentError is a user error: it shows its message and logs nothing.)
+                UI.confirm!(app, "Break?", "It throws."; action = "Break",
+                    on_yes = a -> throw(ArgumentError("the name is taken")))
+                ctx.frames(2)
+                ctx.click(ref * "/Break")
+                @test isempty(app.ui.dialogs) && last(app.toasts).text == "The name is taken."
+                # A dialog body that throws leaves the ImGui stacks whole: the dialog closes with
+                # an error toast and the app keeps running.
+                UI.push_dialog!(app, BrokenDialog())
+                ctx.frames(3)
+                @test isempty(app.ui.dialogs) && last(app.toasts).text == "The form broke."
+                @test only(app.draw_errors).count == 1
+                @test open_popups(ctx) == 0
+                ctx.click("JuliaMag/left/Jobs")
+                @test app.ui.left_tab == :jobs
+                # Dialogs of a project do not outlive it.
+                UI.confirm!(app, "Gone?", "With the project."; action = "OK", on_yes = a -> nothing)
+                ctx.frames(2)
+                UI.set_session!(app, nothing)
+                @test isempty(app.ui.dialogs) && open_popups(ctx) == 0
+            end
         end
         @test count(r -> r.level == Base.CoreLogging.Error, logger.logs) == 1
     end

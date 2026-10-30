@@ -358,8 +358,8 @@ What the UI shows and where, apart from the project data. Changed on the render 
   ribbon.jl), or `nothing`.
 - `jobs_shown`: a job started from a dialog has switched the left pane to Jobs in this
   session (it does that once per session).
-- `dialog_heights`: the height of each dialog in the last frame, by level (to keep a
-  growing dialog on the screen).
+- `dialog_places`: where each dialog of the stack was placed, by level (a `DialogPlace`,
+  see modal.jl).
 - `opening`: the ids of tools, importers and exporters whose dialog the worker is
   preparing; a second open of one waits for the first.
 """
@@ -398,7 +398,7 @@ Base.@kwdef mutable struct UiState
     menu::Any = nothing
     ribbon_cache::Any = nothing
     jobs_shown::Bool = false
-    dialog_heights::Vector{Float32} = Float32[]
+    dialog_places::Vector{Any} = Any[]
     opening::Set{String} = Set{String}()
 end
 

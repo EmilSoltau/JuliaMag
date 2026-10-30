@@ -128,6 +128,8 @@ const STYLE_SIZES = (;
     PopupRounding = 8f0,
     WindowRounding = 10f0,
     ScrollbarSize = 10f0,
+    ScrollbarPadding = 2f0,     # a 6 px thumb 2 px in from the ends, as the panes' `scroll_area!`
+    ScrollbarRounding = 3f0,
     GrabRounding = 5f0,
 )
 const BORDER_SIZES = (:WindowBorderSize, :ChildBorderSize, :PopupBorderSize, :FrameBorderSize)
@@ -158,6 +160,8 @@ const STYLE_COLOURS = (
     ig.ImGuiCol_TabDimmedSelected => :ribbon,
     ig.ImGuiCol_Separator => :border,
     ig.ImGuiCol_ScrollbarGrab => :border_strong,
+    ig.ImGuiCol_ScrollbarGrabHovered => :border_strong,   # the panes' thumb keeps its colour
+    ig.ImGuiCol_ScrollbarGrabActive => :border_strong,
     ig.ImGuiCol_NavCursor => :accent,
     ig.ImGuiCol_TextSelectedBg => :text_selection,
 )
@@ -188,6 +192,8 @@ function apply_style!(t::Tokens, scale::Real)
     # ImGui fades its modal dim in over some frames. `draw_dialog` draws the `backdrop`
     # itself, at once and once per dialog, as the prototype does.
     ig.c_set!(style.Colors, ig.ImGuiCol_ModalWindowDimBg, ig.ImVec4(0, 0, 0, 0))
+    # A scrollbar has no track of its own, as the panes' `scroll_area!`.
+    ig.c_set!(style.Colors, ig.ImGuiCol_ScrollbarBg, ig.ImVec4(0, 0, 0, 0))
     for (name, value) in pairs(STYLE_SIZES)
         setproperty!(style, name, value isa Tuple ? ig.ImVec2(value...) : value)
     end

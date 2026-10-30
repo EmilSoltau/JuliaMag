@@ -136,7 +136,7 @@ function draw_dialog(f, app, d; title::AbstractString, icon::AbstractString = ""
     ig.PopStyleColor()
     ig.PopStyleVar(3)
     open || return nothing
-    keep_on_screen!(app, level, vp, s)
+    keep_on_screen!(app, d, level, vp, s)
 
     top = level == length(dialogs)
     typing = unsafe_load(ig.GetIO()).WantTextInput
@@ -250,24 +250,63 @@ function draw_dialog(f, app, d; title::AbstractString, icon::AbstractString = ""
     return ok_box
 end
 
-# Place the dialog at `level` (the current window) again when its height changes (it
-# opens, Advanced opens, the body measures itself), as the prototype's `place()`:
-# `Math.max(20, Math.round((innerHeight - h) / 2 - 30))`, in CSS px. The height of a
-# dialog is at most the window less 40 px, so it stays on the screen. Like `place()` it
-# also centres the dialog across again. A drag, which keeps the height, is left alone.
-function keep_on_screen!(app, level::Integer, vp, scale::Real)
-    sizes = app.ui.dialog_heights
-    while length(sizes) < level
-        push!(sizes, -1f0)
+"""
+    DialogPlace
+
+Where a dialog of the stack was placed: the `dialog` at that level, its `height` in the
+last frame, and the last frame (`centre_until`) in which a change of height centres it
+again (it opened, or a section opened or closed: see `recentre_dialog!`).
+"""
+mutable struct DialogPlace
+    dialog::Any
+    height::Float32
+    centre_until::Int
+end
+
+# A dialog measures its body one frame late (the child window sizes itself to what it
+# holds), so a new height can come up to this many frames after an open or a toggle.
+const CENTRE_FRAMES = 3
+
+# Place the dialog `d` at `level` (the current window) when its height changes. Just after
+# it opened or a section toggled, it is centred, as the prototype's `place()`:
+# `Math.max(20, Math.round((innerHeight - h) / 2 - 30))` in CSS px, and centred across.
+# Any other change (an error line, a coordinate system name) keeps it where it is, also
+# where the user dragged it, and only keeps its bottom 20 px inside the window.
+function keep_on_screen!(app, d, level::Integer, vp, scale::Real)
+    places = app.ui.dialog_places
+    while length(places) < level
+        push!(places, DialogPlace(nothing, -1f0, 0))
     end
+    frame = app.window.frame
+    pl = places[level]
+    pl.dialog === d || (places[level] = pl = DialogPlace(d, -1f0, frame + CENTRE_FRAMES))
     h = Float32(ig.GetWindowSize().y)
-    sizes[level] == h && return nothing
-    sizes[level] = h
+    pl.height == h && return nothing
+    pl.height = h
     s = Float32(scale)
-    top = max(20f0, rnd((vp.Size.y - h) / (2s) - 30)) * s
-    # Across, centred in device px (the window's width in CSS px need not be whole).
-    left = floor(vp.Size.x / 2 + 0.5f0 - Float32(ig.GetWindowSize().x) / 2)
-    ig.SetWindowPos((vp.Pos.x + left, vp.Pos.y + top))
+    if frame <= pl.centre_until
+        top = max(20f0, rnd((vp.Size.y - h) / (2s) - 30)) * s
+        # Across, centred in device px (the window's width in CSS px need not be whole).
+        left = floor(vp.Size.x / 2 + 0.5f0 - Float32(ig.GetWindowSize().x) / 2)
+        ig.SetWindowPos((vp.Pos.x + left, vp.Pos.y + top))
+    else
+        pos = ig.GetWindowPos()
+        y = max(vp.Pos.y + px(scale, 20), min(pos.y, vp.Pos.y + vp.Size.y - px(scale, 20) - h))
+        y == pos.y || ig.SetWindowPos((pos.x, round(y)))
+    end
+    return nothing
+end
+
+"""
+    recentre_dialog!(app, d)
+
+A section of dialog `d` opened or closed (Advanced, Tool Description): centre it again
+when its height changes in the next frames.
+"""
+function recentre_dialog!(app, d)
+    for pl in app.ui.dialog_places
+        pl.dialog === d && (pl.centre_until = app.window.frame + CENTRE_FRAMES)
+    end
     return nothing
 end
 

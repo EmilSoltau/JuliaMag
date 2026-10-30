@@ -389,4 +389,55 @@ top_dialog(app) = last(app.ui.dialogs)
         l3 = menu_layout(Box(100, 100, 300, 124), items[1:3], view, 1, (t, s) -> 7f0 * length(t); scroll = 50)
         @test l3.scroll == 0 && l3.scroll_max == 0
     end
+
+    @testset "fix round 2: guarded sends bugs to the draw errors, user errors to a toast" begin
+        with_app(app_with_database()) do app
+            UI.guarded(app, a -> throw(ArgumentError("the name is taken")))
+            @test isempty(app.draw_errors) && app.toasts[end].text == "The name is taken."
+            logger = Test.TestLogger(min_level = Base.CoreLogging.Error)
+            Base.CoreLogging.with_logger(logger) do
+                UI.guarded(app, a -> error("a bug"))
+            end
+            @test length(app.draw_errors) == 1 && only(app.draw_errors).count == 1
+            @test app.toasts[end].kind == :error && occursin("a bug", app.toasts[end].text)
+            @test count(r -> r.level == Base.CoreLogging.Error, logger.logs) == 1
+        end
+    end
+
+    @testset "fix round 2: an error after Cancel names its field" begin
+        with_app(app_with_database()) do app
+            f = open_form_now(app, Core.tool("database.statistics"))
+            f.texts["bins"] = "lots"
+            d = top_dialog(app)
+            UI.press_ok!(app, d)
+            UI.cancel_dialog!(app, d)
+            wait_drained(app)
+            @test app.toasts[end].kind == :error && app.toasts[end].text == "Histogram bins: Type a number."
+            # A core message that names the field already is kept as it is.
+            f = open_form_now(app, Core.tool("database.statistics"))
+            f.texts["bins"] = "0"
+            d = top_dialog(app)
+            UI.press_ok!(app, d)
+            UI.cancel_dialog!(app, d)
+            wait_drained(app)
+            @test app.toasts[end].text == "Histogram bins must be at least 1."
+        end
+    end
+
+    @testset "fix round 2: the cut path is measured once per path, width and scale" begin
+        n = Ref(0)
+        measure = t -> (n[] += 1; 7f0 * length(t))
+        cache = UI.ElideCache()
+        p = "/data/surveys/2024/kangaroo/raw/KH2024_mag.xyz"
+        a = UI.elide_start!(cache, p, 140f0, 1f0, measure)
+        @test startswith(a, "...") && endswith(a, "KH2024_mag.xyz") && 7 * length(a) <= 140
+        k = n[]
+        @test UI.elide_start!(cache, p, 140f0, 1f0, measure) == a && n[] == k   # cached
+        UI.elide_start!(cache, p, 200f0, 1f0, measure)
+        @test n[] > k                                                          # a new width
+        k = n[]
+        UI.elide_start!(cache, p, 200f0, 1.5f0, measure)
+        @test n[] > k                                                          # a new scale
+        @test UI.elide_start!(cache, "short.xyz", 200f0, 1.5f0, measure) == "short.xyz"
+    end
 end

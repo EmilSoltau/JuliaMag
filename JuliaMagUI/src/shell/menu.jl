@@ -323,6 +323,11 @@ function draw_menu_rows(app, m::OpenMenu, l::MenuLayout)
     seen_ids = Set{String}()
     # Rows that scrolled out of the box are neither drawn nor clickable.
     view = inset(b, hl, hl)
+    io = unsafe_load(ig.GetIO())
+    moved = io.MouseDelta.x != 0 || io.MouseDelta.y != 0
+    # The last input wins: a mouse that moves takes the highlight from the keyboard, so
+    # one row is lit at a time; moved out of the menu, it lights none.
+    moved && !inside(view, io.MousePos.x, io.MousePos.y) && (m.key = 0)
     ig.PushClipRect((view.x0, view.y0), (view.x1, view.y1), true)
     for (k, (it, row)) in enumerate(zip(m.items, l.rows))
         (row.y1 <= view.y0 || row.y0 >= view.y1) && continue
@@ -335,8 +340,9 @@ function draw_menu_rows(app, m::OpenMenu, l::MenuLayout)
         id = it.label in seen_ids ? it.label * "##" * string(k) : it.label
         push!(seen_ids, it.label)
         clicked, hovered, held = hit(id, row)
-        enabled && (hovered || k == m.key) && ig.AddRectFilled(dl, (row.x0, row.y0), (row.x1, row.y1),
-            u32(held ? t.pressed : t.hover), p(5))
+        hovered && moved && enabled && (m.key = k)
+        enabled && (k == m.key || (hovered && m.key == 0)) && ig.AddRectFilled(dl,
+            (row.x0, row.y0), (row.x1, row.y1), u32(held ? t.pressed : t.hover), p(5))
         x = row.x0 + p(6)
         mid = centre_y(row)
         icon = it.checked === nothing ? it.icon : it.checked ? "check" : ""

@@ -406,6 +406,39 @@ window_testset("tool dialogs") do
             ctx.click(menu_row(app, "C298"))
             ctx.frames(2)
             @test d.form.values["channel"] == "C298" && app.ui.menu === nothing
+            # The keyboard keeps the highlighted row in view: Down, then Page Down.
+            ctx.click(D1 * "channel")
+            ctx.frames(2)
+            m = app.ui.menu
+            function key_row_in_view()
+                inview = Ref(false)
+                ctx.on_render(w -> begin
+                    vp = unsafe_load(ig.GetMainViewport())
+                    l = UI.menu_layout(m.anchor, m.items, UI.Box(0, 0, vp.Size.x, vp.Size.y), w.scale,
+                        (t, sz) -> UI.text_width(UI.FONT_REGULAR, sz, t); min_width = m.min_width,
+                        gap = m.gap, scroll = m.scroll)
+                    r = l.rows[m.key]
+                    inview[] = r.y0 >= l.box.y0 && r.y1 <= l.box.y1
+                end)
+                return inview[]
+            end
+            for _ in 1:45
+                ctx.key("Down")
+            end
+            ctx.frames(2)
+            @test m.key > 40 && key_row_in_view()
+            for _ in 1:4
+                ctx.key("PageDown")
+            end
+            ctx.frames(2)
+            @test m.key > 100 && key_row_in_view()
+            # The mouse takes the highlight over: only one row is lit.
+            target = m.items[m.key - 3].label
+            te.MouseMove(menu_row(app, target))
+            ctx.frames(2)
+            @test m.items[m.key].label == target
+            ctx.key("Escape")
+            ctx.frames(2)
             # The keyboard: End, then Enter picks the last channel.
             ctx.click(D1 * "channel")
             ctx.frames(2)
@@ -433,6 +466,79 @@ window_testset("tool dialogs") do
             # No input frame: the row's ends are the dialog's own fill.
             @test near(pixel(img, b.x1 - 2, (b.y0 + b.y1) / 2), rgb255(LIGHT.menu); tol = 2)
             @test near(pixel(img, b.x1 - 2, b.y0 + 1), rgb255(LIGHT.menu); tol = 2)
+        end
+    end
+
+    @testset "a line that comes or goes while typing does not move the dialog" begin
+        # A short dialog (the old rule kept a tall one at 20 px anyway), whose settings have
+        # no help: an error or a coordinate system name adds a line.
+        small = Core.ToolSpec("test.small", "Small", "A small test tool.", "tools", Core.Place[],
+            ["database" => Core.ITEM_DATABASE],
+            Core.SettingSpec[Core.NumberSetting("n", "Count"; default = 1),
+                Core.CRSSetting("crs", "Coordinate system")], :quick, (s, i, st, p, r) -> nothing)
+        with_tools([small]) do
+            with_project_app(kangaroo()) do ctx, app
+                UI.request!(app, UI.OpenToolDialog("test.small"; item = app.ui.current_db))
+                ctx.wait_until(() -> tool_dialog(app) !== nothing; timeout = 5)
+                d = tool_dialog(app)
+                ctx.frames(4)
+                top = item_box(D1 * "Close dialog").y0
+                # The name of a code comes from the worker as a new line under the field.
+                fill_text(D1 * "##crs", "EPSG:7855")
+                ctx.wait_until(() -> haskey(d.crs_names, "EPSG:7855"); timeout = 5)
+                ctx.frames(3)
+                @test d.hint_boxes["crs"] !== nothing
+                @test item_box(D1 * "Close dialog").y0 == top
+                # An error line under Count appears after Run: still no move.
+                fill_text(D1 * "##n", "x")
+                ctx.click(D1 * "Run")
+                ctx.wait_until(() -> haskey(d.form.errors, "n"); timeout = 5)
+                ctx.frames(3)
+                @test item_box(D1 * "Close dialog").y0 == top
+                # A drag is kept when the error line goes again (typing clears it).
+                te.ItemDragWithDelta(D1 * "##move", Ref(ig.ImVec2(40f0, 30f0)))
+                ctx.frames(2)
+                moved = item_box(D1 * "Close dialog").y0
+                @test moved != top
+                fill_text(D1 * "##n", "3")
+                ctx.frames(3)
+                @test !haskey(d.form.errors, "n") && item_box(D1 * "Close dialog").y0 == moved
+                # Opening a section places it again, centred.
+                ctx.click(D1 * "Tool Description")
+                ctx.frames(4)
+                @test item_box(D1 * "Close dialog").y0 != moved
+            end
+        end
+    end
+
+    @testset "the dialog's scrollbar looks like the panes', dark" begin
+        with_project_app(kangaroo(); theme = THEME_DARK, size = (900, 560)) do ctx, app
+            UI.request!(app, UI.OpenToolDialog("database.channel_math"; item = app.ui.current_db))
+            ctx.wait_until(() -> tool_dialog(app) !== nothing; timeout = 5)
+            ctx.frames(2)
+            ctx.click(D1 * "Tool Description")
+            ctx.frames(3)
+            te.MouseMoveToPos((5f0, 5f0))
+            ctx.frames(2)
+            path = joinpath(DIALOG_SHOTS, "dialog-scroll-dark.png")
+            ctx.shot(path)
+            img = PNGFiles.load(path)
+            d = tool_dialog(app)
+            right = round(Int, d.ok_box.x1) + 16            # the body's right edge
+            top = round(Int, item_box(D1 * "Close dialog").y1) + 12 + 1
+            y = top + 10                                    # inside the thumb at scroll 0
+            thumb = rgb255(DARK.border_strong)
+            @test all(x -> near(pixel(img, x, y), thumb; tol = 3), right-8:right-3)   # 6 px wide
+            @test near(pixel(img, right - 9, y), rgb255(DARK.menu); tol = 3)         # no track fill
+            @test near(pixel(img, right - 1, y), rgb255(DARK.menu); tol = 3)
+            @test near(pixel(img, right - 5, top), rgb255(DARK.menu); tol = 3)       # 2 px from the end
+            # The thumb keeps its colour under the mouse, as the panes' thumb does.
+            te.MouseMoveToPos((Float32(right - 5), Float32(y)))
+            ctx.frames(2)
+            ctx.shot(path)
+            img = PNGFiles.load(path)
+            @test near(pixel(img, right - 5, y), thumb; tol = 3)
+            ctx.shot(joinpath(DIALOG_SHOTS, "dialog-scroll-dark.png"))
         end
     end
 

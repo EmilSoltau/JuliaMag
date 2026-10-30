@@ -37,12 +37,13 @@ mutable struct ToolDialog
     ok_box::Union{Nothing,Box}
     path_box::Union{Nothing,Box}
     confirmed::String
+    elided::Any   # an `ElideCache` for the import's path line
 end
 
 ToolDialog(app, f::Form; file_size::Integer = -1) =
     ToolDialog(f, Int(file_size), Dict{String,Vector{UInt8}}(), "", nothing, false, false,
         Dict{String,String}(), Set{String}(), Dict{String,Float64}(), Dict{String,UInt32}(),
-        Dict{String,Union{Nothing,Box}}(), nothing, nothing, "")
+        Dict{String,Union{Nothing,Box}}(), nothing, nothing, "", ElideCache())
 
 "The form's values changed outside its fields (a reset, a new input): fill the fields again."
 function form_changed!(app, f::Form)
@@ -96,7 +97,7 @@ function draw_tool_footer(app, d::ToolDialog)
     ig.IsItemHovered() && item_tip!(app, "Reset to Defaults"; help = "Set every setting back to the tool's default.")
     x = pos.x + round(button_width(app, "Reset to Defaults")) + fpx(app.window.scale, 8)
     clicked, _ = link_button(app, "Tool Description", "Tool Description", "script", x, pos.y; on = d.show_desc)
-    clicked && (d.show_desc = !d.show_desc)
+    clicked && (d.show_desc = !d.show_desc; recentre_dialog!(app, d))
     ig.IsItemHovered() && item_tip!(app, "Tool Description";
         help = "The Julia description this dialog was built from, and the script call for these settings.")
     return nothing
@@ -211,7 +212,7 @@ function advanced_toggle!(app, d::ToolDialog, x::Real, y::Real, open::Bool)
     mid = centre_y(b)
     draw_icon(dl, open ? "chevDown" : "chevRight", (rnd(b.x0 + p(2)), rnd(mid - p(7))), 14; style = :dim)
     draw_text_mid(dl, FONT_SEMIBOLD, BODY_FONT_SIZE, b.x0 + p(2 + 14 + 6), mid, u32(t.text_dim), "Advanced")
-    clicked && set_advanced!(app, d.form.owner.id, !open)
+    clicked && (set_advanced!(app, d.form.owner.id, !open); recentre_dialog!(app, d))
     return nothing
 end
 
@@ -234,7 +235,7 @@ function import_file_rows!(app, d::ToolDialog, g::FormFlow)
     row_label!(app, b, "File")
     c = control(g, b)
     d.path_box = c
-    text = elide_start(f.path, width(c))
+    text = elide_start!(d.elided, f.path, width(c), s, t -> text_width(FONT_MONO, 12, t))
     with_font(FONT_MONO, 12) do
         ig.AddText(ig.GetWindowDrawList(), (round(c.x0), input_text_y(FONT_MONO, 12, centre_y(c))),
             u32(app.tokens.text), text)
@@ -247,16 +248,37 @@ function import_file_rows!(app, d::ToolDialog, g::FormFlow)
     return nothing
 end
 
-# `path` in mono 12, or as much of its end as fits in `max_width` after "...".
-function elide_start(path::AbstractString, max_width::Real)::String
-    w(t) = text_width(FONT_MONO, 12, t)
-    w(path) <= max_width && return String(path)
-    chars = collect(path)
-    for n in 2:length(chars)
-        cut = "..." * String(chars[n:end])
-        w(cut) <= max_width && return cut
+"""
+    ElideCache()
+
+The last path `elide_start!` cut, with its width and scale, so a dialog measures it once,
+not in every frame.
+"""
+mutable struct ElideCache
+    key::Tuple{String,Float32,Float32}
+    text::String
+end
+ElideCache() = ElideCache(("", -1f0, -1f0), "")
+
+"""
+    elide_start!(cache, path, max_width, scale, measure) -> String
+
+`path`, or as much of its end as fits in `max_width` after "...". `measure(text)` is the
+text's width; the answer is kept for the same path, width and scale (the fonts follow the scale).
+"""
+function elide_start!(cache::ElideCache, path::AbstractString, max_width::Real, scale::Real, measure)::String
+    key = (String(path), Float32(max_width), Float32(scale))
+    cache.key == key && return cache.text
+    text = if measure(path) <= max_width
+        String(path)
+    else
+        chars = collect(path)
+        k = findfirst(n -> measure("..." * String(chars[n:end])) <= max_width, 2:length(chars))
+        k === nothing ? "" : "..." * String(chars[k+1:end])
     end
-    return ""
+    cache.key = key
+    cache.text = text
+    return text
 end
 
 # The file of an export: a mono field and "Browse..." (a native save dialog).
@@ -391,12 +413,14 @@ function finish_ok!(app, d::ToolDialog, errors::Dict{String,String}, result)
     open = d in app.ui.dialogs
     title = form_title(f)
     if !isempty(errors)
-        open || (toast!(app, :error, errors[something(first_problem(f, errors))]); return nothing)
+        open || (toast!(app, :error, field_problem(f, errors)); return nothing)
         f.errors = errors
         key = first_problem(f, errors)
         st = key === nothing ? nothing : find_setting(f, key)
-        st !== nothing && st.advanced && !(f.owner.id in app.config.advanced_open) &&
+        if st !== nothing && st.advanced && !(f.owner.id in app.config.advanced_open)
             set_advanced!(app, f.owner.id, true)
+            recentre_dialog!(app, d)
+        end
         key === nothing || (d.focus = focus_key(f, key))
         return nothing
     end
@@ -431,6 +455,18 @@ function finish_ok!(app, d::ToolDialog, errors::Dict{String,String}, result)
         end
     end
     return nothing
+end
+
+# The first problem of a form that is no longer shown, with its field's name in front
+# unless the sentence starts with it ("Histogram bins: Type a number.").
+function field_problem(f::Form, errors::Dict{String,String})::String
+    key = something(first_problem(f, errors))
+    text = errors[key]
+    st = find_setting(f, key)
+    k = findfirst(x -> first(x) == key, form_inputs(f.owner))
+    label = st !== nothing ? st.label : k !== nothing ? KIND_WORDS[last(form_inputs(f.owner)[k])] :
+        key == "path" ? "File" : key
+    return startswith(text, label) ? text : "$label: $text"
 end
 
 # The first key with a problem, in the order the form shows them: inputs, the file, settings.
