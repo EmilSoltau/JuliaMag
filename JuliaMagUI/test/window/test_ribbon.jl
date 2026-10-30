@@ -2,6 +2,7 @@ using Test
 import CImGui as ig
 import ImGuiTestEngine as te
 import PNGFiles
+import GLFW
 import JuliaMagCore as Core
 import JuliaMagUI as UI
 using JuliaMagUI: LIGHT, DARK, THEME_LIGHT, THEME_DARK
@@ -9,24 +10,41 @@ using JuliaMagUI: LIGHT, DARK, THEME_LIGHT, THEME_DARK
 const RIBBON_SHOTS = joinpath(@__DIR__, "..", "shots")
 
 """
-    with_wide_tools(f, n)
+    with_tools(f, specs)
 
-Register `n` test tools with long names in a group "Wide test" of the Database tab, run
-`f()`, and take them out again. The real Database tab fits in 900 px; these make it wider.
+Register the test tools `specs`, run `f()`, and take them out again, all of them, also
+when a register or an unregister throws (the first error is thrown again at the end).
 """
-function with_wide_tools(f, n::Integer)
-    ids = ["test.wide.$k" for k in 1:n]
-    for (k, id) in enumerate(ids)
-        Core.register_tool!(Core.ToolSpec(id, "Wide test tool number $k", "A test tool.", "math",
-            [Core.Place("Database", "Wide test")], ["database" => Core.ITEM_DATABASE],
-            Core.SettingSpec[], :quick, (s, ins, st, progress, report) -> nothing))
-    end
+function with_tools(f, specs::Vector{Core.ToolSpec})
     try
+        foreach(Core.register_tool!, specs)
         return f()
     finally
-        foreach(Core.unregister_tool!, ids)
+        failure = nothing
+        for spec in specs
+            try
+                Core.unregister_tool!(spec.id)
+            catch e
+                failure === nothing && (failure = e)
+            end
+        end
+        failure === nothing || throw(failure)
     end
 end
+
+test_tool(id, name, places) = Core.ToolSpec(id, name, "A test tool.", "math", places,
+    ["database" => Core.ITEM_DATABASE], Core.SettingSpec[], :quick,
+    (s, ins, st, progress, report) -> nothing)
+
+"""
+    with_wide_tools(f, n)
+
+`n` test tools with long names in a group "Wide test" of the Database tab, around `f()`.
+The real Database tab fits in 900 px; these make it wider.
+"""
+with_wide_tools(f, n::Integer) =
+    with_tools(f, [test_tool("test.wide.$k", "Wide test tool number $k", [Core.Place("Database", "Wide test")])
+                   for k in 1:n])
 
 """
     request_log() -> (log, app_ref, hook)
@@ -148,11 +166,60 @@ window_testset("ribbon") do
             ctx.frames(1)
             @test app.ui.current_db == second && app.ui.menu === nothing
             @test UI.chooser_note(app) == "1 line, 1 channel"
+            # The rows follow the project while the menu is open.
+            ctx.click("JuliaMag/ribbon/Active database")
+            ctx.frames(1)
+            @test length(app.ui.menu.items) == 2
+            Core.remove_item!(s, second)
+            ctx.wait_until(() -> !haskey(app.snap.databases, second); timeout = 5)
+            ctx.frames(2)
+            m = app.ui.menu
+            @test m isa UI.OpenMenu && [it.label for it in m.items] == ["Kangaroo Hills 2024"]
+            @test app.ui.current_db == first_db && only(m.items).checked
+            ctx.key("Escape")
+        end
+    end
+
+    @testset "a command placed twice on one tab gets two ids" begin
+        log, app_ref, hook = request_log()
+        twice = test_tool("test.twice", "Twice tool",
+            [Core.Place("Database", "Twice A"), Core.Place("Database", "Twice B")])
+        with_tools([twice]) do
+            with_project_app(kangaroo(); extra_ui = hook) do ctx, app
+                app_ref[] = app
+                ctx.frames(2)
+                @test exists("JuliaMag/ribbon/Twice Tool") && exists("JuliaMag/ribbon/Twice Tool##2")
+                ctx.click("JuliaMag/ribbon/Twice Tool")
+                ctx.click("JuliaMag/ribbon/Twice Tool##2")
+                ctx.wait_until(() -> count(r -> r isa UI.OpenToolDialog, log) == 2; timeout = 5)
+                @test all(r -> r.id == "test.twice", filter(r -> r isa UI.OpenToolDialog, log))
+            end
+        end
+    end
+
+    @testset "without a database the chooser is greyed and says why" begin
+        with_project_app(fresh_session()) do ctx, app
+            te.MouseMove("JuliaMag/ribbon/Active database")
+            ctx.wait_until(() -> app.ui.tip !== nothing; timeout = 5)
+            tip = app.ui.tip
+            @test tip.title == "Active database" && tip.reason == "Import line data first." &&
+                  tip.id == "database.choose"
+            ctx.click("JuliaMag/ribbon/Active database")
+            ctx.frames(1)
+            @test app.ui.menu === nothing
+            te.MouseMoveToPos((700f0, 600f0))
+            ctx.frames(2)
+            path = ctx.shot(joinpath(RIBBON_SHOTS, "ribbon-chooser-disabled-light.png"))
+            img = PNGFiles.load(path)
+            at(x, y) = rgb255(img[y+1, x+1])
+            # The caret is greyed like the icon and the text.
+            @test near(at(170, 101), rgb255(LIGHT.text_disabled); tol = 3)
+            @test near(at(13, 102), rgb255(LIGHT.input); tol = 2)
         end
     end
 
     @testset "at 900 px the arrows and the wheel scroll the ribbon" begin
-        with_wide_tools(10) do
+        with_wide_tools(12) do
             with_project_app(kangaroo(); size = (900, 560)) do ctx, app
                 ui = app.ui
                 left, right = "JuliaMag/ribbon/Scroll the ribbon left", "JuliaMag/ribbon/Scroll the ribbon right"
@@ -176,6 +243,15 @@ window_testset("ribbon") do
                 te.MouseWheelY(1f0)
                 ctx.frames(2)
                 @test ui.ribbon_scroll ≈ step + 100
+                # The horizontal wheel: ImGui's MouseWheelH > 0 scrolls left.
+                te.MouseMoveToPos((450f0, 120f0))
+                te.MouseWheelX(1f0)
+                ctx.frames(2)
+                @test ui.ribbon_scroll ≈ step
+                te.MouseWheelX(-1f0)
+                ctx.frames(2)
+                @test ui.ribbon_scroll ≈ step + 100
+                te.MouseMoveToPos((450f0, 300f0))
                 path = ctx.shot(joinpath(RIBBON_SHOTS, "ribbon-900-scrolled.png"))
 
                 # At the end the right arrow goes; another tab starts at 0.
@@ -185,6 +261,26 @@ window_testset("ribbon") do
                     ctx.click(right)
                 end
                 @test !exists(right) && exists(left) && ui.ribbon_scroll > step
+
+                # The window grows back: the scroll settles on the new end.
+                ctx.on_render(w -> GLFW.SetWindowSize(w.handle, 1480, 920))
+                ctx.wait_until(timeout = 5) do
+                    got = Ref((0, 0))
+                    ctx.on_render(w -> (got[] = Tuple(GLFW.GetWindowSize(w.handle))))
+                    got[] == (1480, 920)
+                end
+                ctx.frames(3)
+                total = sum(ui.ribbon_cache.group_widths)
+                @test total > 1480 - 16   # still wider than the window
+                @test ui.ribbon_scroll ≈ total - (1480 - 16)
+                @test !exists(right) && exists(left)
+                ctx.on_render(w -> GLFW.SetWindowSize(w.handle, 900, 560))
+                ctx.wait_until(timeout = 5) do
+                    got = Ref((0, 0))
+                    ctx.on_render(w -> (got[] = Tuple(GLFW.GetWindowSize(w.handle))))
+                    got[] == (900, 560)
+                end
+                ctx.frames(3)
                 ctx.click("JuliaMag/tabs/Help")
                 ctx.frames(1)
                 @test ui.ribbon_scroll == 0

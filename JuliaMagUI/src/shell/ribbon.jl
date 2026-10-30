@@ -64,6 +64,10 @@ const RIBBON_FIRST_GROUPS = Dict(
     "Grid and Image" => ["Import", "Export"],
 )
 
+# Does `c` at place `p` become a split button?
+is_split(c::Command, p::Core.Place) =
+    p.size !== :small && !haskey(RIBBON_CUSTOM, c.id) && !isempty(c.menu)
+
 """
     ribbon_layout(cmds, tab) -> Vector{RibbonGroup}
 
@@ -88,7 +92,8 @@ function ribbon_layout(cmds::AbstractVector{Command}, tab::AbstractString)::Vect
     groups = RibbonGroup[]
     for name in order
         mine = [e for e in entries if e[2].group == name]
-        in_menu = Set(id for (c, _, _) in mine for id in c.menu)
+        # Only the menu of a command that becomes a split button hides commands.
+        in_menu = Set(id for (c, p, _) in mine if is_split(c, p) for id in c.menu)
         filter!(e -> !(e[1].id in in_menu), mine)
         sort!(mine; by = e -> (e[2].order, e[3]))
         items = RibbonItem[]
@@ -104,7 +109,7 @@ function ribbon_layout(cmds::AbstractVector{Command}, tab::AbstractString)::Vect
                 push!(column, c.id)
             else
                 flush()
-                push!(items, isempty(c.menu) ? BigButton(c.id) : SplitButton(c.id))
+                push!(items, is_split(c, p) ? SplitButton(c.id) : BigButton(c.id))
             end
         end
         flush()
@@ -114,10 +119,21 @@ function ribbon_layout(cmds::AbstractVector{Command}, tab::AbstractString)::Vect
 end
 
 # --- Sizes ---
+#
+# Widths and drawing offsets both use logical px times the scale with no rounding per
+# constant (`fpx`). A browser adds such lengths up as fractions and snaps only the edges it
+# paints; the drawing does the same with `snap`. So a width is exactly the drawn width.
 
 const RIBBON_LABEL_SIZE = 11.5f0
 const GROUP_LABEL_SIZE = 11f0
 const CHOOSER_LABEL = "Acts on"
+
+"`v` logical px at `scale`, in device px, not rounded."
+fpx(scale::Real, v::Real) = Float32(v) * Float32(scale)
+
+"Round half up, as a browser snaps the edges it paints."
+rnd(v::Real) = round(Float32(v), RoundNearestTiesUp)
+snap(b::Box) = Box(rnd(b.x0), rnd(b.y0), rnd(b.x1), rnd(b.y1))
 
 # The text of a small button: the label on one line.
 small_label(label::AbstractString) = replace(label, '\n' => ' ')
@@ -138,33 +154,38 @@ label. `note` is the text under the "Acts on" chooser.
 - chooser: 4 + max(170, "Acts on" + 1, note up to 180) + 4.
 """
 function item_width(item::BigButton, measure; label = identity, scale::Real = 1, note = "")::Float32
-    return max(widest_line(measure, label(item.cmd_id)) + px(scale, 14), px(scale, 50))
+    return max(widest_line(measure, label(item.cmd_id)) + fpx(scale, 14), fpx(scale, 50))
 end
 
 item_width(item::SplitButton, measure; label = identity, scale::Real = 1, note = "")::Float32 =
-    item_width(BigButton(item.cmd_id), measure; label, scale) + px(scale, 20)
+    item_width(BigButton(item.cmd_id), measure; label, scale) + fpx(scale, 20)
 
 item_width(item::SmallColumn, measure; label = identity, scale::Real = 1, note = "")::Float32 =
-    maximum(px(scale, 26) + measure(small_label(label(id)), RIBBON_LABEL_SIZE) + px(scale, 8)
+    maximum(fpx(scale, 26) + measure(small_label(label(id)), RIBBON_LABEL_SIZE) + fpx(scale, 8)
             for id in item.cmd_ids)
 
 function item_width(item::Custom, measure; label = identity, scale::Real = 1, note = "")::Float32
-    item.kind === :db_chooser || throw(ArgumentError("no ribbon item :$(item.kind)"))
-    note_w = isempty(note) ? 0f0 : min(Float32(measure(note, GROUP_LABEL_SIZE)), px(scale, 180))
-    inner = max(px(scale, 170), measure(CHOOSER_LABEL, GROUP_LABEL_SIZE) + px(scale, 1), note_w)
-    return inner + px(scale, 8)
+    check_custom(item)
+    note_w = isempty(note) ? 0f0 : min(Float32(measure(note, GROUP_LABEL_SIZE)), fpx(scale, 180))
+    inner = max(fpx(scale, 170), measure(CHOOSER_LABEL, GROUP_LABEL_SIZE) + fpx(scale, 1), note_w)
+    return inner + fpx(scale, 8)
 end
+
+# The custom items the ribbon knows. Another kind is an error, when sized and when drawn.
+check_custom(item::Custom) =
+    item.kind === :db_chooser || throw(ArgumentError("no ribbon item :$(item.kind)"))
 
 """
     group_content_width(g, measure; label = identity, scale = 1, note = "") -> Float32
 
 The width of the items of group `g` with 2 px between, or of its label + 12 when that is wider.
 """
-function group_content_width(g::RibbonGroup, measure; label = identity, scale::Real = 1,
-        note = "")::Float32
-    items = sum(item_width(it, measure; label, scale, note) for it in g.items) +
-            px(scale, 2) * (length(g.items) - 1)
-    return max(items, measure(g.name, GROUP_LABEL_SIZE) + px(scale, 12))
+group_content_width(g::RibbonGroup, measure; label = identity, scale::Real = 1, note = "")::Float32 =
+    content_width(g, [item_width(it, measure; label, scale, note) for it in g.items], measure, scale)
+
+function content_width(g::RibbonGroup, widths::AbstractVector{Float32}, measure, scale::Real)::Float32
+    items = sum(widths) + fpx(scale, 2) * (length(widths) - 1)
+    return max(items, measure(g.name, GROUP_LABEL_SIZE) + fpx(scale, 12))
 end
 
 """
@@ -174,7 +195,7 @@ The width a group takes in the ribbon: its content, 7 px, the 1 px separator, 6 
 2 px to the next group (the prototype's `.rg` padding and margin).
 """
 group_width(g::RibbonGroup, measure; label = identity, scale::Real = 1, note = "")::Float32 =
-    group_content_width(g, measure; label, scale, note) + px(scale, 16)
+    group_content_width(g, measure; label, scale, note) + fpx(scale, 16)
 
 "How far the ribbon can scroll: the groups' width past the view, or 0."
 ribbon_scroll_max(total::Real, view::Real)::Float32 = max(0f0, Float32(total) - Float32(view))
@@ -188,7 +209,7 @@ ribbon_arrows(scroll::Real, scroll_max::Real) =
     (scroll_max >= 1 && scroll > 0.5, scroll_max >= 1 && scroll < scroll_max - 0.5)
 
 "The distance an arrow click scrolls: 60 % of the view, at least 120 px."
-ribbon_scroll_step(view::Real, scale::Real)::Float32 = max(px(scale, 120), Float32(view) * 0.6f0)
+ribbon_scroll_step(view::Real, scale::Real)::Float32 = max(fpx(scale, 120), Float32(view) * 0.6f0)
 
 """
     chooser_note(app) -> String
@@ -205,16 +226,89 @@ function chooser_note(app)::String
     return string(n, n == 1 ? " line, " : " lines, ", m, m == 1 ? " channel" : " channels")
 end
 
+"""
+    choose_database!(app, id) -> Bool
+
+Make database `id` the one the Database tab acts on, when the snapshot has it.
+A pick from a menu made before the database went away does nothing.
+"""
+function choose_database!(app, id::AbstractString)::Bool
+    any(it -> it.kind == Core.ITEM_DATABASE && it.id == id, snap_items(app)) || return false
+    app.ui.current_db = String(id)
+    return true
+end
+
+"The rows of the chooser's menu: the project's databases, the current one checked."
+chooser_items(app)::Vector{MenuItem} =
+    [MenuItem(it.name; checked = it.id == app.ui.current_db,
+              action = a -> (choose_database!(a, it.id); nothing))
+     for it in snap_items(app) if it.kind == Core.ITEM_DATABASE]
+
+# --- The cached model ---
+
+"""
+    RibbonModel
+
+What the ribbon of one tab needs that does not change from frame to frame: the commands
+by id, the groups and the widths of every item and group (device px). Its key is the
+command list (a new list when the registry or the project changes), the tab, the scale,
+the loaded fonts, the theme and the chooser note (the only text that comes from the
+snapshot). Whether a command can run is not cached: the drawing asks every frame.
+"""
+struct RibbonModel
+    cmds::Vector{Command}
+    tab::String
+    scale::Float32
+    fonts::Any
+    tokens::Any
+    note::String
+    byid::Dict{String,Command}
+    groups::Vector{RibbonGroup}
+    item_widths::Vector{Vector{Float32}}
+    group_widths::Vector{Float32}
+end
+
+"""
+    ribbon_model!(app, cmds, tab, scale, fonts, note, measure) -> RibbonModel
+
+The model for this key, from `app.ui.ribbon_cache` when the key is the same, else built
+with `measure(text, size)` and cached.
+"""
+function ribbon_model!(app, cmds::Vector{Command}, tab::AbstractString, scale::Real, fonts,
+        note::AbstractString, measure)::RibbonModel
+    m = app.ui.ribbon_cache
+    if m isa RibbonModel && m.cmds === cmds && m.tab == tab && m.scale == scale &&
+            m.fonts === fonts && m.tokens === app.tokens && m.note == note
+        return m
+    end
+    byid = Dict(c.id => c for c in cmds)
+    groups = ribbon_layout(cmds, tab)
+    label(id) = byid[id].label
+    item_widths = [[item_width(it, measure; label, scale, note) for it in g.items] for g in groups]
+    group_widths = [content_width(g, w, measure, scale) + fpx(scale, 16)
+                    for (g, w) in zip(groups, item_widths)]
+    m = RibbonModel(cmds, String(tab), Float32(scale), fonts, app.tokens, String(note), byid,
+        groups, item_widths, group_widths)
+    app.ui.ribbon_cache = m
+    return m
+end
+
 # --- Drawing ---
-#
-# Offsets inside the ribbon are logical px times the scale, not rounded one by one: a
-# browser adds them up as fractions and snaps only the edges it paints. `snap` rounds a
-# box at the end, half up as a browser does.
 
 const RIBBON_WHEEL_STEP = 100   # logical px per wheel step, as a browser scrolls
 
-rnd(v::Real) = round(Float32(v), RoundNearestTiesUp)
-snap(b::Box) = Box(rnd(b.x0), rnd(b.y0), rnd(b.x1), rnd(b.y1))
+# What the items of one frame share: the model, and the ids given out so far, so a command
+# placed twice on a tab gets "Name" and then "Name##2".
+struct RibbonFrame
+    model::RibbonModel
+    ids::Dict{String,Int}
+end
+
+function unique_id!(frame::RibbonFrame, name::String)::String
+    n = get(frame.ids, name, 0) + 1
+    frame.ids[name] = n
+    return n == 1 ? name : name * "##" * string(n)
+end
 
 """
     draw_ribbon(app, dl, b)
@@ -229,18 +323,14 @@ function draw_ribbon(app, dl, b::Box)
     s = w.scale
     t = app.tokens
     ui = app.ui
-    p(v) = px(s, v)
-    f(v) = Float32(v) * s
+    f(v) = fpx(s, v)
     hl = hairline(s)
-    cmds = commands(app)
-    byid = Dict(c.id => c for c in cmds)
-    groups = ribbon_layout(cmds, ui.tab)
-    label(id) = byid[id].label
-    measure(text, size) = text_width(FONT_REGULAR, size, text)
-    note = chooser_note(app)
-    widths = [group_width(g, measure; label, scale = s, note) for g in groups]
-    view = Box(b.x0 + p(8), b.y0, b.x1 - p(8), b.y1 - hl)
-    smax = ribbon_scroll_max(sum(widths; init = 0f0), width(view))
+    fonts = get(LOADED_FONTS, ig.GetCurrentContext(), nothing)
+    model = ribbon_model!(app, commands(app), ui.tab, s, fonts, chooser_note(app),
+        (text, size) -> text_width(FONT_REGULAR, size, text))
+    frame = RibbonFrame(model, Dict{String,Int}())
+    view = Box(b.x0 + f(8), b.y0, b.x1 - f(8), b.y1 - hl)
+    smax = ribbon_scroll_max(sum(model.group_widths; init = 0f0), width(view))
 
     # The scroll position: kept on the same tab, 0 on another, and moved by the wheel.
     if ui.ribbon_scroll_tab != ui.tab
@@ -253,7 +343,7 @@ function draw_ribbon(app, dl, b::Box)
             io = ig.GetIO()
             wheel = unsafe_load(io.MouseWheel)
             wheel == 0 && (wheel = unsafe_load(io.MouseWheelH))
-            ui.ribbon_scroll -= wheel * p(RIBBON_WHEEL_STEP)
+            ui.ribbon_scroll -= wheel * f(RIBBON_WHEEL_STEP)
         end
     end
     ui.ribbon_scroll = clamp(ui.ribbon_scroll, 0f0, smax)
@@ -265,8 +355,8 @@ function draw_ribbon(app, dl, b::Box)
     step = ribbon_scroll_step(width(view), s)
     for (left, shown) in ((true, show_left), (false, show_right))
         shown || continue
-        x0 = left ? b.x0 + p(8) : b.x1 - p(8 + 18)
-        ab = snap(Box(x0, b.y0 + f(5), x0 + p(18), b.y1 - hl - f(4)))
+        x0 = left ? b.x0 + f(8) : b.x1 - f(8 + 18)
+        ab = snap(Box(x0, b.y0 + f(5), x0 + f(18), b.y1 - hl - f(4)))
         name = left ? "Scroll the ribbon left" : "Scroll the ribbon right"
         clicked, hovered, _ = hit(name, ab)
         clicked && (ui.ribbon_scroll = clamp(ui.ribbon_scroll + (left ? -step : step), 0f0, smax))
@@ -277,46 +367,47 @@ function draw_ribbon(app, dl, b::Box)
     ig.PushClipRect((view.x0, view.y0), (view.x1, view.y1), true)
     x = view.x0 - ui.ribbon_scroll
     top = b.y0 + f(5)
-    for (k, (g, gw)) in enumerate(zip(groups, widths))
+    n = length(model.groups)
+    for k in 1:n
+        gw = model.group_widths[k]
         if x + gw > view.x0 && x < view.x1   # only groups in view
-            draw_group(app, dl, g, x, top, gw - p(16), byid, note; last = k == length(groups))
+            draw_group(app, dl, frame, k, x, top; last = k == n)
         end
         x += gw
     end
     ig.PopClipRect()
 
     for (ab, left, hovered) in arrows
-        ig.AddRectFilled(dl, (ab.x0, ab.y0), (ab.x1, ab.y1), u32(hovered ? t.hover : t.ribbon), p(4))
-        ig.AddRect(dl, (ab.x0, ab.y0), (ab.x1, ab.y1), u32(t.border), p(4), hl)
+        ig.AddRectFilled(dl, (ab.x0, ab.y0), (ab.x1, ab.y1), u32(hovered ? t.hover : t.ribbon), f(4))
+        ig.AddRect(dl, (ab.x0, ab.y0), (ab.x1, ab.y1), u32(t.border), f(4), hl)
         draw_icon(dl, left ? "chevLeft" : "chevRight",
-            (ab.x0 + (width(ab) - p(16)) / 2, ab.y0 + (height(ab) - p(16)) / 2), 16; style = :dim)
+            (ab.x0 + (width(ab) - px(s, 16)) / 2, ab.y0 + (height(ab) - px(s, 16)) / 2), 16;
+            style = :dim)
     end
     ig.PopID()
     return nothing
 end
 
-# One group at `x` (device px), its items `content` wide, then its label and separator.
-# `top` is the top of the items, not rounded.
-function draw_group(app, dl, g::RibbonGroup, x::Float32, top::Float32, content::Float32,
-        byid::Dict{String,Command}, note::String; last::Bool)
+# Group `k` of the model at `x` (device px), then its label and separator. `top` is the
+# top of the items, not rounded.
+function draw_group(app, dl, frame::RibbonFrame, k::Int, x::Float32, top::Float32; last::Bool)
     s = app.window.scale
     t = app.tokens
-    p(v) = px(s, v)
-    f(v) = Float32(v) * s
+    f(v) = fpx(s, v)
     hl = hairline(s)
-    label(id) = byid[id].label
-    measure(text, size) = text_width(FONT_REGULAR, size, text)
+    g = frame.model.groups[k]
+    widths = frame.model.item_widths[k]
+    content = frame.model.group_widths[k] - f(16)
     cx = x
-    for item in g.items
-        iw = item_width(item, measure; label, scale = s, note)
-        draw_item(app, dl, item, rnd(cx), top, rnd(cx + iw) - rnd(cx), byid, note)
-        cx += iw + p(2)
+    for (item, iw) in zip(g.items, widths)
+        draw_item(app, dl, item, rnd(cx), top, rnd(cx + iw) - rnd(cx), frame)
+        cx += iw + f(2)
     end
-    lw = measure(g.name, GROUP_LABEL_SIZE)
+    lw = text_width(FONT_REGULAR, GROUP_LABEL_SIZE, g.name)
     draw_text_mid(dl, FONT_REGULAR, GROUP_LABEL_SIZE, x + (content - lw) / 2, top + f(72 + 8),
         u32(t.group_label), g.name; line = 16 / 11)
     if !last
-        sx = rnd(x + content + p(7))
+        sx = rnd(x + content + f(7))
         ig.AddRectFilled(dl, (sx, rnd(top + f(6))), (sx + hl, rnd(top + f(86))), u32(t.border))
     end
     return nothing
@@ -326,46 +417,48 @@ end
 button_name(cmd::Command) = replace(cmd.name, r"\.\.\.$" => "")
 
 # Each item is drawn at `x` (rounded) and `top` (not rounded), `iw` wide (rounded).
-function draw_item(app, dl, item::BigButton, x, top, iw, byid, note)
-    cmd = byid[item.cmd_id]
-    draw_big_button(app, dl, cmd, Box(x, top, x + iw, top + 70f0 * app.window.scale))
+function draw_item(app, dl, item::BigButton, x, top, iw, frame::RibbonFrame)
+    cmd = frame.model.byid[item.cmd_id]
+    draw_big_button(app, dl, cmd, Box(x, top, x + iw, top + fpx(app.window.scale, 70)),
+        unique_id!(frame, button_name(cmd)))
     return nothing
 end
 
-function draw_item(app, dl, item::SplitButton, x, top, iw, byid, note)
+function draw_item(app, dl, item::SplitButton, x, top, iw, frame::RibbonFrame)
     s = app.window.scale
-    p(v) = px(s, v)
-    f(v) = Float32(v) * s
+    f(v) = fpx(s, v)
     hl = hairline(s)
     t = app.tokens
-    cmd = byid[item.cmd_id]
-    main = Box(x, top, x + iw - p(20), top + f(70))
-    left = Int(lib.ImDrawFlags_RoundLeft)
-    right = Int(lib.ImDrawFlags_RoundRight)
-    draw_big_button(app, dl, cmd, main; corners = left)
+    cmd = frame.model.byid[item.cmd_id]
+    main = Box(x, top, x + iw - f(20), top + f(70))
+    draw_big_button(app, dl, cmd, main, unique_id!(frame, button_name(cmd));
+        corners = Int(lib.ImDrawFlags_RoundLeft))
 
     # The arrow: opens the menu of formats.
     arrow = snap(Box(main.x1, top, x + iw, main.y1))
     reason = cmd.enabled(app)
     enabled = reason === nothing
     name = "More " * lowercase(small_label(cmd.label)) * " formats"
-    owner = cmd.id
+    id = unique_id!(frame, name)
+    owner = id == name ? cmd.id : cmd.id * "/" * id   # the menu's owner, unique on the tab
     open = menu_open(app, owner)
-    clicked, hovered, held = hit(name, arrow)
-    open && keep_menu!(app, owner, arrow)
-    draw_rb_fill(app, dl, arrow; enabled, hovered, held, on = open, corners = right)
+    clicked, hovered, held = hit(id, arrow)
+    open && keep_menu!(app, owner, arrow; items = split_menu_items(app, cmd, frame.model.byid))
+    draw_rb_fill(app, dl, arrow; enabled, hovered, held, on = open,
+        corners = Int(lib.ImDrawFlags_RoundRight))
     ig.AddRectFilled(dl, (arrow.x0, rnd(top + f(6))), (arrow.x0 + hl, rnd(top + f(70 - 6))),
         u32(t.border))
     draw_caret(dl, arrow.x0 + (width(arrow) - f(8)) / 2, top + f(70 - 5) / 2, s,
         u32(enabled ? t.text : t.text_disabled))
     if clicked && enabled
-        toggle_menu!(app, owner, arrow, () -> split_menu_items(app, cmd, byid))
+        toggle_menu!(app, owner, arrow, () -> split_menu_items(app, cmd, frame.model.byid))
     end
     hovered && item_tip!(app, name; help = "Pick another format.", reason, id = cmd.id)
     return nothing
 end
 
-# The rows of a split button's menu: one per command of its `menu`.
+# The rows of a split button's menu: one per command of its `menu`. Built again every
+# frame while the menu is open, so a row's reason stays current.
 function split_menu_items(app, cmd::Command, byid::Dict{String,Command})::Vector{MenuItem}
     items = MenuItem[]
     for id in cmd.menu
@@ -377,18 +470,21 @@ function split_menu_items(app, cmd::Command, byid::Dict{String,Command})::Vector
     return items
 end
 
-function draw_item(app, dl, item::SmallColumn, x, top, iw, byid, note)
+function draw_item(app, dl, item::SmallColumn, x, top, iw, frame::RibbonFrame)
     s = app.window.scale
-    y = top + 1f0 * s
+    y = top + fpx(s, 1)
     for id in item.cmd_ids
-        draw_small_button(app, dl, byid[id], Box(x, y, x + iw, y + 22f0 * s))
-        y += 23f0 * s
+        cmd = frame.model.byid[id]
+        draw_small_button(app, dl, cmd, Box(x, y, x + iw, y + fpx(s, 22)),
+            unique_id!(frame, button_name(cmd)))
+        y += fpx(s, 23)
     end
     return nothing
 end
 
-function draw_item(app, dl, item::Custom, x, top, iw, byid, note)
-    item.kind === :db_chooser && draw_db_chooser(app, dl, x, top, note)
+function draw_item(app, dl, item::Custom, x, top, iw, frame)
+    check_custom(item)
+    draw_db_chooser(app, dl, x, top, frame::RibbonFrame)
     return nothing
 end
 
@@ -420,23 +516,23 @@ function draw_caret(dl, x::Real, y::Real, scale::Real, col::UInt32)
 end
 
 """
-    draw_big_button(app, dl, cmd, b; corners = all)
+    draw_big_button(app, dl, cmd, b, id; corners = all)
 
-A big button (`.rb-big`) for `cmd` in box `b`: the 32 px icon centred at the top + 21, the
-label from the top + 42 in lines 13.5 px apart, centred. A click runs the command.
+A big button (`.rb-big`) for `cmd` in box `b`, with ImGui id `id`: the 32 px icon centred
+at the top + 21, the label from the top + 42 in lines 13.5 px apart, centred. A click runs
+the command.
 """
-function draw_big_button(app, dl, cmd::Command, b::Box;
+function draw_big_button(app, dl, cmd::Command, b::Box, id::String;
         corners::Integer = Int(lib.ImDrawFlags_RoundAll))
     s = app.window.scale
     t = app.tokens
-    p(v) = px(s, v)
-    f(v) = Float32(v) * s
+    f(v) = fpx(s, v)
     reason = cmd.enabled(app)
     enabled = reason === nothing
     sb = snap(b)
-    clicked, hovered, held = hit(button_name(cmd), sb)
+    clicked, hovered, held = hit(id, sb)
     draw_rb_fill(app, dl, sb; enabled, hovered, held, on = cmd.checked(app), corners)
-    draw_icon(dl, cmd.icon, (rnd(b.x0 + (width(b) - p(32)) / 2), rnd(b.y0 + f(5))), 32;
+    draw_icon(dl, cmd.icon, (rnd(b.x0 + (width(b) - px(s, 32)) / 2), rnd(b.y0 + f(5))), 32;
         style = enabled ? :normal : :disabled)
     pitch = f(13.5)
     col = u32(enabled ? t.text : t.text_disabled)
@@ -451,19 +547,19 @@ function draw_big_button(app, dl, cmd::Command, b::Box;
 end
 
 """
-    draw_small_button(app, dl, cmd, b)
+    draw_small_button(app, dl, cmd, b, id)
 
-A small button (`.rb-small`) for `cmd` in box `b`: the 18 px icon centred 13 px from the
-left, the label from the left + 26. A click runs the command.
+A small button (`.rb-small`) for `cmd` in box `b`, with ImGui id `id`: the 18 px icon
+centred 13 px from the left, the label from the left + 26. A click runs the command.
 """
-function draw_small_button(app, dl, cmd::Command, b::Box)
+function draw_small_button(app, dl, cmd::Command, b::Box, id::String)
     s = app.window.scale
     t = app.tokens
-    f(v) = Float32(v) * s
+    f(v) = fpx(s, v)
     reason = cmd.enabled(app)
     enabled = reason === nothing
     sb = snap(b)
-    clicked, hovered, held = hit(button_name(cmd), sb)
+    clicked, hovered, held = hit(id, sb)
     draw_rb_fill(app, dl, sb; enabled, hovered, held, on = cmd.checked(app))
     draw_icon(dl, cmd.icon, (rnd(b.x0 + f(4)), rnd(b.y0 + f(2))), 18;
         style = enabled ? :normal : :disabled)
@@ -474,19 +570,20 @@ function draw_small_button(app, dl, cmd::Command, b::Box)
     return nothing
 end
 
+const CHOOSER_ID = "database.choose"
+
 """
-    draw_db_chooser(app, dl, x, top, note)
+    draw_db_chooser(app, dl, x, top, frame)
 
 The "Acts on" chooser (`.rb-combo`): a small label, a 170 px combo of the project's
 databases with the database icon, and the note "N lines, M channels" in `text_dim`.
 Picking a database sets `app.ui.current_db`, the field the Data tree selection sets too.
 """
-function draw_db_chooser(app, dl, x::Real, top::Real, note::String)
+function draw_db_chooser(app, dl, x::Real, top::Real, frame::RibbonFrame)
     s = app.window.scale
     t = app.tokens
     ui = app.ui
-    p(v) = px(s, v)
-    f(v) = Float32(v) * s
+    f(v) = fpx(s, v)
     hl = hairline(s)
     x, top = Float32(x), Float32(top)
     label_h = f(11 * 1.25)   # the label's line box: `normal` line height for Inter
@@ -498,39 +595,40 @@ function draw_db_chooser(app, dl, x::Real, top::Real, note::String)
     enabled = reason === nothing
     cy = top + f(3) + label_h + f(3)
     cb = snap(Box(x + f(4), cy, x + f(4 + 170), cy + f(22)))
-    owner = "database.choose"
+    id = unique_id!(frame, "Active database")
+    owner = id == "Active database" ? CHOOSER_ID : CHOOSER_ID * "/" * id
     open = menu_open(app, owner)
-    clicked, hovered, _ = hit("Active database", cb)
-    open && keep_menu!(app, owner, cb)
+    clicked, hovered, _ = hit(id, cb)
+    open && keep_menu!(app, owner, cb; items = chooser_items(app))
     on = enabled && hovered
-    ig.AddRectFilled(dl, (cb.x0, cb.y0), (cb.x1, cb.y1), u32(on ? t.hover : t.input), p(5))
+    ig.AddRectFilled(dl, (cb.x0, cb.y0), (cb.x1, cb.y1), u32(on ? t.hover : t.input), px(s, 5))
     edge = open ? t.accent : on ? t.border_strong : t.input_border
-    ig.AddRect(dl, (cb.x0, cb.y0), (cb.x1, cb.y1), u32(edge), p(5), hl)
+    ig.AddRect(dl, (cb.x0, cb.y0), (cb.x1, cb.y1), u32(edge), px(s, 5), hl)
     if open   # the focus ring: a second accent line outside the border
-        ig.AddRect(dl, (cb.x0 - hl, cb.y0 - hl), (cb.x1 + hl, cb.y1 + hl), u32(t.accent), p(5) + hl, hl)
+        ig.AddRect(dl, (cb.x0 - hl, cb.y0 - hl), (cb.x1 + hl, cb.y1 + hl), u32(t.accent),
+            px(s, 5) + hl, hl)
     end
     mid = centre_y(cb)
     ix = cb.x0 + hl + f(8)
     draw_icon(dl, "database", (rnd(ix), rnd(mid - f(7))), 14; style = enabled ? :normal : :disabled)
     caret_x = cb.x1 - hl - f(7 + 8)
-    draw_caret(dl, caret_x, mid - f(5) / 2, s, u32(t.text_dim))
+    draw_caret(dl, caret_x, mid - f(5) / 2, s, u32(enabled ? t.text_dim : t.text_disabled))
     k = findfirst(it -> it.id == ui.current_db, dbs)
     name = k === nothing ? "No database" : dbs[k].name
     tx = ix + f(14 + 6)
     name = elide(text_width, name, caret_x - f(6) - tx; size = RIBBON_LABEL_SIZE)
     draw_text_mid(dl, FONT_REGULAR, RIBBON_LABEL_SIZE, tx, mid,
         u32(enabled ? t.text : t.text_disabled), name)
-    if clicked && enabled
-        toggle_menu!(app, owner, cb, () -> [MenuItem(it.name; checked = it.id == ui.current_db,
-            action = a -> (a.ui.current_db = it.id; nothing)) for it in dbs]; min_width = 170)
-    end
-    cmd = find_command(app, owner)
-    hovered && cmd !== nothing && item_tip!(app, "Active database"; help = cmd.help, reason, id = owner)
+    clicked && enabled && toggle_menu!(app, owner, cb, () -> chooser_items(app); min_width = 170)
+    cmd = get(frame.model.byid, CHOOSER_ID, nothing)
+    hovered && item_tip!(app, "Active database"; help = cmd === nothing ? "" : cmd.help, reason,
+        id = CHOOSER_ID)
 
+    note = frame.model.note
     if !isempty(note)
         note_top = cy + f(22 + 3 + 4)
         draw_text_mid(dl, FONT_REGULAR, GROUP_LABEL_SIZE, x + f(8), note_top + f(14) / 2,
-            u32(t.text_dim), elide(text_width, note, p(180); size = GROUP_LABEL_SIZE); line = 14 / 11)
+            u32(t.text_dim), elide(text_width, note, f(180); size = GROUP_LABEL_SIZE); line = 14 / 11)
     end
     return nothing
 end

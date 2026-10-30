@@ -123,16 +123,19 @@ function toggle_menu!(app, owner::AbstractString, anchor::Box, items; min_width:
 end
 
 """
-    keep_menu!(app, owner, anchor)
+    keep_menu!(app, owner, anchor; items = nothing)
 
 Called by a control in each frame it is drawn: when its menu is open, the menu stays open
-and follows the control's box `anchor` (a scrolled ribbon moves it).
+and follows the control's box `anchor` (a scrolled ribbon moves it). `items` replaces the
+rows, so a menu whose rows come from the project stays current while it is open.
 """
-function keep_menu!(app, owner::AbstractString, anchor::Box)
+function keep_menu!(app, owner::AbstractString, anchor::Box;
+        items::Union{Nothing,Vector{MenuItem}} = nothing)
     m = app.ui.menu
     if m isa OpenMenu && m.owner == owner
         m.anchor = anchor
         m.seen = true
+        items === nothing || (m.items = items)
     end
     return nothing
 end

@@ -296,6 +296,8 @@ What the UI shows and where, apart from the project data. Changed on the render 
 - `ribbon_scroll`: how far the ribbon is scrolled to the left, in device pixels, on tab
   `ribbon_scroll_tab`; another tab starts at 0.
 - `menu`: the open drop-down menu (an `OpenMenu`, see menu.jl), or `nothing`.
+- `ribbon_cache`: the ribbon's layout and widths for the last key (a `RibbonModel`, see
+  ribbon.jl), or `nothing`.
 """
 Base.@kwdef mutable struct UiState
     tab::String = "Database"
@@ -321,6 +323,7 @@ Base.@kwdef mutable struct UiState
     ribbon_scroll::Float32 = 0f0
     ribbon_scroll_tab::String = ""
     menu::Any = nothing
+    ribbon_cache::Any = nothing
 end
 
 """

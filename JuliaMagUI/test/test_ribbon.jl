@@ -3,7 +3,8 @@ import JuliaMagCore as Core
 import JuliaMagUI as UI
 using JuliaMagUI: RibbonGroup, RibbonItem, BigButton, SplitButton, SmallColumn, Custom,
     ribbon_layout, item_width, group_width, commands, Command, ribbon_scroll_max,
-    ribbon_arrows, ribbon_scroll_step, chooser_note, menu_layout, MenuItem, Box, width
+    ribbon_arrows, ribbon_scroll_step, chooser_note, menu_layout, MenuItem, Box, width,
+    ribbon_model!, chooser_items, choose_database!
 
 # Text widths without fonts: 7 px per character at scale 1.
 measure7(text, size) = 7f0 * length(text)
@@ -82,6 +83,14 @@ fake_command(id, places; label = id, menu = String[]) =
         g = ribbon_layout(cmds, "T")
         @test g[1] == RibbonGroup("Import", RibbonItem[SplitButton("split")])
         @test g[2].items == [SmallColumn(["fmt.a"])]
+        # A command with a menu that is small (or custom) is no split button: it hides nothing.
+        small = [
+            fake_command("fmt.a", [Core.Place("T", "G"; size = :small)]),
+            fake_command("lister", [Core.Place("T", "G"; size = :small)]; menu = ["fmt.a"]),
+            fake_command("database.choose", [Core.Place("T", "G")]; menu = ["fmt.a"]),
+        ]
+        @test ribbon_layout(small, "T")[1].items ==
+              [SmallColumn(["fmt.a", "lister"]), Custom(:db_chooser)]
     end
 
     @testset "items compare by value" begin
@@ -129,6 +138,77 @@ fake_command(id, places; label = id, menu = String[]) =
                   1.5f0 * item_width(item, measure7; label = id -> get(label, id, id))
         end
         @test group_width(g, measure15; label = lab, scale = 1.5) == 1.5f0 * group_width(g, measure7; label = lab)
+        # An odd constant: the chooser's label + 1 wins when the label is long. At scale 1.5
+        # the 1 px is 1.5 px, not a rounded 2.
+        long(t, s) = t == "Acts on" ? 200f0 : 7f0 * length(t)
+        @test item_width(Custom(:db_chooser), long) == 8 + 200 + 1
+        @test item_width(Custom(:db_chooser), (t, s) -> 1.5f0 * long(t, s); scale = 1.5) ==
+              1.5f0 * (8 + 200 + 1)
+        # At scale 1.25 too, with no rounding piling up across items.
+        m125(t, s) = 1.25f0 * measure7(t, s)
+        @test group_width(g, m125; label = lab, scale = 1.25) == 1.25f0 * group_width(g, measure7; label = lab)
+    end
+
+    @testset "an unknown custom item is an error when sized and when drawn" begin
+        @test_throws ArgumentError item_width(Custom(:nope), measure7)
+        @test_throws ArgumentError UI.draw_item(nothing, nothing, Custom(:nope), 0f0, 0f0, 0f0, nothing)
+    end
+
+    @testset "the layout and widths are cached until their key changes" begin
+        with_app(app_with_database()) do app
+            cmds = commands(app)
+            calls = Ref(0)
+            m(t, s) = (calls[] += 1; 7f0 * length(t))
+            build(; tab = "Database", scale = 1f0, fonts = :f1, note = "x", cmds = cmds) =
+                ribbon_model!(app, cmds, tab, scale, fonts, note, m)
+            a = build()
+            n = calls[]
+            @test n > 0
+            @test build() === a && calls[] == n   # same key: nothing measured again
+            @test a.groups == ribbon_layout(cmds, "Database")
+            @test a.byid["import.database"] === cmds[findfirst(c -> c.id == "import.database", cmds)]
+            @test length(a.group_widths) == length(a.groups) &&
+                  all(length(w) == length(g.items) for (w, g) in zip(a.item_widths, a.groups))
+            for changed in (build(; tab = "Coordinates"), build(; scale = 1.5f0), build(; fonts = :f2),
+                    build(; note = "y"), build(; cmds = copy(cmds)))
+                @test changed !== a
+                a = changed
+            end
+            # The theme is part of the key as well.
+            b = build(; cmds = a.cmds)
+            app.tokens = UI.DARK
+            @test build(; cmds = a.cmds) !== b
+            # A new command list (a tool registered) gives a new model.
+            id = "test.cache.tool"
+            Core.register_tool!(Core.ToolSpec(id, "Cache test", "", "math", [Core.Place("Database", "Cache")],
+                ["database" => Core.ITEM_DATABASE], Core.SettingSpec[], :quick, (s, i, st, p, r) -> nothing))
+            try
+                c = build(; cmds = commands(app))
+                @test any(g -> g.name == "Cache", c.groups)
+            finally
+                Core.unregister_tool!(id)
+            end
+        end
+    end
+
+    @testset "chooser rows and picks follow the snapshot" begin
+        s = session_with(lines = 2, channels = 2)
+        second = add_test_database!(s, ["MAG" => [1.0, 2.0]])
+        with_app(test_app_state(s)) do app
+            refresh_now!(app)
+            UI.sync_current_db!(app)
+            first_db = app.ui.current_db
+            rows = chooser_items(app)
+            @test [r.checked for r in rows] == [true, false] && rows[2].label == second
+            stale = rows[2].action
+            # The second database goes away while the menu is open.
+            Core.remove_item!(s, second)
+            refresh_now!(app)
+            @test length(chooser_items(app)) == 1
+            stale(app)   # a pick of the removed database does nothing
+            @test app.ui.current_db == first_db
+            @test !choose_database!(app, second) && choose_database!(app, first_db)
+        end
     end
 
     @testset "scrolling" begin
