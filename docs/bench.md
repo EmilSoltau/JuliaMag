@@ -204,7 +204,8 @@ JULIA_NUM_THREADS=4 julia --project=JuliaMagCore bench/import_xyz.jl 500 --csv
 
 `bench/ui_startup.jl` measures how long the app takes to show its first frame.
 It starts a fresh process `julia -t auto,1 --project=JuliaMagUI` three times.
-Each process times `using JuliaMagUI` and the first frame that `main()` draws, and then quits.
+Each process times `using JuliaMagUI` and the end of the first frame that `main()` shows, and then quits.
+The first frame ends when it is drawn and its buffer is swapped; the script reads the time when the second frame starts.
 The package is precompiled before the runs, so the numbers are for a warm package cache.
 Each run uses an empty settings folder, so the theme follows the system.
 
@@ -215,12 +216,12 @@ Run of 2026-10-30 on the machine above, on WSLg (`DISPLAY=:0`), median of three 
 | Step | Time |
 |---|---|
 | Process start until Julia runs the script | 0.12 s |
-| `using JuliaMagUI` | 1.86 s |
-| `main()` until its first frame | 0.25 s |
-| Process start until the first frame | 2.24 s |
+| `using JuliaMagUI` | 1.90 s |
+| `main()` until its first frame is shown | 0.27 s |
+| Process start until the first frame | 2.29 s |
 
 The target is under 4 s from process start to the first frame.
-The measured 2.24 s meets it.
+The measured 2.29 s meets it.
 Most of `using JuliaMagUI` is `JuliaMagCore`: loading the core alone takes about 1.7 s.
 
 ### Findings
@@ -230,9 +231,10 @@ Most of `using JuliaMagUI` is `JuliaMagCore`: loading the core alone takes about
 - `JuliaMagUI` now has a PrecompileTools workload.
   It draws a frame with no window (style, fonts and the empty app) and compiles the window code without running it.
   It needs no display, so it also works on a build machine.
-  The first frame now comes 0.25 s after `using`.
+  The first frame is now shown 0.27 s after `using`.
 - The first frame is not always this fast.
   In a series of six runs it took 0.25, 0.25, 0.61, 0.95, 0.45 and 0.98 s, and the total stayed under 3 s.
+  That series timed the start of the first frame, before its swap, which is about 20 ms earlier.
   The first runs of a series are the fast ones.
   The cause was not found; the WSLg window system, which opens each window, is a likely one.
 

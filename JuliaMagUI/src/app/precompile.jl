@@ -10,7 +10,7 @@
             io.DisplaySize = ig.ImVec2(800, 600)
             io.IniFilename = C_NULL
             io.BackendFlags = unsafe_load(io.BackendFlags) | lib.ImGuiBackendFlags_RendererHasTextures
-            w = Window(GLFW.Window(C_NULL), ctx, LIGHT, 1f0, true, (900, 560), 0,
+            w = Window(GLFW.Window(C_NULL), ctx, LIGHT, 1f0, true, 1f0, (900, 560), 0,
                 Threads.Atomic{Bool}(false), 0.0, 0, false, nothing)
             apply_style!(LIGHT, 1f0)
             load_fonts!(w, :bundled)

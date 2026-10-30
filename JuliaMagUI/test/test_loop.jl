@@ -4,7 +4,7 @@ import PNGFiles
 import GLFW
 using JuliaMagUI: Window, run_window, quit!, px, apply_style!, LIGHT, DARK, capture_png,
     wake!, request_frames!, with_font, FONT_REGULAR, FONT_SEMIBOLD, FONT_MONO,
-    find_system_fonts, font_paths, BUNDLED_FONTS
+    find_system_fonts, font_paths, BUNDLED_FONTS, min_size_limit, content_scale
 
 # Window tests need a display. Task 6 turns this into test/support/app.jl.
 const HAS_DISPLAY = Sys.iswindows() || haskey(ENV, "DISPLAY") || haskey(ENV, "WAYLAND_DISPLAY")
@@ -23,6 +23,16 @@ rgb(p) = (Float32(p.r), Float32(p.g), Float32(p.b))
         @test px(2f0, 6.3) == 13f0
         @test px(1.5f0, 26) == 39f0
         @test px(1.25f0, 34) == 42f0
+    end
+
+    @testset "min_size_limit" begin
+        # Windows and X11: screen coordinates are device pixels.
+        @test min_size_limit((900, 560), 1f0, 1480, 1480) == (900, 560)
+        @test min_size_limit((900, 560), 1.5f0, 2220, 2220) == (1350, 840)
+        # macOS and Wayland: screen coordinates are logical.
+        @test min_size_limit((900, 560), 2f0, 1480, 2960) == (900, 560)
+        # A minimised window reports 0.
+        @test min_size_limit((900, 560), 2f0, 0, 0) == (900, 560)
     end
 
     @testset "apply_style! without a window" begin
@@ -108,7 +118,10 @@ rgb(p) = (Float32(p.r), Float32(p.g), Float32(p.b))
                 if w.frame == 30
                     height = ig.CalcTextSize("Hg").y
                     capture_png(w, shot)
-                    got[] = (; height, scale = w.scale, px10 = px(w, 10))
+                    real = min_size_limit((900, 560), content_scale(w.handle),
+                        GLFW.GetWindowSize(w.handle)[1], GLFW.GetFramebufferSize(w.handle)[1])
+                    got[] = (; height, scale = w.scale, px10 = px(w, 10),
+                        limit = min_size_limit(w), real)
                     quit!(w)
                 end
                 return nothing
@@ -134,6 +147,9 @@ rgb(p) = (Float32(p.r), Float32(p.g), Float32(p.b))
             img2 = PNGFiles.load(shot2)
             @test size(img2) == (920, 1480)   # still the framebuffer size
             @test r2.scale == 2f0 && r2.px10 == 20f0
+            # A forced scale does not change the minimum size: it follows the monitor.
+            @test r2.limit == r2.real
+            @test r1.limit == r1.real
             @test abs(r2.height - 2 * r1.height) <= 1
         end
 
@@ -168,9 +184,9 @@ rgb(p) = (Float32(p.r), Float32(p.g), Float32(p.b))
         end
 
         @testset "idle and wake" begin
-            # The test needs a worker thread that is not the render thread.
+            # The waker must run on a thread that is not the render thread.
             @test Threads.threadid() == 1
-            @test Threads.nthreads(:default) >= 1
+            waker_thread = Threads.Atomic{Int}(0)
 
             frame_times = Float64[]
             pending = Threads.Atomic{Float64}(0.0)   # time of a wake not yet seen
@@ -198,6 +214,8 @@ rgb(p) = (Float32(p.r), Float32(p.g), Float32(p.b))
                 # After the 2 s idle, a worker wakes the loop 9 times.
                 if idle_from[] > 0 && now - idle_from[] > 2.0 && !isassigned(worker)
                     worker[] = Threads.@spawn begin
+                        waker_thread[] = Threads.threadid()
+                        waker_thread[] == 1 && return   # checked below
                         for _ in 1:n_wakes
                             Libc.systemsleep(0.2 + 0.05 * rand())
                             pending[] = time()
@@ -214,6 +232,9 @@ rgb(p) = (Float32(p.r), Float32(p.g), Float32(p.b))
             @debug "Idle loop: $idle frames in 2 s; timer late by " *
                    "$(round(Int, 1000 * (timer_fired[] - idle_from[] - 0.3))) ms; " *
                    "wake latencies (ms): $(join(round.(Int, 1000 .* latencies), ", "))"
+            waker_thread[] == 1 && @error "The waker ran on the render thread. " *
+                                          "Run the tests with `julia -t auto,1`."
+            @test waker_thread[] > 1
             @test idle_from[] > 0
             # The loop waits at most 0.1 s, so about 20 frames; never a busy loop.
             @test 15 <= idle <= 25

@@ -4,7 +4,8 @@
 #   julia bench/ui_startup.jl [RUNS]
 #
 # It starts a fresh process `julia -t auto,1 --project=JuliaMagUI` RUNS times (default 3).
-# Each process times `using JuliaMagUI` and the first frame that `main()` draws, then quits.
+# Each process times `using JuliaMagUI` and the end of the first frame that `main()` shows
+# (after the buffer swap), then quits.
 # The script prints each run and the median.
 # It precompiles first, so the numbers are for a warm package cache.
 
@@ -17,8 +18,12 @@ const CHILD = """
 t0 = time()
 using JuliaMagUI
 t1 = time()
+# The first frame is done (drawn and swapped) when the second one starts.
+# request_frames! makes the second frame start at once, without an idle wait.
 JuliaMagUI.main(extra_ui = w -> begin
     if w.frame == 0
+        JuliaMagUI.request_frames!(w)
+    elseif w.frame == 1
         println("TIMES ", t0, " ", t1, " ", time())
         flush(stdout)
         JuliaMagUI.quit!(w)

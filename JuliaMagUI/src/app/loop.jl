@@ -30,6 +30,7 @@ mutable struct Window
     tokens::Tokens
     scale::Float32
     fixed_scale::Bool
+    monitor_scale::Float32
     min_size::Tuple{Int,Int}
     frame::Int
     wake::Threads.Atomic{Bool}
@@ -107,29 +108,44 @@ end
 
 content_scale(handle::GLFW.Window) = Float32(GLFW.GetWindowContentScale(handle)[1])
 
-# Screen coordinates per logical pixel. On Windows and X11 screen coordinates are device
-# pixels; on macOS and Wayland they are already logical.
-function screen_per_logical(w::Window)::Float32
-    win_w = GLFW.GetWindowSize(w.handle)[1]
-    fb_w = GLFW.GetFramebufferSize(w.handle)[1]
-    (win_w > 0 && fb_w > 0) || return 1f0
-    return w.scale * win_w / fb_w
+"""
+    min_size_limit(min_size, monitor_scale, window_width, framebuffer_width) -> (w, h)
+
+The minimum window size in GLFW screen coordinates.
+`min_size` is in logical pixels and grows with the monitor's real content scale.
+On Windows and X11 screen coordinates are device pixels; on macOS and Wayland they are
+already logical, which the window to framebuffer ratio tells apart.
+A scale forced on `run_window` changes only the drawing, never this limit.
+"""
+function min_size_limit(min_size::NTuple{2,Int}, monitor_scale::Real, window_width::Integer,
+        framebuffer_width::Integer)::NTuple{2,Int}
+    f = (window_width > 0 && framebuffer_width > 0) ?
+        Float32(monitor_scale) * window_width / framebuffer_width : 1f0
+    return (round(Int, min_size[1] * f), round(Int, min_size[2] * f))
+end
+
+# The limit for this window, from the monitor it is on now.
+function min_size_limit(w::Window)::NTuple{2,Int}
+    return min_size_limit(w.min_size, content_scale(w.handle),
+        GLFW.GetWindowSize(w.handle)[1], GLFW.GetFramebufferSize(w.handle)[1])
 end
 
 function set_min_size!(w::Window)
-    f = screen_per_logical(w)
-    GLFW.SetWindowSizeLimits(w.handle, round(Int, w.min_size[1] * f),
-        round(Int, w.min_size[2] * f), GLFW.DONT_CARE, GLFW.DONT_CARE)
+    limit = min_size_limit(w)
+    GLFW.SetWindowSizeLimits(w.handle, limit..., GLFW.DONT_CARE, GLFW.DONT_CARE)
     return nothing
 end
 
 # Follow a change of the monitor scale (no GLFW callback; checked each frame).
+# A forced scale keeps the drawing scale, but the size limit still follows the monitor.
 function update_scale!(w::Window)
-    w.fixed_scale && return nothing
     s = content_scale(w.handle)
-    s == w.scale && return nothing
-    w.scale = s
-    apply_style!(w.tokens, s)
+    s == w.monitor_scale && return nothing
+    w.monitor_scale = s
+    if !w.fixed_scale
+        w.scale = s
+        apply_style!(w.tokens, s)
+    end
     set_min_size!(w)
     return nothing
 end
@@ -227,6 +243,7 @@ Open the window and run the render loop on thread 1 until the window closes.
   so the CPU rests and Julia's libuv loop still runs.
   It draws without waiting while `time() < w.animating_until`, after input, and after `wake!`.
 - `scale`: the content scale; `nothing` follows the monitor.
+  A forced scale changes only the drawing; the window size and its minimum follow the monitor.
 - `fonts`: `:system` or `:bundled`, see `font_paths`.
 - `on_close()`: asked when the user closes the window; `false` keeps it open.
 - `engine`: an ImGuiTestEngine engine, or `nothing`.
@@ -269,9 +286,10 @@ function open_and_run(@nospecialize(ui), title::String, size::NTuple{2,Int},
         (glfw_ready && gl_ready) || error("could not start the ImGui GLFW and OpenGL 3 backends")
 
         fixed = scale > 0
-        s = fixed ? scale : content_scale(handle)
-        w = Window(handle, ctx, tokens, s, fixed, min_size, 0, Threads.Atomic{Bool}(false),
-            0.0, 0, false, nothing)
+        monitor = content_scale(handle)
+        s = fixed ? scale : monitor
+        w = Window(handle, ctx, tokens, s, fixed, monitor, min_size, 0,
+            Threads.Atomic{Bool}(false), 0.0, 0, false, nothing)
         apply_style!(tokens, s)
         load_fonts!(w, fonts)
         set_min_size!(w)
