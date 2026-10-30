@@ -21,6 +21,8 @@ include("theme/icons.jl")
 include("app/toasts.jl")
 include("app/worker.jl")
 include("app/state.jl")
+include("commands/commands.jl")
+include("commands/keys.jl")
 
 """
     main(; project = nothing, config_dir = config_dir(), extra_ui = nothing, on_app = nothing,
@@ -45,7 +47,7 @@ function main(; project::Union{Nothing,AbstractString} = nothing,
     config, _ = load_config(config_dir)   # a broken settings file gives the defaults
     dark = config.theme == THEME_SYSTEM ? system_dark() : false
     tokens = tokens_for(config.theme, dark)
-    app = AppState(config, tokens)
+    app = AppState(config, tokens; config_dir)
     try
         on_app === nothing || on_app(app)
         run_window(AppFrame(app, extra_ui); tokens, size, scale, fonts, engine, passive)

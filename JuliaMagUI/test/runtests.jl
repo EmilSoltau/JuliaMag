@@ -15,6 +15,7 @@ include("support/state.jl")
     include("test_loop.jl")
     include("test_state.jl")
     include("test_worker.jl")
+    include("test_commands.jl")
     include("window/test_harness.jl")
 end
 

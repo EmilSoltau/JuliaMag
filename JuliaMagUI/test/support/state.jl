@@ -14,7 +14,7 @@ An `AppState` on session `s` with the default settings, the light theme, no wind
 and a running worker. Stop it with `stop_app!`.
 """
 test_app_state(s::Union{Nothing,Core.Session}) =
-    UI.AppState(UI.AppConfig(), UI.LIGHT; session = s)
+    UI.AppState(UI.AppConfig(), UI.LIGHT; session = s, config_dir = mktempdir())
 
 """
     stop_app!(app)

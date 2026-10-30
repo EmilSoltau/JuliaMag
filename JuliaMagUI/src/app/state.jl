@@ -322,6 +322,8 @@ and the worker hands results back through `drain!`.
 - `ui`: the `UiState`; `toasts`: the toasts shown, oldest first.
 - `window`: the app window once the loop has drawn a frame, else `nothing`.
 - `seen_warnings`: how many session warnings have been shown as toasts.
+- `config_dir`: the folder that holds `settings.json`; the app saves its settings there.
+- `command_cache`: what `commands(app)` built last (see commands.jl).
 
 The constructor starts the worker. Stop it with `stop_worker!(app.queue)`.
 """
@@ -337,11 +339,14 @@ mutable struct AppState
     window::Union{Nothing,Window}
     seen_warnings::Int
     busy::Union{Nothing,String}
+    config_dir::String
+    command_cache::Any
 end
 
-AppState(config::AppConfig, tokens::Tokens; session::Union{Nothing,Core.Session} = nothing) =
+AppState(config::AppConfig, tokens::Tokens; session::Union{Nothing,Core.Session} = nothing,
+        config_dir::AbstractString = JuliaMagUI.config_dir()) =
     AppState(config, tokens, session, nothing, false, Worker(), UiState(), Toast[], nothing, 0,
-        nothing)
+        nothing, String(config_dir), nothing)
 
 """
     set_session!(app, s)
@@ -354,6 +359,7 @@ nodes and filter. Call it on the render thread. It does not close the old sessio
 """
 function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     app.session = s
+    app.command_cache = nothing
     app.snap = nothing
     app.refreshing = false
     app.seen_warnings = 0
