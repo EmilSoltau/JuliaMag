@@ -207,13 +207,19 @@ end
 # ---- the temp file ---------------------------------------------------------
 
 """
+A temp file name next to `path`: `path.tmp-<random>`, so two exports to the
+same path do not clash.
+"""
+export_temp_path(path::String)::String = path * ".tmp-" * string(rand(UInt64); base = 36)
+
+"""
 Call `f(io)` to write a temp file next to `path`, then move it to `path`.
 The temp file is `path.tmp-<random>`, so two exports to the same path do not clash.
 On any error the temp file is removed and the error is thrown again.
 """
 function write_via_temp(f::F, path::String) where {F}
     isdir(path) && throw(ToolError("$path is a folder. Give the name of a file to export to."))
-    tmp = path * ".tmp-" * string(rand(UInt64); base = 36)
+    tmp = export_temp_path(path)
     try
         open(f, tmp, "w")
         mv(tmp, path; force = true)

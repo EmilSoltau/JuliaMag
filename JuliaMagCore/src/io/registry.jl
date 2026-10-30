@@ -12,13 +12,18 @@ end
 """
 What an import made. `item` is the new or appended database item,
 `rows` and `lines` count what this import added.
+`summary` is one line for the job report. When it is empty, the report says
+how many rows in how many lines were added.
 """
 struct ImportResult
     item::Union{Nothing,ProjectItem}
     warnings::Vector{ImportWarning}
     rows::Int
     lines::Int
+    summary::String
 end
+
+ImportResult(item, warnings, rows, lines) = ImportResult(item, warnings, rows, lines, "")
 
 """
     Progress(done, cancelled)
@@ -71,9 +76,9 @@ end
 "The default value of each setting of the importer, by key."
 default_settings(spec::ImporterSpec)::Dict{String,Any} = default_settings(spec.settings)
 
-"The problems with importer settings, as plain sentences. Empty means fine."
-validate(spec::ImporterSpec, settings::AbstractDict)::Vector{String} =
-    validate_settings(spec.settings, settings, spec.name)
+"The problems with importer settings, as plain sentences. Empty means fine. See `validate` of a tool."
+validate(spec::ImporterSpec, settings::AbstractDict; session::Union{Nothing,Session} = nothing)::Vector{String} =
+    validate_settings(spec.settings, settings, spec.name; session)
 
 const IMPORTERS = ImporterSpec[]
 const IMPORTERS_LOCK = ReentrantLock()
@@ -151,9 +156,9 @@ end
 "The default value of each setting of the exporter, by key."
 default_settings(spec::ExporterSpec)::Dict{String,Any} = default_settings(spec.settings)
 
-"The problems with exporter settings, as plain sentences. Empty means fine."
-validate(spec::ExporterSpec, settings::AbstractDict)::Vector{String} =
-    validate_settings(spec.settings, settings, spec.name)
+"The problems with exporter settings, as plain sentences. Empty means fine. See `validate` of a tool."
+validate(spec::ExporterSpec, settings::AbstractDict; session::Union{Nothing,Session} = nothing)::Vector{String} =
+    validate_settings(spec.settings, settings, spec.name; session)
 
 const EXPORTERS = ExporterSpec[]
 const EXPORTERS_LOCK = ReentrantLock()
@@ -190,6 +195,20 @@ function exporter_for(path_or_id::AbstractString)::Union{Nothing,ExporterSpec}
     k === nothing || return list[k]
     ext = lowercase(file_extension(path_or_id))
     isempty(ext) && return nothing
+    k = findfirst(e -> e.extension == ext, list)
+    return k === nothing ? nothing : list[k]
+end
+
+"""
+    exporter_for(path, kind) -> Union{Nothing,ExporterSpec}
+
+The exporter that writes items of `kind` to a file such as `path`, picked by
+its extension (case is ignored). `nothing` when there is none.
+"""
+function exporter_for(path::AbstractString, kind::ItemKind)::Union{Nothing,ExporterSpec}
+    ext = lowercase(file_extension(path))
+    isempty(ext) && return nothing
+    list = exporters(kind)
     k = findfirst(e -> e.extension == ext, list)
     return k === nothing ? nothing : list[k]
 end

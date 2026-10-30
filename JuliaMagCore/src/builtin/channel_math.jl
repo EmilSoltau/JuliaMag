@@ -403,12 +403,17 @@ item `target`. The side folder holds `<file>.old`; undo also keeps `<file>.new`
 there for redo. Both refuse when `database.json` is no longer `committed`.
 """
 function note_overwrite_undo!(s::Session, target::String, file::String, side::String, committed::String)
-    folder() = item_path(s.project, item(s.project, target))
-    function check()
+    # It runs inside the undo step of the job, without `s.lock` (see `UndoStep`),
+    # or under it when the job fails. So it takes the lock to look up the item.
+    folder() = lock(s.lock) do
         check_not_busy(s, target)
-        read(joinpath(folder(), META_FILE), String) == committed || throw(DatabaseError(
+        item_path(s.project, item(s.project, target))
+    end
+    function check()
+        dir = folder()
+        read(joinpath(dir, META_FILE), String) == committed || throw(DatabaseError(
             "cannot undo or redo Channel Math on $target: database.json changed since"))
-        return joinpath(channels_folder(folder()), file)
+        return joinpath(channels_folder(dir), file)
     end
     undo = () -> begin
         path = check()
@@ -417,8 +422,9 @@ function note_overwrite_undo!(s::Session, target::String, file::String, side::St
         nothing
     end
     redo = () -> (copy_into!(check(), joinpath(side, file * ".new")); nothing)
-    drop = () -> (rm(side; recursive = true, force = true); nothing)
-    note_job_undo!(undo, redo, drop; items = [target])
+    # The side folder goes once redo (`drop`) or undo (`commit`) is no longer possible.
+    free = () -> (rm(side; recursive = true, force = true); nothing)
+    note_job_undo!(undo, redo, free; items = [target], commit = free)
     return nothing
 end
 
@@ -457,8 +463,8 @@ function run_channel_math(s::Session, ins::Dict{String,String}, st::Dict{String,
             else
                 path = channel_files(db, channel(db, name))[1]
                 file = basename(path)
-                # Julia removes the side folder when the process ends, with the undo stack.
-                side = mktempdir(db.folder; prefix = ".undo-", cleanup = true)
+                # The job's undo step removes the side folder when the session closes.
+                side = mktempdir(db.folder; prefix = ".undo-", cleanup = false)
                 copy_file(path, joinpath(side, file * ".old"))
             end
             writing = true
@@ -486,9 +492,9 @@ function run_channel_math(s::Session, ins::Dict{String,String}, st::Dict{String,
                 catch e
                     e isa InterruptException && rethrow()
                     # The old values are only in the side folder now: keep it, under a
-                    # name that is not removed when the process ends.
+                    # name that the sweep of `open_session` does not remove.
                     keep = true
-                    kept = side * "-kept"
+                    kept = joinpath(db.folder, ".kept-" * chopprefix(basename(side), ".undo-"))
                     quietly(() -> mv(side, kept))
                     session_warning!(s, "Channel Math could not put back channel $name of $id; " *
                                         "its old values are in $(ispath(kept) ? kept : side): $(sprint(showerror, e))")

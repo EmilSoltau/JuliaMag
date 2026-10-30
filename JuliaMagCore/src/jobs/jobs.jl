@@ -10,7 +10,9 @@
 # - A finished job is recorded in the history once, with its id, and gets an
 #   undo step. Undo takes its outputs out of the project but keeps their files,
 #   so redo can put them back. When redo is no longer possible, the files of
-#   outputs that are out of the project are deleted.
+#   outputs that are out of the project are deleted. A rerun with replace keeps
+#   the files of the outputs it replaced for undo; they are deleted when the
+#   session closes with the rerun done (the step's `commit`).
 # - Items the work marked busy with `mark_busy!` stay busy until the job ends:
 #   after its undo step is in place, or before a failed job undoes its work.
 # - Each job is saved in `jobs/<id>.json` with its report text.
@@ -18,6 +20,11 @@
 # - Status and progress are atomics. Project changes happen under `s.lock`, held
 #   only for short times. The job list, the counter and the job records are
 #   guarded by `s.jobs_lock`, so they never wait for project work.
+# - The report and the warnings of a job have their own lock (see `JobReport`),
+#   so other threads can read them while the job runs.
+# - A failed job whose noted undo is refused because a reader (an export) holds
+#   the item keeps that change: it gets a warning, and an undo step for it is
+#   pushed, so the user can undo it once the reader ends (see `undo_noted!`).
 
 using JSON3
 
@@ -48,6 +55,7 @@ end
 Run `work(progress::Progress, report::IO)` on a worker thread and return the job at once.
 `work` returns a vector of the new `ProjectItem`s it made (it may add them to the
 project itself). It should check `is_cancelled(progress)` now and then.
+`report` is the job's `JobReport`. The work adds a warning with `job_warning!`.
 
 When the work is done, its new items are in the project, the job is recorded in
 the history as `command` with `args`, and an undo step takes the items out again.
@@ -66,7 +74,7 @@ function start_job!(s::Session, command::AbstractString, args::AbstractDict, wor
     lock(s.jobs_lock) do
         job = Job(reserve_job_id!(s), String(command), a, Threads.Atomic{Int}(Int(JOB_RUNNING)),
                   Threads.Atomic{Float64}(0.0), Threads.Atomic{Bool}(false), now_text(), "",
-                  IOBuffer(), String[], "", nothing)
+                  JobReport(), String[], String[], "", nothing)
         push!(s.jobs, job)
         save_job_quietly(s, job)
         job.task = Threads.@spawn run_job!(s, job, work, before, replaces, undoable)
@@ -78,33 +86,66 @@ end
 cancel!(job::Job) = (job.cancel[] = true; nothing)
 
 """
-    wait_job(job)::Job
-    wait_job(result::Tuple)
+Thrown by `wait_job(job; check = true)` for a job that failed or was cancelled.
+The message names the job, its command and its error.
+"""
+struct JobFailedError <: Exception
+    job::String
+    command::String
+    message::String
+end
 
-Wait until the job has ended. Never throws. Returns the job.
+Base.showerror(io::IO, e::JobFailedError) =
+    print(io, "JobFailedError: ", e.job, " (", e.command, ") ", e.message)
+
+"""
+    wait_job(job; check = false)::Job
+    wait_job(result::Tuple; check = false)
+
+Wait until the job has ended. Returns the job. With `check = false` it never throws.
+With `check = true` it throws a `JobFailedError` when the job failed or was
+cancelled, so a script stops there. Every job line of `script_text` uses it.
 
 `run_tool` returns a tuple `(ok, message, outputs)`, not a job, for a `:quick`
-tool and for a tool it refused. `wait_job` returns such a tuple when `ok`, and
-throws a `ToolError` with the message when not. So a script line
-`wait_job(run_tool(...))` stops the script at a tool that did not run.
+tool and for a tool it refused. `outputs` are item ids, as in `Job.outputs`.
+`wait_job` returns such a tuple when `ok`, and throws a `ToolError` with the
+message when not (also with `check = false`). So a script line
+`wait_job(run_tool(...); check = true)` stops the script at a tool that did not run.
 """
-function wait_job(r::Tuple{Bool,AbstractString,Any})
+function wait_job(r::Tuple{Bool,AbstractString,Any}; check::Bool = false)
     r[1] || throw(ToolError(String(r[2])))
     return r
 end
 
-function wait_job(job::Job)::Job
+function wait_job(job::Job; check::Bool = false)::Job
     t = job.task
-    t === nothing && return job
-    try
-        wait(t)
-    catch
-        # `run_job!` catches everything; this is only a safety net.
+    if t !== nothing
+        try
+            wait(t)
+        catch
+            # `run_job!` catches everything; this is only a safety net.
+        end
     end
+    check || return job
+    st = status(job)
+    st == JOB_FAILED && throw(JobFailedError(job.id, job.command, "failed: " * job.error))
+    st == JOB_CANCELLED && throw(JobFailedError(job.id, job.command, "was cancelled"))
     return job
 end
 
-"The jobs of the session, newest first."
+"Add a warning to the job with id `id`, if the session has it, and save its record."
+function warn_job!(s::Session, id::AbstractString, text::AbstractString)
+    job = lock(s.jobs_lock) do
+        k = findfirst(j -> j.id == id, s.jobs)
+        k === nothing ? nothing : s.jobs[k]
+    end
+    job === nothing && return nothing
+    add_job_warning!(job, text)
+    save_job_quietly(s, job)
+    return nothing
+end
+
+"The jobs of the session, newest first. Each job shows its warnings (`job_warnings`) and report (`report_text`)."
 function jobs(s::Session)::Vector{Job}
     lock(s.jobs_lock) do
         return sort(s.jobs; by = j -> something(job_number(j.id), 0), rev = true)
@@ -115,7 +156,7 @@ end
 
 function run_job!(s::Session, job::Job, work::Function, before::Set{String}, replaces::Union{Nothing,Job},
                   undoable::Bool)
-    ctx = JobContext()
+    ctx = JobContext(job)
     try
         progress = Progress(f -> (job.progress[] = clamp(Float64(f), 0.0, 1.0); nothing), () -> job.cancel[])
         result = task_local_storage(JOB_CONTEXT_KEY, ctx) do
@@ -141,6 +182,10 @@ end
 Add the outputs, record the job and push its undo step (when `undoable`).
 Undoes its own changes on error. Ends the busy marks of the work last, so no
 edit can land between the work and its undo step.
+
+A job that finishes while an undo or redo step runs has its history entry held
+until the step ends (see `record!`). If writing it fails then, the job keeps
+its changes and gets a warning (see `add_held!`); it is not undone.
 """
 function finish_job!(s::Session, job::Job, items::Vector{ProjectItem}, before::Set{String},
                      replaces::Union{Nothing,Job}, ctx::JobContext, undoable::Bool)
@@ -177,14 +222,15 @@ function finish_locked!(s::Session, job::Job, items::Vector{ProjectItem}, before
     try
         foreach(it -> isempty(it.made_by) && (it.made_by = job.id), new)
         swap_items!(p, old, new)
-        record!(s, job.command, job.args; job = job.id)
+        record!(s, job.command, job.args; job = job.id, outputs = String[it.id for it in new],
+                replaces = replaces === nothing ? "" : replaces.id, replaced = String[it.id for it in old])
     catch
         # Leave no half-made item: take the new ones out, delete their files,
         # and undo the other changes the work noted.
         quietly(() -> swap_items!(p, new, old))
         foreach(it -> quietly(() -> rm(item_path(p, it); recursive = true, force = true)), new)
         end_job_marks!(s, ctx)          # the noted undos refuse busy items
-        undo_noted!(ctx)
+        undo_noted!(s, job, ctx)
         rethrow()
     end
     old_status = replaces === nothing ? JOB_DONE : status(replaces)
@@ -201,33 +247,53 @@ function finish_locked!(s::Session, job::Job, items::Vector{ProjectItem}, before
     undoable || return nothing
     noted = copy(ctx.undos)
     replaced_all = !kept_old
+    # The steps run without `s.lock` (see `UndoStep`). The noted steps may copy
+    # large files; the change of the item list takes the lock.
     undo = () -> begin
-        foreach(u -> u[1](), reverse(noted))
-        swap_items!(p, new, old)
-        set_job_status!(s, job, JOB_UNDONE)
-        replaces === nothing || set_job_status!(s, replaces, old_status)
+        foreach(u -> u.undo(), reverse(noted))
+        lock(s.lock) do
+            swap_items!(p, new, old)
+            set_job_status!(s, job, JOB_UNDONE)
+            replaces === nothing || set_job_status!(s, replaces, old_status)
+        end
         nothing
     end
     redo = () -> begin
-        foreach(u -> u[2](), noted)
-        swap_items!(p, old, new)
-        set_job_status!(s, job, JOB_DONE)
-        (replaces === nothing || old_status != JOB_DONE || !replaced_all) ||
-            set_job_status!(s, replaces, JOB_UNDONE)
+        foreach(u -> u.redo(), noted)
+        lock(s.lock) do
+            swap_items!(p, old, new)
+            set_job_status!(s, job, JOB_DONE)
+            (replaces === nothing || old_status != JOB_DONE || !replaced_all) ||
+                set_job_status!(s, replaces, JOB_UNDONE)
+        end
         nothing
     end
     # Redo is no longer possible: free what the noted steps kept, and delete the
     # files of outputs that undo took out of the project.
     drop = () -> begin
-        foreach(u -> u[3](), noted)
+        foreach(u -> u.drop(), noted)
         remove_unused_folders!(p, vcat(new, old))
+        nothing
+    end
+    # Undo is no longer possible (the session closes with the step done): free
+    # what the noted steps kept, and delete the files of the replaced outputs.
+    keeps = !isempty(old) || any(u -> u.commit !== nothing_to_commit, noted)
+    commit = !keeps ? nothing_to_commit : () -> begin
+        try
+            foreach(u -> u.commit(), noted)
+        finally
+            lock(() -> remove_unused_folders!(p, old), s.lock)
+        end
         nothing
     end
     # `undo!` and `redo!` refuse the step while one of these items is busy.
     touched = unique!(vcat(String[it.id for it in new], String[it.id for it in old], ctx.touched))
-    push_undo!(s, UndoStep("$(job.command) ($(job.id))", undo, redo, drop, touched))
+    push_undo!(s, UndoStep(job_step_label(job.command, job.id), undo, redo, drop, touched; commit))
     return nothing
 end
+
+"The label of the undo step of a finished job. `script_text` finds the step of a job by it."
+job_step_label(command::AbstractString, id::AbstractString)::String = "$command ($id)"
 
 """
 Delete the folders of the items in `items` that are out of the project, unless
@@ -257,14 +323,50 @@ function quietly(f::Function)
     return nothing
 end
 
-"Undo, then drop, the changes the work noted with `note_job_undo!`, newest first."
-function undo_noted!(ctx::JobContext)
+"""
+Undo, then drop, the changes the work of a failed job noted with
+`note_job_undo!`, newest first. Call it under `s.lock`.
+
+An undo that a busy item refuses (`ItemBusyError`), such as rows appended to a
+database that an export reads, changed nothing. The job keeps that change: it
+gets a warning, and an undo step `"remove rows of failed <job id>"` is pushed,
+so the user can undo the change once the item is free.
+Other errors are dropped; the first error of the job counts.
+"""
+function undo_noted!(s::Session, job::Job, ctx::JobContext)
+    kept = NotedUndo[]                  # newest first
     for u in reverse(ctx.undos)
-        quietly(u[1])
-        quietly(u[3])
+        try
+            u.undo()
+        catch e
+            e isa InterruptException && rethrow()
+            if e isa ItemBusyError
+                push!(kept, u)
+                add_job_warning!(job, kept_rows_text(e))
+                continue
+            end
+        end
+        quietly(u.drop)
     end
     empty!(ctx.undos)
+    isempty(kept) && return nothing
+    items = unique!(reduce(vcat, (u.items for u in kept); init = String[]))
+    undo = () -> (foreach(u -> u.undo(), kept); nothing)
+    redo = () -> (foreach(u -> u.redo(), reverse(kept)); nothing)
+    drop = () -> (foreach(u -> u.drop(), kept); nothing)
+    commit = all(u -> u.commit === nothing_to_commit, kept) ? nothing_to_commit :
+             () -> (foreach(u -> u.commit(), kept); nothing)
+    # A failed job is not in the history, so neither is the undo of what it kept.
+    push_undo!(s, UndoStep("remove rows of failed $(job.id)", undo, redo, drop, items, false; commit))
     return nothing
+end
+
+"The warning for appended rows that a failed job could not remove, since the item was busy."
+function kept_rows_text(e::ItemBusyError)::String
+    e.reason == READING && return "the rows this job appended to $(e.item) could not be " *
+                                                 "removed while an export reads it; use Undo when the export ends"
+    return "the rows this job appended to $(e.item) could not be removed while it is busy " *
+           "($(e.reason)); use Undo when it is free"
 end
 
 """
@@ -300,7 +402,7 @@ function fail_job!(s::Session, job::Job, e, ctx::JobContext)
     try
         lock(s.lock) do
             end_job_marks!(s, ctx)      # the noted undos refuse busy items
-            undo_noted!(ctx)
+            undo_noted!(s, job, ctx)
             # Take out the items the work added, and delete their files.
             p = s.project
             gone = filter(it -> it.id in ctx.items, p.items)
@@ -328,9 +430,14 @@ end
 
 # ---- saving and loading ----------------------------------------------------
 
-"The report text to save: at most `MAX_REPORT_BYTES`, with a note when cut."
+"""
+    report_text(job)::String
+
+The report text of a job: at most `MAX_REPORT_BYTES`, with a note when cut.
+Safe from any thread while the job runs.
+"""
 function report_text(job::Job)::String
-    bytes = take!(copy(job.report))
+    bytes = @lock job.report.lock take!(copy(job.report.buf))
     n = length(bytes)
     n <= MAX_REPORT_BYTES && return String(bytes)
     k = MAX_REPORT_BYTES
@@ -345,7 +452,8 @@ function save_job(s::Session, job::Job)
     rec = Dict{String,Any}("id" => job.id, "command" => job.command, "args" => job.args,
                            "status" => string(status(job)), "progress" => job.progress[],
                            "started" => job.started, "finished" => job.finished,
-                           "outputs" => job.outputs, "error" => job.error, "report" => report_text(job))
+                           "outputs" => job.outputs, "error" => job.error, "report" => report_text(job),
+                           "warnings" => job_warnings(job))
     write_json_atomic(job_path(s, job.id), rec; allow_inf = true)
     return nothing
 end
@@ -423,11 +531,12 @@ function read_job(path::String, id::String)::Job
     d = plain(JSON3.read(read(path, String); allow_inf = true))::Dict{String,Any}
     d["id"] == id || throw(ArgumentError("the record has id $(repr(d["id"])), not $id"))
     st = JOB_STATUS_NAMES[d["status"]]
-    report = IOBuffer()
-    write(report, d["report"]::String)
+    # Records from before job warnings have none.
+    warnings = String[x for x in get(d, "warnings", String[])]
     return Job(id, d["command"], d["args"], Threads.Atomic{Int}(Int(st)),
                Threads.Atomic{Float64}(Float64(d["progress"])), Threads.Atomic{Bool}(false),
-               d["started"], d["finished"], report, String[x for x in d["outputs"]], d["error"], nothing)
+               d["started"], d["finished"], JobReport(d["report"]::String), warnings,
+               String[x for x in d["outputs"]], d["error"], nothing)
 end
 
 # ---- imports and running again ---------------------------------------------
@@ -457,7 +566,11 @@ end
 function import_work(s::Session, spec::ImporterSpec, path::String, settings::Dict{String,Any})
     return (progress::Progress, io::IO) -> begin
         r = spec.run(s, path, settings, progress)::ImportResult
-        println(io, spec.name, " import of ", path, ": ", r.rows, " rows in ", r.lines, " lines")
+        if isempty(r.summary)
+            println(io, spec.name, " import of ", path, ": ", r.rows, " rows in ", r.lines, " lines")
+        else
+            println(io, spec.name, " import of ", path, ": ", r.summary)
+        end
         for w in r.warnings
             println(io, w.file_line > 0 ? "line $(w.file_line): " : "", w.message)
         end
@@ -471,8 +584,11 @@ end
 Run the command of a job again, with the same or new `args` (spec 8.5).
 The command is an importer, an exporter or a `:job` tool.
 With `replace = true`, the outputs of the old job are taken out of the project
-once the new job is done; undo puts them back. An export makes no items, so
-`replace` does nothing for it, and the new export job has no undo step.
+once the new job is done; undo puts them back. The history entry of the new job
+names the old job and the items it took out (see `HistoryEntry`), so a script
+runs the command and then removes those items with `remove_item!`.
+An export makes no items, so `replace` does nothing for it, and the new export
+job has no undo step.
 A command that cannot run again gives a failed job; nothing is thrown.
 """
 function rerun!(s::Session, job::Job; args::AbstractDict = job.args, replace::Bool = false)::Job
@@ -513,23 +629,36 @@ end
     export_file(s, item_id, path; exporter = "", settings...)::Job
 
 Export item `item_id` to the file `path` as a job (spec 7). `exporter` is an
-exporter id, such as `"export.csv"`; blank picks the exporter by the extension
-of `path` (see `exporter_for`). The settings go to the exporter, such as
-`lines`, `channels` or `delimiter`.
+exporter id, such as `"export.csv"`; blank picks the exporter for the kind of
+the item by the extension of `path` (see `exporter_for`). The settings go to
+the exporter, such as `lines`, `channels` or `delimiter`.
 
-The job reports progress by rows and can be cancelled. The file is written to
-`path * ".tmp"` and renamed at the end; on cancel or failure the temp file is
-removed and `path` is not touched. The job makes no project item and has no
-undo step. It is recorded as the exporter id with `item`, `path` and the
-settings. An unknown exporter gives a failed job; nothing is thrown.
+The job reports progress by rows and can be cancelled. Each file is written to
+a temp file next to it, `path.tmp-<random>` (a grid export may write several,
+such as a header and its data file), and renamed at the end; on cancel or
+failure the temp files are removed and `path` is not touched. The job makes no
+project item and has no undo step. It is recorded as the exporter id with
+`item`, `path` and the settings. An unknown exporter gives a failed job;
+nothing is thrown.
 """
 function export_file(s::Session, item_id::AbstractString, path::AbstractString; exporter::AbstractString = "",
                      kwargs...)::Job
     settings = Dict{String,Any}(String(k) => plain_arg(v) for (k, v) in kwargs)
     args = merge(settings, Dict{String,Any}("item" => String(item_id), "path" => String(path)))
-    spec = exporter_for(isempty(exporter) ? path : exporter)
+    kind = lock(s.lock) do
+        k = findfirst(i -> i.id == item_id, s.project.items)
+        k === nothing ? nothing : s.project.items[k].kind
+    end
+    # An unknown item fails in the exporter, with its message.
+    spec = !isempty(exporter) ? exporter_for(exporter) : kind === nothing ? exporter_for(path) : exporter_for(path, kind)
     if spec === nothing || (!isempty(exporter) && spec.id != exporter)
-        what = isempty(exporter) ? "no exporter for the file type of $path" : "no exporter with id \"$exporter\""
+        what = if !isempty(exporter)
+            "no exporter with id \"$exporter\""
+        elseif kind !== nothing && exporter_for(path) !== nothing
+            "no exporter writes a $(KIND_NAMES[kind]) to a $(lowercase(file_extension(path))) file"
+        else
+            "no exporter for the file type of $path"
+        end
         return start_job!(s, "export", args, (_, _) -> throw(ArgumentError(what)); undoable = false)
     end
     return start_job!(s, spec.id, args, export_work(s, spec, String(item_id), String(path), settings);
@@ -539,7 +668,8 @@ end
 function export_work(s::Session, spec::ExporterSpec, item_id::String, path::String, settings::Dict{String,Any})
     return (progress::Progress, io::IO) -> begin
         r = spec.run(s, item_id, path, settings, progress)::ExportResult
-        println(io, spec.name, " export of ", item_id, " to ", r.path, ": ", r.rows, " rows in ", r.lines, " lines")
+        what = spec.kind == ITEM_GRID ? "$(r.rows) cells" : "$(r.rows) rows in $(r.lines) lines"
+        println(io, spec.name, " export of ", item_id, " to ", r.path, ": ", what)
         foreach(n -> println(io, n), r.notes)
         return ProjectItem[]
     end

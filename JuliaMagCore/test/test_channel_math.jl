@@ -289,7 +289,7 @@ end
     c = channel(db, "D")
     @test c.eltype == Float64 && !c.protected && c.decimals == -1 && c.arraylen == 1
     @test read_channel(db, CM_L1, "D") == [0.5, 1.5, 2.5] && read_channel(db, CM_L2, "D") == [3.0, 4.0, 5.0]
-    @test occursin("D = MAG - IGRF", String(take!(copy(job.report))))
+    @test occursin("D = MAG - IGRF", report_text(job))
     @test last(s.undo_stack).items == [id]
     # undo removes the channel exactly; redo puts it back
     @test undo!(s)
@@ -348,6 +348,22 @@ end
     @test status(cm_run(s, id; expr = "MAG = 0", lines = "selected")) == JOB_DONE
     db = database(s.project, id)
     @test read_channel(db, CM_L1, "MAG") == [1.0, 2.0, 3.0] && read_channel(db, CM_L2, "MAG") == [0.0, 0.0, 0.0]
+end
+
+@testset "channel math tool: an overwrite leaves no side folder after close" begin
+    s, id = two_line_db()
+    folder = s.project.folder
+    dbf = cm_folder(s, id)
+    @test status(cm_run(s, id; expr = "MAG = MAG * 2", lines = "all")) == JOB_DONE
+    @test length(cm_sides(s, id)) == 1                       # kept for undo
+    close_session!(s)
+    @test isempty(s.warnings)
+    @test !any(startswith(".undo-"), readdir(dbf))
+    # The next open in the same process finds nothing to sweep.
+    s = open_session(folder)
+    @test isempty(s.warnings)
+    @test read_channel(database(s.project, id), CM_L2, "MAG") == [8.0, 10.0, 12.0]
+    close_session!(s)
 end
 
 @testset "channel math tool: refusals" begin

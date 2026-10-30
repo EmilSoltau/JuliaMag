@@ -53,11 +53,11 @@ const CANCELLED = Progress(_ -> nothing, () -> true)
 
 @testset "export registry" begin
     @test [e.id for e in exporters(ITEM_DATABASE)] == ["export.geosoft_xyz", "export.csv", "export.parquet"]
-    @test isempty(exporters(ITEM_GRID))
+    @test "export.geosoft_grd" in [e.id for e in exporters(ITEM_GRID)]
     @test exporter_for("out/x.CSV").id == "export.csv"
     @test exporter_for("x.parquet").id == "export.parquet"
     @test exporter_for("export.geosoft_xyz").extension == ".xyz"
-    @test exporter_for("x.grd") === nothing
+    @test exporter_for("x.grd").id == "export.geosoft_grd"
     @test default_settings(exporter_for("x.csv")) ==
           Dict{String,Any}("lines" => "all", "channels" => String[], "delimiter" => ",", "decimal" => ".")
 end
@@ -297,23 +297,26 @@ end
     @test e.command == "export.csv" && e.job == j.id
     @test e.args == Dict{String,Any}("item" => id, "path" => path, "channels" => ["MAG"], "delimiter" => ";")
     @test count(h -> h.job == j.id, s.history) == 1
-    @test occursin("rows in 6 lines", String(take!(copy(j.report))))
+    @test occursin("rows in 6 lines", report_text(j))
 
-    # The script waits for the export, and the line runs again.
-    line = split(script_text(s), '\n')[end-1]
-    @test line == "wait_job(export_file(s, $(repr(id)), $(repr(path)); exporter = \"export.csv\", " *
-                  "channels = [\"MAG\"], delimiter = \";\"))"
+    # The script waits for the export, and the line runs again. The database came
+    # from an import earlier in the history, so the script names it by a variable.
+    v = JuliaMagCore.var_name(id)
+    line = split(script_text(s), '\n')[end-4]       # the last lines close the session
+    @test line == "wait_job(export_file(s, $v, $(repr(path)); exporter = \"export.csv\", " *
+                  "channels = [\"MAG\"], delimiter = \";\"); check = true)"
     rm(path)
     m = Module()
     Core.eval(m, :(using JuliaMagCore))
     Core.eval(m, :(s = $s))
+    Core.eval(m, :($(Symbol(v)) = $id))
     j2 = Core.eval(m, Meta.parse(line))
     @test status(j2) == JOB_DONE && startswith(read(path, String), "LINE;MAG\n")
 
     # A direct call is recorded and becomes a job in the script too.
     export_xyz(s, id, joinpath(dir, "direct.xyz"); channels = ["X"])
     @test s.history[end].command == "export.geosoft_xyz" && isempty(s.history[end].job)
-    @test startswith(split(script_text(s), '\n')[end-1], "wait_job(export_file(s, $(repr(id)), ")
+    @test startswith(split(script_text(s), '\n')[end-4], "wait_job(export_file(s, $v, ")
 
     # Run again.
     rm(path)

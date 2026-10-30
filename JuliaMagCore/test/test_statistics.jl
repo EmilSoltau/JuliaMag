@@ -111,7 +111,7 @@ end
     ins = Dict("database" => id)
     @test tool("database.statistics").mode == :quick
     ok, msg, out = run_tool(s, "database.statistics"; inputs = ins, channel = "MAG", lines = "all")
-    @test ok && out == ProjectItem[]
+    @test ok && out == String[]
     @test msg == "Statistics of MAG on 2 lines:\n" *
                  "Count 6, missing 0.\n" *
                  "Min 1, max 6, mean 3.5, standard deviation 1.87083.\n" *

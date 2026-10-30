@@ -16,7 +16,8 @@ using JSON3
         j3 = start_job!(s, "test.fail", Dict{String,Any}(), (p, r) -> error("disk full"))
         wait_job(j3)                                                     # Review Focus 3
         @test status(j3) == JOB_FAILED && occursin("disk full", j3.error)
-        @test length(jobs(open_session(s.project.folder))) == 3
+        close_session!(s)
+        @test with_session(s2 -> length(jobs(s2)), s.project.folder) == 3
     end
 end
 
@@ -29,7 +30,7 @@ end
         @test !isempty(j.started) && !isempty(j.finished) && isempty(j.error)
         it = only(s.project.items)
         @test j.outputs == [it.id] && it.made_by == j.id
-        @test occursin("100 rows", String(take!(copy(j.report))))
+        @test occursin("100 rows", report_text(j))
         # Recorded once, with the job id.
         @test count(e -> e.command == "import.geosoft_xyz", s.history) == 1
         e = s.history[end]
@@ -49,13 +50,15 @@ end
         j2 = start_job!(s, "test.ok", Dict{String,Any}(), (p, r) -> ProjectItem[]); wait_job(j2)
         @test j2.id == "job-2" && status(j2) == JOB_DONE
         rm(joinpath(s.project.folder, "jobs", "job-2.json"))
+        close_session!(s)
         s2 = open_session(s.project.folder)
         @test [x.id for x in jobs(s2)] == ["job-1"]
         @test status(only(jobs(s2))) == JOB_DONE
-        @test occursin("100 rows", String(take!(copy(only(jobs(s2)).report))))
+        @test occursin("100 rows", report_text(only(jobs(s2))))
         j3 = start_job!(s2, "test.ok", Dict{String,Any}(), (p, r) -> ProjectItem[]); wait_job(j3)
         @test j3.id == "job-3"
         @test [x.id for x in jobs(s2)] == ["job-3", "job-1"]       # newest first
+        close_session!(s2)
     end
 end
 
@@ -403,7 +406,7 @@ end
         j3 = rerun!(s, j1; replace = true); wait_job(j3)
         @test status(j3) == JOB_DONE
         @test any(i -> i.id == id, s.project.items)               # kept
-        @test occursin("$id is busy", String(take!(copy(j3.report))))
+        @test occursin("$id is busy", report_text(j3))
         @test status(j1) == JOB_DONE
         gate[] = true
         wait_job(j2)
@@ -521,6 +524,34 @@ end
     end
 end
 
+@testset "closing the session deletes the folders that a rerun replaced" begin
+    mktempdir() do dir
+        a = joinpath(dir, "a.xyz"); write_synthetic_xyz(a; lines = 2, ties = 0, rows_per_line = 50)
+        # A rerun with replace that is still done at close: the old folder goes.
+        folder = joinpath(dir, "p")
+        s = new_session(folder, "p")
+        dbs = joinpath(folder, "databases")
+        j1 = wait_job(import_file(s, a))
+        j2 = wait_job(rerun!(s, j1; replace = true))
+        @test status(j2) == JOB_DONE && sort(readdir(dbs)) == ["a", "a-2"]
+        close_session!(s)
+        @test isempty(s.warnings)
+        @test readdir(dbs) == ["a-2"]
+        @test with_session(s2 -> ([i.id for i in s2.project.items], s2.warnings), folder) == (j2.outputs, String[])
+        # An undone rerun keeps the old folder; the new one goes with the redo stack.
+        folder = joinpath(dir, "q")
+        s = new_session(folder, "q")
+        dbs = joinpath(folder, "databases")
+        j1 = wait_job(import_file(s, a))
+        wait_job(rerun!(s, j1; replace = true))
+        @test undo!(s)
+        close_session!(s)
+        @test isempty(s.warnings)
+        @test readdir(dbs) == ["a"]
+        @test with_session(s2 -> [i.id for i in s2.project.items], folder) == j1.outputs
+    end
+end
+
 @testset "a dropped step keeps a folder that an item still uses (I5)" begin
     s = fresh_session()
     keep = joinpath(s.project.folder, "grids", "shared")
@@ -549,7 +580,7 @@ end
         L = database_of(s, r).lines[1].id
         set_line_selected!(s, r.item.id, L, false)
         txt = script_text(s)
-        @test occursin("\nwait_job(import_file(s, $(repr(a)); ", txt)
+        @test occursin("\ndb_1 = only(wait_job(import_file(s, $(repr(a)); ", txt)
         c = open_session(start)
         body = join(filter(l -> !startswith(l, "s = open_session"), split(txt, '\n')), "\n")
         Core.eval(@__MODULE__, :(s = $c))

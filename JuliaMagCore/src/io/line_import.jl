@@ -246,19 +246,33 @@ end
 """
 Add the pair of the `ROLE_X` and `ROLE_Y` columns with `crs`, and the pair of the
 `ROLE_LON` and `ROLE_LAT` columns with `EPSG:4326`. Makes the first pair current.
+`EPSG:4326` is only assumed, so it gives no warning (see `add_pair!`).
 """
 function add_position_pairs!(db::LineDatabase, names::Vector{String}, roles::Vector{ChannelRole}, crs::String)
     named(r) = (k = findfirst(==(r), roles); k === nothing ? "" : names[k])
     add_pair!(db, named(ROLE_X), named(ROLE_Y), crs)
-    add_pair!(db, named(ROLE_LON), named(ROLE_LAT), "EPSG:4326")
+    add_pair!(db, named(ROLE_LON), named(ROLE_LAT), "EPSG:4326"; warn = false)
     db.current_pair == 0 && !isempty(db.pairs) && (db.current_pair = 1)
     return nothing
 end
 
-"Add a position pair, unless a name is empty or the pair is there already."
-function add_pair!(db::LineDatabase, x::String, y::String, crs::String)
+"""
+Add a position pair, unless a name is empty or the pair is there already.
+
+In append mode the pair may be there with another coordinate system. It keeps
+its own, and the rows are not transformed. With `warn`, the job gets a warning
+when both systems are set and differ (see `job_warning!`).
+"""
+function add_pair!(db::LineDatabase, x::String, y::String, crs::String; warn::Bool = true)
     (isempty(x) || isempty(y)) && return nothing
-    any(p -> p.x == x && p.y == y, db.pairs) && return nothing
+    k = findfirst(p -> p.x == x && p.y == y, db.pairs)
+    if k !== nothing
+        old = db.pairs[k].crs
+        (warn && !isempty(crs) && !isempty(old) && old != crs) && job_warning!(
+            "The position pair $x,$y of database $(db.name) is in $old, but the appended rows were " *
+            "given as $crs. The pair keeps $old, and the new rows were not transformed.")
+        return nothing
+    end
     push!(db.pairs, PositionPair(x, y, crs))
     return nothing
 end
@@ -468,14 +482,17 @@ or until the redo is no longer possible.
 """
 function note_append_undo!(s::Session, target::String, before::CommittedState, committed::String)
     side = Ref("")
-    folder() = item_path(s.project, item(s.project, target))
-    undo = () -> begin
+    # It runs inside the undo step of the job, without `s.lock` (see `UndoStep`),
+    # or under it when the job fails. So it takes the lock to look up the item.
+    folder() = lock(s.lock) do
         check_not_busy(s, target)
+        item_path(s.project, item(s.project, target))
+    end
+    undo = () -> begin
         side[] = roll_back!(folder(), before, committed)
         nothing
     end
     redo = () -> begin
-        check_not_busy(s, target)
         roll_forward!(folder(), before, side[])
         side[] = ""
         nothing

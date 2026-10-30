@@ -9,11 +9,24 @@
 using JSON3
 
 """
-One step that can be undone. `undo`, `redo` and `drop` take no arguments.
+One step that can be undone. `undo`, `redo`, `drop` and `commit` take no arguments.
 `drop` runs when an undone step leaves the redo stack for good, to free
 what `undo` kept for `redo` (such as a copy of removed rows).
+`commit` runs when a done step leaves the undo stack for good, which is when
+the session closes (see `close_session!`), to free what the step kept for
+`undo` (such as the files of a removed item). It defaults to doing nothing.
 `items` are the ids of the project items the step changes. `undo!` and `redo!`
 refuse the step with `ItemBusyError` while an import or an export uses one of them.
+
+`undo` and `redo` run without `s.lock`, so a step may copy large files while
+the session goes on. While one runs, its items carry a busy mark with reason
+`"undo is running"`, so no other change or reader touches them. A step that
+reads or changes other session state, such as the item list, takes `s.lock`
+for that part only.
+
+`recorded` is false for a change that is not in the history, such as the rows
+a failed job kept (see `undo_noted!`). Then its undo and redo are not recorded
+either, so a script does not undo some other step in its place.
 """
 struct UndoStep
     label::String
@@ -21,18 +34,38 @@ struct UndoStep
     redo::Function
     drop::Function
     items::Vector{String}
+    recorded::Bool
+    commit::Function
 end
+
+"The default `commit` of an `UndoStep` and of `note_job_undo!`: the step keeps nothing for undo."
+nothing_to_commit() = nothing
 
 UndoStep(label, undo, redo) = UndoStep(label, undo, redo, () -> nothing, String[])
 UndoStep(label, undo, redo, drop) = UndoStep(label, undo, redo, drop, String[])
+UndoStep(label, undo, redo, drop, items; commit::Function = nothing_to_commit) =
+    UndoStep(label, undo, redo, drop, items, true; commit)
+UndoStep(label, undo, redo, drop, items, recorded::Bool; commit::Function = nothing_to_commit) =
+    UndoStep(String(label), undo, redo, drop, collect(String, items), recorded, commit)
 
-"One recorded action. `time` is local time as text. `job` is a job id or `\"\"`."
+"""
+One recorded action. `time` is local time as text. `job` is a job id or `\"\"`.
+`outputs` are the ids of the items the action made, such as the database of an
+import. A job run again with `rerun!(...; replace = true)` names the job it
+replaces in `replaces`, and the items that it took out of the project in
+`replaced`. Else they are empty.
+"""
 struct HistoryEntry
     time::String
     command::String
     args::Dict{String,Any}
     job::String
+    outputs::Vector{String}
+    replaces::String
+    replaced::Vector{String}
 end
+
+HistoryEntry(time, command, args, job) = HistoryEntry(time, command, args, job, String[], "", String[])
 
 "Where the user is working: an item, a line and a row."
 mutable struct Cursor
@@ -68,15 +101,26 @@ Who uses a busy item: a job that writes to it (`writing`, with `why` such as
 `kind` says how the writer writes: `:append` adds rows past the commit point
 only, so readers of the committed rows may share the item; `:write` changes
 rows in place, so readers must wait. See `mark_busy!` and `mark_reading!`.
+`owner` is the task of a running undo or redo step that holds the mark, else
+`nothing`. `check_not_busy` lets that task pass, since the step is the writer.
 """
 mutable struct BusyMark
     writing::Bool
     reading::Int
     why::String
     kind::Symbol
+    owner::Union{Nothing,Task}
 end
 
-busy_reason(m::BusyMark) = m.writing ? m.why : "an export is running"
+BusyMark(writing::Bool, reading::Int, why::String, kind::Symbol) = BusyMark(writing, reading, why, kind, nothing)
+
+"The reason of the busy mark of a running undo or redo step."
+const UNDO_RUNNING = "undo is running"
+
+"The reason of a mark that only readers hold."
+const READING = "an export is running"
+
+busy_reason(m::BusyMark) = m.writing ? m.why : READING
 
 "True when readers may share the item with the mark `m`: no writer, or one that only appends."
 readers_allowed(m::BusyMark) = !m.writing || m.kind == :append
@@ -86,8 +130,15 @@ readers_allowed(m::BusyMark) = !m.writing || m.kind == :append
 
 The state of one working session. Use `open_session` or `new_session`.
 Take `lock` for every change, but only for a short time.
-`jobs_lock` guards `jobs` and `next_job`. It may be taken while `lock` is held,
-never the other way round.
+`jobs_lock` guards `jobs` and `next_job`.
+`undo_lock` lets one `undo!` or `redo!` run at a time. It is held while the
+step runs, which may take long; `lock` is not.
+
+Locks are taken in this order only: `undo_lock`, then `lock`, then `jobs_lock`.
+A task that holds one of them may take a later one, never an earlier one.
+So never call `undo!` or `redo!` while holding `lock` or `jobs_lock`.
+The lock of a job report, `HELD_LOCKS_LOCK`, `GDAL_CACHE_LOCK` and `XML_LOCK`
+are leaf locks: no other lock is taken while one of them is held.
 """
 mutable struct Session
     project::Project
@@ -108,6 +159,15 @@ mutable struct Session
     jobs_lock::ReentrantLock
     "Items an import writes to or an export reads, by id. Guarded by `lock`."
     busy::Dict{String,BusyMark}
+    "The project lock file this session holds, or `nothing` once it is closed."
+    held_lock::Union{Nothing,HeldLock}
+    undo_lock::ReentrantLock
+    """
+    While an undo or redo step runs: the undo steps and history entries that
+    other changes made meanwhile, in order. They are pushed and recorded after
+    the step, so they follow it. Else `nothing`. Guarded by `lock`.
+    """
+    held_edits::Union{Nothing,Vector{Union{UndoStep,HistoryEntry}}}
 end
 
 const HISTORY_FILE = "history.jsonl"
@@ -119,17 +179,200 @@ function Session(p::Project)
     history = load_history(p, warnings)
     s = Session(p, UndoStep[], UndoStep[], history, nothing, nothing,
                 load_remembered(p, warnings), ReentrantLock(), warnings, Job[], 1,
-                ReentrantLock(), Dict{String,BusyMark}())
+                ReentrantLock(), Dict{String,BusyMark}(), nothing, ReentrantLock(), nothing)
     load_jobs!(s)
     return s
 end
 
-"Open the project in `folder` and read its saved history."
-open_session(folder::AbstractString) = Session(open_project(String(folder)))
+"""
+    open_session(folder; force = false)
 
-"Make a new project in `folder` and a session for it."
-new_session(folder::AbstractString, name::AbstractString) =
-    Session(create_project(String(folder), String(name)))
+Open the project in `folder`, lock it (see `LOCK_FILE`) and read its saved history.
+Throws `ProjectLockedError` when another session has the project open.
+With `force = true` it opens the project anyway, with a warning in `s.warnings`.
+Call `close_session!` when done.
+"""
+function open_session(folder::AbstractString; force::Bool = false)::Session
+    f = String(folder)
+    isfile(project_path(f)) || open_project(f)          # throws the ProjectError
+    return locked_session(() -> open_project(f), f, force)
+end
+
+"""
+    new_session(folder, name; force = false)
+
+Make a new project in `folder`, lock it and make a session for it.
+Throws `ProjectLockedError`, and changes nothing, when another session has a
+project in `folder` open. Call `close_session!` when done.
+"""
+function new_session(folder::AbstractString, name::AbstractString; force::Bool = false)::Session
+    f = String(folder)
+    mkpath(f)
+    return locked_session(() -> create_project(f, String(name)), f, force)
+end
+
+# Take the lock before the project is read or written, so a session that has it
+# open is never disturbed (loading marks its running jobs as failed).
+function locked_session(make::Function, folder::String, force::Bool)::Session
+    warnings = String[]
+    h, replaced = take_lock!(folder, force, warnings)
+    s = try
+        Session(make())
+    catch
+        replaced === nothing ? release_lock!(h) : restore_lock!(h, replaced)
+        rethrow()
+    end
+    s.held_lock = h
+    prepend!(s.warnings, warnings)
+    sweep_leftovers!(s, replaced !== nothing)
+    return s
+end
+
+"""
+    sweep_leftovers!(s, forced)
+
+Remove the side folders that a crash left in the project, each with a session
+warning: `.importing-*` and `.undo-*` folders in `databases/` and `grids/`, and
+`.undo-*` folders inside a database or a grid. They are of no use once the
+session that made them has ended.
+A side folder in a database that does not open is kept: it may hold the bytes
+that an undo cut from its channel files.
+With `forced` (another session may still have the project open), nothing is
+removed, since that session may be using them.
+"""
+function sweep_leftovers!(s::Session, forced::Bool)
+    found = try
+        side_folders(s.project.folder)
+    catch e
+        e isa InterruptException && rethrow()
+        session_warning!(s, "the project could not be checked for side folders left after a crash: " *
+                            sprint(showerror, e))
+        return nothing
+    end
+    isempty(found) && return nothing
+    if forced
+        session_warning!(s, "side folders left after a crash were not removed, since another session may " *
+                            "use them (the project was opened with force = true): $(join(first.(found), ", "))")
+        return nothing
+    end
+    free_stray_maps()          # Windows does not delete a mapped file
+    opens = Dict{String,Bool}()
+    for (path, db) in found
+        if !isempty(db) && !get!(() -> database_opens(db), opens, db)
+            session_warning!(s, "the side folder $path, left after a crash, was kept: its database does " *
+                                "not open, and the folder may hold bytes cut from its channel files")
+            continue
+        end
+        try
+            rm(path; recursive = true)
+            session_warning!(s, "the side folder $path, left after a crash, was removed")
+        catch e
+            e isa InterruptException && rethrow()
+            session_warning!(s, "the side folder $path, left after a crash, could not be removed: " *
+                                sprint(showerror, e))
+        end
+    end
+    return nothing
+end
+
+"The side folders of `sweep_leftovers!` in the project in `folder`, each with its database folder, or `\"\"`."
+function side_folders(folder::String)::Vector{Pair{String,String}}
+    found = Pair{String,String}[]
+    for top in ("databases", "grids")
+        dir = joinpath(folder, top)
+        isdir(dir) || continue
+        for name in readdir(dir)
+            path = joinpath(dir, name)
+            isdir(path) || continue
+            if startswith(name, ".importing-") || startswith(name, ".undo-")
+                push!(found, path => "")
+            elseif !startswith(name, ".")
+                for n in readdir(path)
+                    side = joinpath(path, n)
+                    startswith(n, ".undo-") && isdir(side) && push!(found, side => (top == "databases" ? path : ""))
+                end
+            end
+        end
+    end
+    return found
+end
+
+"True when the database in `folder` opens."
+function database_opens(folder::String)::Bool
+    try
+        open_database(folder)
+        return true
+    catch e
+        e isa InterruptException && rethrow()
+        return false
+    end
+end
+
+"""
+    close_session!(s)
+
+Cancel the running jobs of the session, wait for them to end, end the undo and
+redo stacks, then remove the project lock. A second call does nothing.
+
+Ending the stacks frees what their steps kept: `commit` runs for each step on
+the undo stack, oldest first, and `drop` for each step on the redo stack. Such
+as the folder of a removed item, the files of a deleted channel, or the folders
+of the outputs that a rerun replaced. An error
+there becomes a warning in `s.warnings`; the close goes on.
+A session that is never closed (a crash, or an exit without close) keeps
+those files.
+The `commit` actions run only while the project lock is still ours. When
+another session opened the project with `force = true`, its project file may
+list those folders again, so they are kept, with a warning.
+The lock is removed also when ending the stacks is interrupted.
+"""
+function close_session!(s::Session)
+    running = filter(j -> status(j) == JOB_RUNNING, jobs(s))
+    foreach(cancel!, running)
+    foreach(wait_job, running)
+    held = lock(() -> s.held_lock, s.jobs_lock)
+    try
+        end_stacks!(s; commit = held !== nothing && lock_is_ours(held))
+    finally
+        lock(() -> s.held_lock = nothing, s.jobs_lock)
+        held === nothing || release_lock!(held)
+    end
+    return nothing
+end
+
+"""
+Empty the undo and redo stacks for good: run `commit` of each undo step, oldest
+first, and `drop` of each redo step. Errors become session warnings.
+With `commit = false`, the undo steps keep what they kept, with one warning.
+Waits for a running `undo!` or `redo!` first.
+"""
+function end_stacks!(s::Session; commit::Bool = true)
+    done, undone = lock(s.undo_lock) do
+        lock(s.lock) do
+            stacks = (copy(s.undo_stack), copy(s.redo_stack))
+            empty!(s.undo_stack)
+            empty!(s.redo_stack)
+            return stacks
+        end
+    end
+    run_quietly(f, what, step) =
+        try
+            f()
+        catch e
+            e isa InterruptException && rethrow()
+            session_warning!(s, "undo step \"$(step.label)\" could not $what at close: $(sprint(showerror, e))")
+        end
+    filter!(step -> step.commit !== nothing_to_commit, done)
+    if commit
+        foreach(step -> run_quietly(step.commit, "free its files", step), done)
+    elseif !isempty(done)
+        session_warning!(s, "the project lock is no longer held by this session (another session may " *
+                            "have opened the project with force = true), so the files that these undo " *
+                            "steps kept were not deleted: " * join((step.label for step in done), ", "))
+    end
+    foreach(step -> run_quietly(step.drop, "free its data", step), undone)
+    return nothing
+end
 
 # Read the remembered tool settings from `settings.tools` of the project.
 # A bad entry is skipped and reported in `warnings`.
@@ -171,7 +414,10 @@ function load_history(p::Project, warnings::Vector{String})::Vector{HistoryEntry
         isempty(strip(ln)) && continue
         try
             d = plain(JSON3.read(ln; allow_inf = true))::Dict{String,Any}
-            push!(out, HistoryEntry(d["time"], d["command"], d["args"], d["job"]))
+            # Older lines have no "outputs", "replaces" or "replaced".
+            ids(key) = String[x for x in get(d, key, String[])]
+            push!(out, HistoryEntry(d["time"], d["command"], d["args"], d["job"], ids("outputs"),
+                                    get(d, "replaces", ""), ids("replaced")))
         catch e
             e isa InterruptException && rethrow()
             push!(warnings, "$path line $n skipped: $(sprint(showerror, e))")
@@ -183,23 +429,50 @@ end
 now_text() = Libc.strftime("%Y-%m-%dT%H:%M:%S%z", time())
 
 """
-    record!(s, command, args; job = "")
+    record!(s, command, args; job = "", outputs = String[], replaces = "", replaced = String[])
 
 Add an entry to the history and append it to `jobs/history.jsonl`.
+`outputs`, `replaces` and `replaced` are described at `HistoryEntry`.
 Values in `args` must be plain: numbers, strings, booleans, vectors and dictionaries.
+While an undo or redo step runs, the entry is held and written after the step
+(see `Session`), so the history keeps the order of the stacks.
+A held entry that cannot be written then does not throw: it becomes a warning
+in `s.warnings`, and a job warning for the entry of a job (see `add_held!`).
 """
-function record!(s::Session, command::String, args::AbstractDict; job::String = "")
+function record!(s::Session, command::String, args::AbstractDict; job::String = "",
+                 outputs::Vector{String} = String[], replaces::String = "", replaced::Vector{String} = String[])
     lock(s.lock) do
-        e = HistoryEntry(now_text(), command, Dict{String,Any}(String(k) => v for (k, v) in args), job)
-        mkpath(dirname(history_path(s.project)))
-        line = JSON3.write(Dict("time" => e.time, "command" => e.command, "args" => e.args, "job" => e.job);
-                           allow_inf = true)
-        open(history_path(s.project), "a") do io
-            println(io, line)
+        e = HistoryEntry(now_text(), command, Dict{String,Any}(String(k) => v for (k, v) in args), job,
+                         copy(outputs), replaces, copy(replaced))
+        line = history_line(e)                 # a bad value throws now, not later
+        held = s.held_edits
+        if held !== nothing
+            push!(held, e)
+            return e
         end
-        push!(s.history, e)
+        write_history!(s, e, line)
         return e
     end
+end
+
+function history_line(e::HistoryEntry)::String
+    d = Dict{String,Any}("time" => e.time, "command" => e.command, "args" => e.args, "job" => e.job)
+    isempty(e.outputs) || (d["outputs"] = e.outputs)
+    if !isempty(e.replaces)
+        d["replaces"] = e.replaces
+        d["replaced"] = e.replaced
+    end
+    return JSON3.write(d; allow_inf = true)
+end
+
+"Append the entry to the history file and to `s.history`. Call it under `s.lock`."
+function write_history!(s::Session, e::HistoryEntry, line::String = history_line(e))
+    mkpath(dirname(history_path(s.project)))
+    open(history_path(s.project), "a") do io
+        println(io, line)
+    end
+    push!(s.history, e)
+    return nothing
 end
 
 "Add a line to `s.warnings`. Safe from any thread."
@@ -222,10 +495,13 @@ session_warning!(s::Session, msg::String) = (lock(() -> push!(s.warnings, msg), 
 "True when a writer or a reader marks the item. Call it under `s.lock`."
 is_busy(s::Session, id::AbstractString)::Bool = haskey(s.busy, id)
 
-"Throw `ItemBusyError` when a writer or a reader marks the item. Call it under `s.lock`."
+"""
+Throw `ItemBusyError` when a writer or a reader marks the item. Call it under `s.lock`.
+The task of a running undo or redo step passes the marks of that step.
+"""
 function check_not_busy(s::Session, id::AbstractString)
     m = get(s.busy, id, nothing)
-    m === nothing || throw(ItemBusyError(String(id), busy_reason(m)))
+    (m === nothing || m.owner === current_task()) || throw(ItemBusyError(String(id), busy_reason(m)))
     return nothing
 end
 
@@ -316,7 +592,10 @@ function set_cell!(s::Session, item_id::AbstractString, id::LineId, name::Abstra
         db = database(s.project, item_id)
         channel(db, name).protected && throw(ProtectedError(String(name)))
         old = write_value!(db, id, String(name), Int(row), x)
-        write_back(v) = () -> (write_value!(database(s.project, item_id), id, String(name), Int(row), v); nothing)
+        write_back(v) = () -> lock(s.lock) do
+            write_value!(database(s.project, item_id), id, String(name), Int(row), v)
+            nothing
+        end
         push_undo!(s, UndoStep("set $(name) row $row on $(line_name(id))", write_back(old), write_back(x),
                                () -> nothing, [String(item_id)]))
         record!(s, "database.set_cell", Dict("item" => String(item_id), "line" => line_args(id),
@@ -334,7 +613,7 @@ function set_line_selected!(s::Session, item_id::AbstractString, id::LineId, fla
     lock(s.lock) do
         check_not_busy(s, item_id)
         old = line(database(s.project, item_id), id).selected
-        put(v::Bool) = () -> begin
+        put(v::Bool) = () -> lock(s.lock) do
             db = database(s.project, item_id)
             line(db, id).selected = v
             save_meta(db)
@@ -352,6 +631,326 @@ end
 function set_cursor!(s::Session, c::Cursor)
     lock(s.lock) do
         s.cursor = c
+        return nothing
+    end
+end
+
+"""
+    set_marked!(s, range)
+
+Set the marked range, a stretch of rows on the current line, as `(first, last)`,
+or clear it with `nothing`. Not undoable and not recorded, like `set_cursor!`.
+Throws `ArgumentError` when `first` is above `last`.
+"""
+function set_marked!(s::Session, range::Union{Nothing,Tuple{Int,Int}})
+    range === nothing || range[1] <= range[2] ||
+        throw(ArgumentError("the marked range must not end before it starts: $(range[1]) to $(range[2])"))
+    lock(s.lock) do
+        s.marked = range
+        return nothing
+    end
+end
+
+# ---- items -----------------------------------------------------------------
+
+"Make `items` the item list of the project and save it. On an error, the old list is put back."
+function set_items!(p::Project, items::Vector{ProjectItem})
+    saved = copy(p.items)
+    try
+        empty!(p.items)
+        append!(p.items, items)
+        save_project(p)
+    catch
+        empty!(p.items)
+        append!(p.items, saved)
+        rethrow()
+    end
+    return nothing
+end
+
+"""
+    remove_item!(s, id)
+
+Take item `id` out of the project. Undoable: undo puts it back in its place,
+and redo takes it out again. Recorded as `"project.remove_item"`.
+When the cursor is on the item, the cursor and the marked range are cleared;
+undo puts them back if they are still clear.
+The item's files stay while the session can undo the remove. When the session
+closes with the item still out, the step's `commit` deletes them (see
+`close_session!`). A session that is never closed (a crash, or an exit without
+close) keeps them, and no later sweep removes them: a folder the project file
+does not list is never deleted on open.
+Throws `ItemBusyError` while a job or an export uses the item, and
+`ProjectError` when there is no such item.
+"""
+function remove_item!(s::Session, id::AbstractString)
+    key = String(id)
+    p = s.project
+    lock(s.lock) do
+        check_not_busy(s, key)
+        it = item(p, key)
+        k = something(findfirst(i -> i === it, p.items))
+        # The cursor and marked range that pointed at the item, for undo.
+        kept = Ref{Union{Nothing,Tuple{Cursor,Union{Nothing,Tuple{Int,Int}}}}}(nothing)
+        take_out() = lock(s.lock) do                # `undo!` runs the steps without the lock
+            set_items!(p, filter(i -> i.id != key, p.items))
+            c = s.cursor
+            if c !== nothing && c.item == key
+                kept[] = (c, s.marked)
+                s.cursor = nothing
+                s.marked = nothing
+            end
+            nothing
+        end
+        put_back() = lock(s.lock) do
+            any(i -> i.id == key, p.items) && return nothing
+            items = copy(p.items)
+            insert!(items, clamp(k, 1, length(items) + 1), it)
+            set_items!(p, items)
+            saved = kept[]
+            if saved !== nothing && s.cursor === nothing && s.marked === nothing
+                s.cursor, s.marked = saved
+            end
+            kept[] = nothing
+            nothing
+        end
+        # Undo is no longer possible: delete the files if the item is out.
+        commit() = lock(() -> remove_unused_folders!(p, [it]), s.lock)
+        take_out()
+        push_undo!(s, UndoStep("remove $(it.name)", put_back, take_out, () -> nothing, [key]; commit))
+        record!(s, "project.remove_item", Dict{String,Any}("item" => key))
+        return nothing
+    end
+end
+
+"""
+    rename_item!(s, id, name)
+
+Give item `id` a new name. Leading and trailing spaces are dropped.
+Undoable and recorded as `"project.rename_item"`.
+Throws `ArgumentError` for a blank name, `ItemBusyError` while a job or an
+export uses the item, and `ProjectError` when there is no such item.
+"""
+function rename_item!(s::Session, id::AbstractString, name::AbstractString)
+    key = String(id)
+    new = String(strip(name))
+    isempty(new) && throw(ArgumentError("the name of an item cannot be blank"))
+    p = s.project
+    lock(s.lock) do
+        check_not_busy(s, key)
+        old = item(p, key).name
+        put(v::String) = () -> lock(s.lock) do
+            it = item(p, key)
+            before = it.name
+            it.name = v
+            try
+                save_project(p)
+            catch
+                it.name = before
+                rethrow()
+            end
+            nothing
+        end
+        step = UndoStep("rename $old to $new", put(old), put(new), () -> nothing, [key])
+        step.redo()
+        push_undo!(s, step)
+        record!(s, "project.rename_item", Dict{String,Any}("item" => key, "name" => new))
+        return nothing
+    end
+end
+
+# ---- channels --------------------------------------------------------------
+#
+# Each channel edit runs under `s.lock`, refuses a busy database with
+# `ItemBusyError`, saves `database.json` atomically, pushes an undo step that
+# puts back the exact old values, and is recorded in the history.
+
+"""
+Change a fact of channel `name` of database `id` to `new` with `setter!(c, value)`,
+save `database.json`, and push an undo step that puts back the value `getter(c)` had.
+Call it under `s.lock`. Throws `ItemBusyError` when the database is busy, before anything changes.
+"""
+function edit_channel_meta!(getter::Function, setter!::Function, s::Session, id::String, name::String,
+                            label::String, new)
+    check_not_busy(s, id)
+    old = getter(channel(database(s.project, id), name))
+    put(v) = () -> lock(s.lock) do               # `undo!` runs it without the lock
+        db = database(s.project, id)
+        c = channel(db, name)
+        before = getter(c)
+        setter!(c, v)
+        try
+            save_meta(db)
+        catch
+            setter!(c, before)
+            rethrow()
+        end
+        nothing
+    end
+    step = UndoStep(label, put(old), put(new), () -> nothing, [id])
+    step.redo()
+    push_undo!(s, step)
+    return nothing
+end
+
+"""
+    set_channel_protected!(s, id, channel, flag)
+
+Protect a channel of database `id` (`flag = true`) or unprotect it. The values
+of a protected channel cannot be edited. Undoable and recorded as
+`"database.set_channel_protected"`. Throws `ItemBusyError` while a job or an
+export uses the database.
+"""
+function set_channel_protected!(s::Session, id::AbstractString, name::AbstractString, flag::Bool)
+    key, ch = String(id), String(name)
+    lock(s.lock) do
+        edit_channel_meta!(c -> c.protected, (c, v) -> (c.protected = v), s, key, ch,
+                           (flag ? "protect " : "unprotect ") * ch, flag)
+        record!(s, "database.set_channel_protected", Dict{String,Any}("item" => key, "channel" => ch,
+                                                                      "protected" => flag))
+    end
+    return nothing
+end
+
+const CHANNEL_INFO_FIELDS = (:label, :units, :decimals, :format, :width)
+
+"""
+    set_channel_info!(s, id, channel; label, units, decimals, format, width)
+
+Change how a channel of database `id` is described and shown. Each keyword is
+optional; the others stay. `format` is one of `:normal`, `:exponential`,
+`:date` and `:time`. `decimals` is -1 (not set) or more, and `width` is 1 or more.
+The values do not change. Undoable and recorded as `"database.set_channel_info"`
+with the given keywords. Throws `ArgumentError` for a bad value, and
+`ItemBusyError` while a job or an export uses the database.
+"""
+function set_channel_info!(s::Session, id::AbstractString, name::AbstractString;
+                           label::Union{Nothing,AbstractString} = nothing,
+                           units::Union{Nothing,AbstractString} = nothing,
+                           decimals::Union{Nothing,Integer} = nothing, format::Union{Nothing,Symbol} = nothing,
+                           width::Union{Nothing,Integer} = nothing)
+    format === nothing || format in CHANNEL_FORMATS ||
+        throw(ArgumentError("format must be one of $(join(CHANNEL_FORMATS, ", ")), not $format"))
+    decimals === nothing || decimals >= -1 || throw(ArgumentError("decimals must be -1 (not set) or more, not $decimals"))
+    width === nothing || width >= 1 || throw(ArgumentError("width must be 1 or more, not $width"))
+    given = Dict{Symbol,Any}()
+    for (k, v) in zip(CHANNEL_INFO_FIELDS, (label, units, decimals, format, width))
+        v === nothing || (given[k] = v isa AbstractString ? String(v) : v isa Integer ? Int(v) : v)
+    end
+    key, ch = String(id), String(name)
+    info(c) = Tuple(getfield(c, k) for k in CHANNEL_INFO_FIELDS)
+    set_info!(c, v) = foreach((k, x) -> setfield!(c, k, x), CHANNEL_INFO_FIELDS, v)
+    lock(s.lock) do
+        check_not_busy(s, key)
+        old = info(channel(database(s.project, key), ch))
+        isempty(given) && return nothing
+        new = Tuple(get(given, k, o) for (k, o) in zip(CHANNEL_INFO_FIELDS, old))
+        edit_channel_meta!(info, set_info!, s, key, ch, "change channel $ch", new)
+        args = Dict{String,Any}("item" => key, "channel" => ch)
+        foreach(((k, v),) -> args[String(k)] = v isa Symbol ? String(v) : v, given)
+        record!(s, "database.set_channel_info", args)
+    end
+    return nothing
+end
+
+"The position pairs of `db` as text, such as `X,Y`."
+pairs_text(ps) = join(("$(p.x),$(p.y)" for p in ps), " and ")
+
+"""
+    rename_channel!(s, id, old, new)
+
+Rename channel `old` of database `id` to `new`, with its files. A position pair
+that uses `old` uses `new` after it. Undoable and recorded as
+`"database.rename_channel"`.
+Throws `ArgumentError` when `new` is not a valid channel name, is the name of
+another channel (case is ignored), or is a name that a position pair uses;
+`ItemBusyError` while a job or an export uses the database; and `DatabaseError`
+when there is no channel `old`.
+"""
+function rename_channel!(s::Session, id::AbstractString, old::AbstractString, new::AbstractString)
+    key, from, to = String(id), String(old), String(new)
+    lock(s.lock) do
+        check_not_busy(s, key)
+        db = database(s.project, key)
+        c = channel(db, from)
+        from == to && return nothing
+        renamed = copy_info(c)
+        renamed.name = to
+        try
+            check_channel_info(renamed, Set{String}(lowercase(x.name) for x in db.channels if x !== c))
+        catch e
+            e isa DatabaseError || rethrow()
+            throw(ArgumentError(e.msg))
+        end
+        clash = filter(p -> any(n -> n != from && lowercase(n) == lowercase(to), (p.x, p.y)), db.pairs)
+        isempty(clash) || throw(ArgumentError("channel name $to is used by position pair $(pairs_text(clash))"))
+        apply(a, b) = () -> lock(s.lock) do      # `undo!` runs it without the lock
+            rename_channel_files!(database(s.project, key), a, b)
+            nothing
+        end
+        step = UndoStep("rename channel $from to $to", apply(to, from), apply(from, to), () -> nothing, [key])
+        step.redo()
+        push_undo!(s, step)
+        record!(s, "database.rename_channel", Dict{String,Any}("item" => key, "channel" => from, "name" => to))
+        return nothing
+    end
+end
+
+"""
+    delete_channel!(s, id, channel)
+
+Delete a channel of database `id`. Undoable: its files move to a side folder
+`<database>/.undo-*`, and undo moves them back, so the values come back as
+they were. Recorded as `"database.delete_channel"`.
+The side folder goes when undo moves the files back, or when the session
+closes with the channel still deleted (the step's `commit`, see
+`close_session!`). A session that is never closed (a crash, or an exit without
+close) leaves it; the next `open_session` sweeps it with a warning.
+Throws `ProtectedError` for a protected channel, `ArgumentError` for a channel
+that a position pair uses, `ItemBusyError` while a job or an export uses the
+database, and `DatabaseError` when there is no such channel.
+"""
+function delete_channel!(s::Session, id::AbstractString, name::AbstractString)
+    key, ch = String(id), String(name)
+    lock(s.lock) do
+        check_not_busy(s, key)
+        db = database(s.project, key)
+        c = channel(db, ch)
+        c.protected && throw(ProtectedError(ch))
+        used = filter(p -> ch in (p.x, p.y), db.pairs)
+        isempty(used) || throw(ArgumentError("channel $ch is used by position pair $(pairs_text(used))"))
+        info = copy_info(c)
+        side = Ref("")                         # the side folder that holds the files, while deleted
+        pos = Ref(0)
+        take_out() = lock(s.lock) do           # `undo!` runs the steps without the lock
+            d = database(s.project, key)
+            dir = mktempdir(d.folder; prefix = ".undo-", cleanup = false)
+            try
+                pos[] = take_out_channel!(d, ch, dir)
+            catch
+                rm(dir; recursive = true, force = true)
+                rethrow()
+            end
+            side[] = dir
+            nothing
+        end
+        put_back() = lock(s.lock) do
+            put_back_channel!(database(s.project, key), copy_info(info), pos[], side[])
+            rm(side[]; recursive = true, force = true)
+            side[] = ""
+            nothing
+        end
+        # Neither undo nor redo is possible any more: remove the side folder, if any.
+        free() = lock(s.lock) do
+            isempty(side[]) && return nothing
+            free_stray_maps()                  # Windows does not delete a mapped file
+            rm(side[]; recursive = true, force = true)
+            side[] = ""
+            nothing
+        end
+        take_out()
+        push_undo!(s, UndoStep("delete channel $ch", put_back, take_out, free, [key]; commit = free))
+        record!(s, "database.delete_channel", Dict{String,Any}("item" => key, "channel" => ch))
         return nothing
     end
 end

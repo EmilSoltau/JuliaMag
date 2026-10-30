@@ -134,8 +134,9 @@ end
         s = fresh_session()
         @test run_tool(s, "test.bins"; bins = 12.0)[1]
         @test last_settings(s, "test.bins")["bins"] === 12
-        @test last_settings(open_session(s.project.folder), "test.bins")["bins"] === 12   # an Int after JSON too
         @test occursin("run_tool(s, \"test.bins\"; bins = 12)", script_text(s))
+        close_session!(s)
+        @test with_session(s2 -> last_settings(s2, "test.bins")["bins"], s.project.folder) === 12   # an Int after JSON too
     finally
         unregister_tool!("test.bins")
     end
@@ -204,7 +205,7 @@ end
 
         # a run that works: the data changes, undo works, the run is recorded
         ok, msg, out = run_tool(s, "test.scale_data"; inputs = Dict("database" => id), in = "MAG", factor = 3)
-        @test ok && msg == "Scaled MAG by 3.0." && out == ProjectItem[]
+        @test ok && msg == "Scaled MAG by 3.0." && out == String[]
         @test mag() == [3.0, 6.0, 9.0]
         @test undo!(s) && mag() == [1.0, 2.0, 3.0] && redo!(s) && mag() == [3.0, 6.0, 9.0]
         e = s.history[nh+1]
@@ -213,16 +214,15 @@ end
 
         # remembered settings are saved in project.jmag.json under settings.tools
         @test last_settings(s, "test.scale_data")["factor"] === 3.0
-        s2 = open_session(s.project.folder)
-        @test s2.project.settings["tools"]["test.scale_data"]["in"] == "MAG"
-        @test last_settings(s2, "test.scale_data") == Dict{String,Any}("in" => "MAG", "factor" => 3.0)
-        reset_settings!(s2, "test.scale_data")
-        @test !haskey(open_session(s.project.folder).project.settings["tools"], "test.scale_data")
+        saved() = open_project(s.project.folder).settings["tools"]
+        @test saved()["test.scale_data"] == Dict{String,Any}("in" => "MAG", "factor" => 3.0)
+        reset_settings!(s, "test.scale_data")
+        @test !haskey(saved(), "test.scale_data")
 
         # a ToolError gives its own message; a busy item gives a plain message
         ok, msg, out = run_tool(s, "test.scale_data"; inputs = Dict("database" => id), in = "NOPE")
         @test !ok && msg == "There is no channel NOPE." && out === nothing
-        @test last_settings(s, "test.scale_data")["in"] == "NOPE"     # remembered, as the dialog showed it
+        @test last_settings(s, "test.scale_data")["in"] == ""         # a failed run is not remembered
         JuliaMagCore.mark_busy!(s, id)
         ok, msg, _ = run_tool(s, "test.scale_data"; inputs = Dict("database" => id), in = "MAG")
         @test !ok && msg == "$id is busy: an import is running."
@@ -253,12 +253,14 @@ end
     s = fresh_session()
     s.project.settings["tools"] = Dict{String,Any}("a" => 1, "b" => Dict{String,Any}("x" => 1))
     save_project(s.project)
+    close_session!(s)
     s2 = open_session(s.project.folder)
     @test s2.remembered == Dict("b" => Dict{String,Any}("x" => 1))
     @test any(w -> occursin("settings.tools.a is not an object", w), s2.warnings)
-    s.project.settings["tools"] = [1, 2]
-    save_project(s.project)
-    @test any(w -> occursin("settings.tools is not an object", w), open_session(s.project.folder).warnings)
+    s2.project.settings["tools"] = [1, 2]
+    save_project(s2.project)
+    close_session!(s2)
+    @test with_session(s3 -> any(w -> occursin("settings.tools is not an object", w), s3.warnings), s.project.folder)
 end
 
 @testset "job tools" begin
@@ -327,13 +329,14 @@ end
         L = first(database(s.project, id).lines).id
         set_line_selected!(s, id, L, false)             # depends on the import (imported channels are protected)
         txt = script_text(s)
-        @test occursin("wait_job(import_file(s, $(repr(f))))", txt)
+        @test occursin("wait_job(import_file(s, $(repr(f))); check = true)", txt)
         @test occursin("\nset_line_selected!(s, ", txt)
         # replay on a copy of the starting project, in a module of its own
         body = replace(txt, "open_session($(repr(folder)))" => "open_session($(repr(start)))")
         @test body != txt
         m = Module()
         Core.eval(m, Meta.parseall(body))
+        Core.eval(m, :(close_session!(s)))
         c = open_session(start)
         @test only(c.project.items).id == id
         want = collect(read_channel(database(s.project, id), L, "MAG"))
@@ -341,5 +344,32 @@ end
         @test isequal(got, want) && length(got) == 20_000
         @test !line(database(c.project, id), L).selected && line(database(c.project, id), last(database(c.project, id).lines).id).selected
         @test status(only(jobs(c))) == JOB_DONE
+        close_session!(c)
+    end
+end
+
+@testset "a quick tool records its outputs" begin
+    try
+        register_tool!(ToolSpec("test.make_item", "Make item", "", "", Place[], Pair{String,ItemKind}[],
+                                SettingSpec[], :quick, (s, i, st, p, r) -> begin
+            it = ProjectItem(new_item_id(s.project, ITEM_GRID), ITEM_GRID, "made", "grids/made", "", "")
+            lock(() -> (add_item!(s.project, it); save_project(s.project)), s.lock)
+            ProjectItem[it]
+        end))
+        s = fresh_session()
+        ok, _, out = run_tool(s, "test.make_item")
+        @test ok && out == ["grid-1"]                   # item ids, as in `Job.outputs`
+        @test s.history[end].command == "test.make_item" && s.history[end].outputs == out
+        rename_item!(s, only(out), "renamed")           # a later step uses the new item
+        # The script binds the output, and replays on the same project.
+        text = script_text(s)
+        @test occursin("grid_1 = only(wait_job(run_tool(s, \"test.make_item\"); check = true)[3])", text)
+        @test occursin("rename_item!(s, grid_1, \"renamed\")", text)
+        close_session!(s)
+        include_string(Module(), text)
+        names = with_session(s2 -> [(i.id, i.name) for i in s2.project.items], s.project.folder)
+        @test names == [("grid-1", "renamed"), ("grid-2", "renamed")]
+    finally
+        unregister_tool!("test.make_item")
     end
 end

@@ -497,7 +497,7 @@ function setup_csv_channels!(st::CsvState, layout::CsvLayout, plans::Vector{Chan
         xk = findfirst(p -> p.role != :array && p.name == layout.x, plans)
         yk = findfirst(p -> p.role != :array && p.name == layout.y, plans)
         crs = isempty(layout.crs) && name_role(layout.x) == ROLE_LON ? "EPSG:4326" : layout.crs
-        add_pair!(db, names[something(xk)], names[something(yk)], crs)
+        add_pair!(db, names[something(xk)], names[something(yk)], crs; warn = !isempty(layout.crs))
         db.current_pair == 0 && !isempty(db.pairs) && (db.current_pair = 1)
     end
     d = open_appenders(db, names)
@@ -690,7 +690,9 @@ function import_csv(s::Session, path::String, layout::CsvLayout; name::AbstractS
         read_csv!(st)
         return (final_warnings(st.log), st.rows, st.lines)
     end
-    record && record!(s, "import.csv", args)
+    # A new database is an output, so a script can name it by a variable.
+    made = mode == :new && r.item !== nothing ? String[r.item.id] : String[]
+    record && record!(s, "import.csv", args; outputs = made)
     return r
 end
 
@@ -707,7 +709,8 @@ const CSV_SETTINGS = SettingSpec[
                   labels = ["New database", "Append to existing"],
                   help = "new makes a new database. append adds the lines to an existing one."),
     TextSetting("name", "Database name"; help = "Leave blank to name it after the file."),
-    TextSetting("target", "Append to"; help = "The id of the database to append to, such as db-1."),
+    ItemSetting("target", "Append to", ITEM_DATABASE; optional = true,
+                help = "The database to append to, such as db-1. Used only to append."),
     TextSetting("template", "Import template";
                 help = "The name of a saved layout. Leave blank to guess the layout from the file."),
     TextSetting("layout", "Layout"; advanced = true,

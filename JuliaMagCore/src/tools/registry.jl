@@ -114,13 +114,14 @@ file settings without a tool default are empty and must be set before a run.
 default_settings(spec::ToolSpec)::Dict{String,Any} = default_settings(spec.settings)
 
 """
-    validate(spec, settings)::Vector{String}
+    validate(spec, settings; session = nothing)::Vector{String}
 
 The problems with `settings`, as plain sentences such as `"Factor must be at least 0."`.
 Empty means the settings are fine. A missing setting takes its default.
+With a `session`, an `ItemSetting` must name an item of its kind in the project.
 """
-validate(spec::ToolSpec, settings::AbstractDict)::Vector{String} =
-    validate_settings(spec.settings, settings, spec.name)
+validate(spec::ToolSpec, settings::AbstractDict; session::Union{Nothing,Session} = nothing)::Vector{String} =
+    validate_settings(spec.settings, settings, spec.name; session)
 
 # ---- remembered settings ---------------------------------------------------
 
@@ -225,13 +226,15 @@ Run a tool. The given settings go over the remembered ones (see `last_settings`)
 Inputs are item ids by input name, such as `inputs = Dict("database" => "db-1")`.
 
 The settings are checked first. With problems, nothing runs and the result is
-`(false, <the problems>, nothing)`. Otherwise the settings are remembered.
+`(false, <the problems>, nothing)`, and nothing is remembered.
 
-- A `:quick` tool runs now and returns `(ok, message, outputs)`. Nothing is
+- A `:quick` tool runs now and returns `(ok, message, outputs)`, where
+  `outputs` are the ids of the items it made, as in `Job.outputs`. Nothing is
   thrown: a `ToolError` gives its own message, other errors give
-  `"Tool failed: <message>"`. A run that worked is recorded in the history.
-- A `:job` tool returns the `Job` at once. The job records itself in the
-  history when it is done.
+  `"Tool failed: <message>"`. A run that worked is recorded in the history,
+  and only then are its settings remembered.
+- A `:job` tool returns the `Job` at once. Its settings are remembered when the
+  job starts. The job records itself in the history when it is done.
 """
 function run_tool(s::Session, id::AbstractString; inputs::AbstractDict = Dict{String,String}(), kwargs...)
     spec = find_tool(id)
@@ -242,12 +245,14 @@ function run_tool(s::Session, id::AbstractString; inputs::AbstractDict = Dict{St
         st = findfirst(x -> x.key == key, spec.settings)
         values[key] = st === nothing ? plain_arg(v) : setting_value(spec.settings[st], plain_arg(v))
     end
-    problems = vcat(input_problems(spec, inputs), validate(spec, values))
+    problems = vcat(input_problems(spec, inputs), validate(spec, values; session = s))
     isempty(problems) || return (false, join(problems, " "), nothing)
     ins = Dict{String,String}(String(k) => String(v) for (k, v) in inputs)
-    remember_settings!(s, spec.id, values)
     args = tool_args(values, ins)
-    spec.mode == :job && return start_job!(s, spec.id, args, tool_work(s, spec, ins, values))
+    if spec.mode == :job
+        remember_settings!(s, spec.id, values)
+        return start_job!(s, spec.id, args, tool_work(s, spec, ins, values))
+    end
     return run_quick(s, spec, ins, values, args)
 end
 
@@ -260,14 +265,16 @@ function run_quick(s::Session, spec::ToolSpec, ins::Dict{String,String}, values:
         e isa InterruptException && rethrow()
         return (false, failure_message(e), nothing)
     end
+    remember_settings!(s, spec.id, values)
+    ids = String[it.id for it in outputs]
     try
-        record!(s, spec.id, args)
+        record!(s, spec.id, args; outputs = ids)
     catch e
         e isa InterruptException && rethrow()
         session_warning!(s, "the run of $(spec.id) could not be recorded: $(sprint(showerror, e))")
     end
     text = strip(String(take!(report)))
-    return (true, isempty(text) ? "$(spec.name) is done." : String(text), outputs)
+    return (true, isempty(text) ? "$(spec.name) is done." : String(text), ids)
 end
 
 """
@@ -283,7 +290,7 @@ function tool_rerun_work(s::Session, spec::ToolSpec, a::Dict{String,Any})::Funct
         st = findfirst(x -> x.key == k, spec.settings)
         values[k] = st === nothing ? v : setting_value(spec.settings[st], v)
     end
-    problems = vcat(input_problems(spec, inputs), validate(spec, values))
+    problems = vcat(input_problems(spec, inputs), validate(spec, values; session = s))
     isempty(problems) || return (_, _) -> throw(ToolError(join(problems, " ")))
     ins = Dict{String,String}(String(k) => String(v) for (k, v) in inputs)
     return tool_work(s, spec, ins, values)

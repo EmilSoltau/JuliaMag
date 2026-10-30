@@ -134,9 +134,11 @@ function warm_up(root::String, csv::Bool)
     write_fast(f, 1, 2, csv)
     s = new_session(joinpath(root, "warm"), "warm")
     wait_job(import_file(s, f))
+    close_session!(s)
     s2 = open_session(s.project.folder)
     db = database(s2.project, s2.project.items[end].id)
     sum(read_channel(db, first(db.lines).id, "MAG"))
+    close_session!(s2)
     return nothing
 end
 
@@ -188,6 +190,7 @@ function main(args)
                 " (baseline ", round(base / 2^20; digits = 0), " MiB, peak ", round(smp.peak / 2^20; digits = 0), " MiB)")
         # Open the project again and read one channel of one line.
         item_id = s.project.items[end].id
+        close_session!(s)
         tr = @elapsed (s2 = open_session(s.project.folder))
         td = @elapsed (db = database(s2.project, item_id))
         l1 = first(db.lines).id
@@ -197,6 +200,7 @@ function main(args)
         println("open_session: ", round(tr * 1000; digits = 2), " ms; open database ", round(td * 1000; digits = 2), " ms; read_channel first call ",
                 round(tc1 * 1000; digits = 3), " ms, second ", round(tc2 * 1000; digits = 3), " ms (",
                 length(v), " rows); sum of it ", round(ts * 1000; digits = 3), " ms")
+        close_session!(s2)
     finally
         keep || rm(root; recursive = true, force = true)
     end

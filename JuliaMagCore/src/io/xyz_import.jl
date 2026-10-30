@@ -352,7 +352,9 @@ function import_xyz(s::Session, path::String; name::AbstractString = splitext(ba
         read_xyz!(st)
         return (final_warnings(st.log), st.rows, st.lines)
     end
-    record && record!(s, "import.geosoft_xyz", args)
+    # A new database is an output, so a script can name it by a variable.
+    made = mode == :new && r.item !== nothing ? String[r.item.id] : String[]
+    record && record!(s, "import.geosoft_xyz", args; outputs = made)
     return r
 end
 
@@ -364,7 +366,8 @@ const XYZ_SETTINGS = SettingSpec[
                   labels = ["New database", "Append to existing"],
                   help = "new makes a new database. append adds the lines to an existing one."),
     TextSetting("name", "Database name"; help = "Leave blank to name it after the file."),
-    TextSetting("target", "Append to"; help = "The id of the database to append to, such as db-1."),
+    ItemSetting("target", "Append to", ITEM_DATABASE; optional = true,
+                help = "The database to append to, such as db-1. Used only to append."),
     CRSSetting("crs", "Coordinate system"; help = "The code of the X and Y coordinates, such as EPSG:7855."),
 ]
 

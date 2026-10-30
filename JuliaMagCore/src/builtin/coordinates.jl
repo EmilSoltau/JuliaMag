@@ -6,9 +6,12 @@
 # - `coordinates.guess_utm`: say which UTM zone most points are in.
 #
 # The quick tools change `database.json` under `s.lock` and push an undo step
-# that puts the old values back. The reproject job marks the database busy while
+# that puts the old values back. The step takes `s.lock` too, since `undo!`
+# runs it without the lock. The reproject job marks the database busy while
 # it writes (readers such as exports wait too), and notes an undo that rolls the
 # database back to its committed state before the job (see `note_append_undo!`).
+# What PROJ says while it reprojects, such as that it used a ballpark
+# transformation, becomes a job warning.
 # Guess UTM zone only reads: it shares the database with exports and appends.
 
 const COORDINATES_TAB = "Coordinates"
@@ -71,7 +74,7 @@ An undo step that sets the pair `x,y` of database `id` back to `old` with
 `apply(pair_index, db, value)`, and forward to `new` again.
 """
 function meta_undo_step(s::Session, id::String, label::String, apply::Function, x::String, y::String, old, new)
-    put(v) = () -> begin
+    put(v) = () -> lock(s.lock) do
         db = database(s.project, id)
         k = findfirst(p -> p.x == x && p.y == y, db.pairs)
         k === nothing && throw(DatabaseError("database $id has no position pair $x,$y any more"))
@@ -118,7 +121,7 @@ function run_set_current(s::Session, ins::Dict{String,String}, st::Dict{String,A
         old = db.current_pair
         # Undo goes back to the old current pair by its names, so look them up now.
         oldp = old == 0 ? nothing : db.pairs[old]
-        put(target) = () -> begin
+        put(target) = () -> lock(s.lock) do
             d = database(s.project, id)
             if target === nothing
                 d.current_pair = 0
@@ -260,6 +263,7 @@ function run_reproject(s::Session, ins::Dict{String,String}, st::Dict{String,Any
     local xname::String
     local yname::String
     failed = 0
+    messages = String[]
     try
         nchannels, rows = length(db.channels), db.rows_written
         r = Reprojector(p.crs, target)
@@ -280,6 +284,7 @@ function run_reproject(s::Session, ins::Dict{String,String}, st::Dict{String,Any
                 done += l.nrows
                 report(progress, rows == 0 ? 1.0 : done / rows)
             end
+            messages = proj_messages(r)
             push!(db.pairs, PositionPair(xname, yname, target))
             st["make_current"] === true && (db.current_pair = length(db.pairs))
             release_maps!(db)
@@ -304,6 +309,8 @@ function run_reproject(s::Session, ins::Dict{String,String}, st::Dict{String,Any
     println(out, "New position pair: ", xname, ",", yname,
             st["make_current"] === true ? " (now the current pair)." : ".")
     failed > 0 && println(out, failed_text(failed, p.crs, target))
+    # What PROJ said, such as that it used a ballpark transformation.
+    foreach(job_warning!, messages)
     return nothing
 end
 

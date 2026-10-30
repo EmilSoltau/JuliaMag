@@ -199,7 +199,9 @@ end
     @test load_template(s, "Survey 2024 / A") == layout
     @test list_templates(s) == ["Survey 2024 / A"]
     # The template is plain JSON that a new session reads too.
-    @test load_template(open_session(s.project.folder), "Survey 2024 / A") == layout
+    close_session!(s)
+    @test with_session(s2 -> load_template(s2, "Survey 2024 / A"), s.project.folder) == layout
+    s = open_session(s.project.folder)
     e = try
         load_template(s, "nope"); nothing
     catch err

@@ -1164,3 +1164,138 @@ function quietly_rm(path::String)
     end
     return nothing
 end
+
+# ---- rename and delete a channel -------------------------------------------
+#
+# The file name of a channel is its name, so a rename or a delete moves files.
+# `database.json` is the commit point, as for an append:
+# - A rename moves the files first and writes `database.json` last. A crash in
+#   between leaves the files under the new name while `database.json` still
+#   names the old one: `open_database` then reports the missing file.
+# - A delete writes `database.json` first and then moves the files into a side
+#   folder. A crash in between leaves files that no channel names, which do no harm.
+# On an error, what was done so far is put back and the error is thrown.
+
+"The formats a channel may have (see `ChannelInfo`)."
+const CHANNEL_FORMATS = (:normal, :exponential, :date, :time)
+
+"A copy of a channel's facts."
+copy_info(c::ChannelInfo) = ChannelInfo((getfield(c, f) for f in fieldnames(ChannelInfo))...)
+
+"""
+Move a file with a rename. Throws `DatabaseError` when `to` exists already,
+unless it is the same file (a rename that changes only the case, on a file
+system that ignores case).
+"""
+function move_file!(from::String, to::String)
+    ispath(to) && !samefile(from, to) && throw(DatabaseError("cannot move $from to $to: $to exists already"))
+    Base.rename(from, to)
+    return nothing
+end
+
+"Move each file `froms[k]` to `tos[k]`, in order. On an error, move the ones done back and throw."
+function move_files!(froms::Vector{String}, tos::Vector{String})
+    done = 0
+    try
+        for (f, t) in zip(froms, tos)
+            move_file!(f, t)
+            done += 1
+        end
+    catch
+        for k in done:-1:1
+            try
+                Base.rename(tos[k], froms[k])
+            catch e
+                e isa InterruptException && rethrow()
+            end
+        end
+        rethrow()
+    end
+    return nothing
+end
+
+"""
+    rename_channel_files!(db, old, new)
+
+Rename channel `old` to `new`: its files, its name, and the names in the
+position pairs that use it. Then write `database.json`. The caller checks the
+new name. On an error, the files and `db` are put back and the error is thrown.
+"""
+function rename_channel_files!(db::LineDatabase, old::String, new::String)
+    c = channel(db, old)
+    renamed = copy_info(c)
+    renamed.name = new
+    froms, tos = channel_files(db, c), channel_files(db, renamed)
+    release_map!(db, c.name)
+    free_stray_maps()          # Windows does not rename a mapped file
+    move_files!(froms, tos)
+    names = [(p.x, p.y) for p in db.pairs]
+    try
+        c.name = new
+        for p in db.pairs
+            p.x == old && (p.x = new)
+            p.y == old && (p.y = new)
+        end
+        save_meta(db)
+    catch
+        c.name = old
+        foreach((p, (x, y)) -> (p.x = x; p.y = y), db.pairs, names)
+        move_files!(tos, froms)
+        rethrow()
+    end
+    return nothing
+end
+
+"""
+    take_out_channel!(db, name, side)::Int
+
+Take channel `name` out of the database: write `database.json` without it,
+then move its files into the folder `side`. Returns the channel's position,
+for `put_back_channel!`. On an error, the channel is put back and the error thrown.
+"""
+function take_out_channel!(db::LineDatabase, name::String, side::String)::Int
+    k = channel_position(db, name)
+    k == 0 && throw(DatabaseError("no channel $name in database $(db.name)"))
+    c = db.channels[k]
+    files = channel_files(db, c)
+    release_map!(db, c.name)
+    free_stray_maps()          # Windows does not move a mapped file
+    deleteat!(db.channels, k)
+    try
+        save_meta(db)          # the commit point, first
+    catch
+        insert!(db.channels, k, c)
+        rethrow()
+    end
+    try
+        move_files!(files, [joinpath(side, basename(f)) for f in files])
+    catch
+        insert!(db.channels, k, c)
+        save_meta(db)
+        rethrow()
+    end
+    return k
+end
+
+"""
+    put_back_channel!(db, info, k, side)
+
+Undo `take_out_channel!`: move the files of channel `info` back from the folder
+`side`, then write `database.json` with the channel at position `k`.
+Throws `DatabaseError`, and changes nothing, when a channel has the name now.
+"""
+function put_back_channel!(db::LineDatabase, info::ChannelInfo, k::Int, side::String)
+    check_channel_info(info, Set{String}(lowercase(c.name) for c in db.channels))
+    files = channel_files(db, info)
+    sides = [joinpath(side, basename(f)) for f in files]
+    move_files!(sides, files)
+    try
+        insert!(db.channels, clamp(k, 1, length(db.channels) + 1), info)
+        save_meta(db)          # the commit point, last
+    catch
+        filter!(c -> c !== info, db.channels)
+        move_files!(files, sides)
+        rethrow()
+    end
+    return nothing
+end
