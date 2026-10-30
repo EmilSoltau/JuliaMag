@@ -33,16 +33,56 @@ watch_now!(app) = (refresh_now!(app); UI.watch_jobs!(app); nothing)
         @test job_summary(fake_job_row(status = Core.JOB_UNDONE, outputs = ["db-1"], names = names)) == "Undone."
     end
 
-    @testset "job times" begin
-        @test UI.stamp_seconds("2026-10-30T10:43:02.123+1000") ≈ UI.stamp_seconds("2026-10-30T00:43:02.123+0000")
-        @test UI.stamp_seconds("2026-10-30T10:43:04.200+1000") - UI.stamp_seconds("2026-10-30T10:43:02.100+1000") ≈ 2.1 atol = 1e-3
-        @test UI.stamp_seconds("2026-03-01T00:00:00+0000") - UI.stamp_seconds("2026-02-28T23:59:59+0000") == 1
-        @test isnan(UI.stamp_seconds("")) && isnan(UI.stamp_seconds("yesterday"))
+    @testset "job times: the new UTC form and every older form" begin
+        z = UI.job_time("2026-10-31T09:15:02.123Z")
+        @test z.zoned && z.seconds ≈ UI.job_time("2026-10-31T19:15:02.123+1000").seconds
+        @test UI.job_time("2026-10-31T19:15:02.123+10:00").seconds ≈ z.seconds
+        @test UI.job_time("2026-10-31T04:15:02.123-0500").seconds ≈ z.seconds
+        @test UI.job_time("2026-10-31T09:15:02Z").seconds ≈ z.seconds - 0.123
+        @test UI.job_time("2026-03-01T00:00:00+0000").seconds - UI.job_time("2026-02-28T23:59:59+0000").seconds == 1
+        # Windows wrote the zone's name for %z: the clock fields are local time.
+        w = UI.job_time("2026-10-30T10:43:02AUS Eastern Standard Time")
+        @test w !== nothing && !w.zoned
+        @test UI.job_time("") === nothing && UI.job_time("yesterday") === nothing
+        # What the core writes now reads back.
+        @test UI.job_time(Core.job_time_text(1_761_902_102.123)).seconds ≈ 1_761_902_102.123 atol = 1e-3
+        # How long a job took, in any form; a mix of zoned and unzoned times is unknown.
+        @test UI.elapsed("2026-10-31T09:15:02.100Z", "2026-10-31T09:15:04.200Z") ≈ 2.1 atol = 1e-3
+        @test UI.elapsed("2026-10-30T10:43:02.100+1000", "2026-10-30T10:43:04.200+1000") ≈ 2.1 atol = 1e-3
+        @test UI.elapsed("2026-10-30T10:43:02Mitteleuropäische Zeit", "2026-10-30T10:44:05Mitteleuropäische Zeit") == 63
+        @test isnan(UI.elapsed("2026-10-30T10:43:02Z", "2026-10-30T10:44:05AUS Eastern Standard Time"))
+        @test isnan(UI.elapsed("", "2026-10-30T10:44:05Z"))
+        # The card shows local HH:MM; the offset is given here, so no test depends on the machine.
+        @test UI.clock_text("2026-10-31T09:15:02.123Z", 36000) == "19:15"
+        @test UI.clock_text("2026-10-31T09:15:02.123Z", -5 * 3600) == "04:15"
+        @test UI.clock_text("2026-10-31T23:30:00Z", 3600) == "00:30"
+        @test UI.clock_text("2026-10-30T10:43:02+1000", 0) == "00:43"
+        @test UI.clock_text("2026-10-30T10:43:02AUS Eastern Standard Time", 3600) == "10:43"
+        @test UI.clock_text("", 0) == "" && UI.clock_text("yesterday", 0) == ""
+        o = UI.local_offset(1_761_902_102.0)
+        @test o % 900 == 0 && abs(o) <= 14 * 3600
+        @test UI.clock_text("2026-10-31T09:15:02.123Z") == UI.clock_text("2026-10-31T09:15:02.123Z",
+            UI.local_offset(UI.job_time("2026-10-31T09:15:02.123Z").seconds))
         @test UI.duration_text(0.43) == "0.4 s" && UI.duration_text(59.94) == "59.9 s"
         @test UI.duration_text(0.04) == "under 0.1 s" && UI.duration_text(59.96) == "1 min 0 s"
         @test UI.duration_text(65.4) == "1 min 5 s" && UI.duration_text(3725) == "62 min 5 s"
-        @test UI.clock_text("2026-10-30T10:43:02.123+1000") == "10:43" && UI.clock_text("") == ""
         @test UI.percent_text(0.404) == "40 %" && UI.percent_text(1.2) == "100 %" && UI.percent_text(NaN) == "0 %"
+        @test job_summary(fake_job_row(started = "2026-10-31T09:15:02.100Z", finished = "2026-10-31T09:15:04.200Z")) ==
+              "Done in 2.1 s."
+    end
+
+    @testset "a card shows at most 3 warnings" begin
+        @test UI.card_warnings(["a", "b"]) == ["a", "b"]
+        @test UI.card_warnings(["a", "b", "c"]) == ["a", "b", "c"]
+        @test UI.card_warnings(["a", "b", "c", "d"]) == ["a", "b", "c", "And 1 more warning. See Report."]
+        @test UI.card_warnings(["w$k" for k in 1:200])[end] == "And 197 more warnings. See Report."
+    end
+
+    @testset "Cancel says Cancelling... once asked" begin
+        r = fake_job_row(status = Core.JOB_RUNNING)
+        @test UI.cancel_label(r) == "Cancel"
+        Core.cancel!(r.job)
+        @test UI.cancel_label(r) == "Cancelling..."
     end
 
     @testset "job_target" begin
@@ -175,12 +215,20 @@ watch_now!(app) = (refresh_now!(app); UI.watch_jobs!(app); nothing)
         d = UI.job_report_dialog(r, "Step 1 of 10\nWarning: line 3 is short\n", ["line 3 is short", "no CRS"])
         @test d isa ResultDialog && d.title == "Job Report: Gate"
         @test d.lines == ["Step 1 of 10", "Warning: line 3 is short", "", "Warnings:", "  no CRS", "",
-            "Settings:", "  inputs = {\"database\":\"db-1\"}", "  name = \"Survey\"", "  steps = 10"]
+            "Settings:", "  inputs = {\"database\": \"db-1\"}", "  name = \"Survey\"", "  steps = 10"]
         @test d.kinds[2] == :warn && d.kinds[5] == :warn && d.kinds[1] == :text && d.kinds[7] == :dim
         @test d.text == join(d.lines, '\n')
         # No warnings beyond the report's own: no Warnings section.
         d = UI.job_report_dialog(r, "Warning: line 3 is short", ["line 3 is short"])
         @test !("Warnings:" in d.lines) && d.lines[1] == "Warning: line 3 is short"
+        # Inputs and items show their names, with the id; Inf and NaN settings work.
+        r = fake_job_row(title = "Gate", names = Dict("db-1" => "Kangaroo Hills"),
+            args = Dict("inputs" => Dict("database" => "db-1", "grid" => "gr-9"), "item" => "db-1",
+                "max" => Inf, "min" => -Inf, "dummy" => NaN))
+        d = UI.job_report_dialog(r, "", String[])
+        @test "  inputs = {\"database\": \"Kangaroo Hills (db-1)\", \"grid\": \"gr-9\"}" in d.lines
+        @test "  item = \"Kangaroo Hills (db-1)\"" in d.lines
+        @test "  max = Infinity" in d.lines && "  min = -Infinity" in d.lines && "  dummy = NaN" in d.lines
         # An empty report says so.
         d = UI.job_report_dialog(fake_job_row(), "", String[])
         @test d.lines[1] == "The job wrote no report."
@@ -193,7 +241,7 @@ watch_now!(app) = (refresh_now!(app); UI.watch_jobs!(app); nothing)
                 s = app.session
                 job = Core.run_tool(s, "test.gate")
                 put!(gate, 3)
-                timedwait(() -> job.progress[] >= 0.3, 10)
+                @test timedwait(() -> job.progress[] >= 0.3, 10) === :ok
                 refresh_now!(app)
                 r = row_of(app, job)
                 UI.show_report!(app, r)
@@ -224,6 +272,14 @@ watch_now!(app) = (refresh_now!(app); UI.watch_jobs!(app); nothing)
                 UI.run_again!(app, row_of(app, done))
                 wait_drained(app)
                 @test UI.offers_replace(app, last(app.ui.dialogs).form)
+
+                # Undone, its output is out of the project: nothing to replace.
+                @test Core.undo!(s)
+                refresh_now!(app)
+                empty!(app.ui.dialogs)
+                UI.run_again!(app, row_of(app, done))
+                wait_drained(app)
+                @test !UI.offers_replace(app, last(app.ui.dialogs).form)
 
                 # A command that is not registered cannot run again.
                 @test UI.job_owner("test.gone") === nothing

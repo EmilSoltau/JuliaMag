@@ -97,7 +97,7 @@ function job_summary(r::JobRow)::String
     st == Core.JOB_CANCELLED && return "Cancelled at $(percent_text(r.job.progress[])). Nothing was written."
     st == Core.JOB_FAILED && return r.error
     st == Core.JOB_UNDONE && return "Undone."
-    sec = stamp_seconds(r.finished) - stamp_seconds(r.started)
+    sec = elapsed(r.started, r.finished)
     head = isfinite(sec) && sec >= 0 ? "Done in $(duration_text(sec))." : "Done."
     made = made_text(r)
     return isempty(made) ? head : head * " " * made
@@ -123,28 +123,81 @@ function duration_text(sec::Real)::String
     return string(m, " min ", s, " s")
 end
 
-"The `HH:MM` of a job time, or `\"\"`."
-function clock_text(stamp::AbstractString)::String
-    m = match(r"T(\d\d:\d\d)", stamp)
-    return m === nothing ? "" : String(something(m[1]))
+"""
+    JobTime
+
+A job time read from its text: `seconds` since 1970, and whether the text named its zone
+(`zoned`). Without a zone (records written on Windows had the zone's name, not an offset),
+`seconds` holds the local clock time read as if it were UTC.
+"""
+struct JobTime
+    seconds::Float64
+    zoned::Bool
 end
 
-const STAMP = r"^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.(\d{1,9}))?(?:([+-])(\d\d)(\d\d))?$"
+const STAMP = r"^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.(\d{1,9}))?(.*)$"
+const ZONE = r"^([+-])(\d\d):?(\d\d)$"
 
 """
-    stamp_seconds(stamp) -> Float64
+    job_time(text) -> JobTime or nothing
 
-A job time such as `"2026-10-30T10:43:02.123+1000"` as seconds since 1970 (UTC), or `NaN`
-when it is not one. Milliseconds and the zone are optional, as in older job records.
+Read a job time in any form the core wrote: now UTC with a "Z", such as
+`"2026-10-31T09:15:02.123Z"`; before that local time with `+hhmm` (milliseconds optional),
+or with a zone name on Windows. `nothing` when the text is not a time.
 """
-function stamp_seconds(stamp::AbstractString)::Float64
-    m = match(STAMP, stamp)
-    m === nothing && return NaN
+function job_time(text::AbstractString)::Union{Nothing,JobTime}
+    m = match(STAMP, text)
+    m === nothing && return nothing
     part(k) = parse(Int, something(m[k]))
     secs = days_from_civil(part(1), part(2), part(3)) * 86400 + part(4) * 3600 + part(5) * 60 + part(6)
     frac = m[7] === nothing ? 0.0 : part(7) / 10.0^length(something(m[7]))
-    zone = m[8] === nothing ? 0 : (m[8] == "-" ? -1 : 1) * (part(9) * 3600 + part(10) * 60)
-    return secs + frac - zone
+    zone = strip(something(m[8]))
+    zone == "Z" && return JobTime(secs + frac, true)
+    z = match(ZONE, zone)
+    z === nothing && return JobTime(secs + frac, false)   # no zone, or only its name
+    offset = (z[1] == "-" ? -1 : 1) * (parse(Int, something(z[2])) * 3600 + parse(Int, something(z[3])) * 60)
+    return JobTime(secs + frac - offset, true)
+end
+
+"""
+    elapsed(started, finished) -> Float64
+
+The seconds between two job times, or `NaN` when one cannot be read or only one of them
+names its zone.
+"""
+function elapsed(started::AbstractString, finished::AbstractString)::Float64
+    a, b = job_time(started), job_time(finished)
+    (a === nothing || b === nothing || a.zoned != b.zoned) && return NaN
+    return b.seconds - a.seconds
+end
+
+"""
+    local_offset(t) -> Int
+
+The machine's offset from UTC at time `t` (seconds since 1970), in seconds, summer time
+included. It uses the C library's local time, which works on every platform.
+"""
+function local_offset(t::Real)::Int
+    whole = floor(Int, t)
+    tm = Libc.TmStruct(whole)
+    wall = days_from_civil(Int(tm.year) + 1900, Int(tm.month) + 1, Int(tm.mday)) * 86400 +
+        Int(tm.hour) * 3600 + Int(tm.min) * 60 + Int(tm.sec)
+    return round(Int, (wall - whole) / 60) * 60
+end
+
+"""
+    clock_text(text, offset = the machine's offset) -> String
+
+The local `HH:MM` of a job time, or `""`. A time with a zone is moved by `offset` seconds
+from UTC; a time without one is shown as written.
+"""
+function clock_text(text::AbstractString, offset::Union{Nothing,Integer} = nothing)::String
+    t = job_time(text)
+    t === nothing && return ""
+    wall = t.seconds
+    t.zoned && (wall += offset === nothing ? local_offset(t.seconds) : offset)
+    minutes = mod(floor(Int, wall), 86400) ÷ 60
+    return string(lpad(minutes ÷ 60, 2, '0'), ":", lpad(minutes % 60, 2, '0'))
 end
 
 # Days from 1970-01-01 to a date of the proleptic Gregorian calendar (H. Hinnant's method).
@@ -198,15 +251,18 @@ end
 """
     offers_replace(app, form) -> Bool
 
-Does a Run Again dialog show "Replace the old output"? Only when the job it runs again
-made items. Reads the snapshot.
+Does a Run Again dialog show "Replace the old output"? Only when the job it runs again is
+done and an item it made is still in the project (not after an undo). Reads the snapshot.
 """
 function offers_replace(app, f::Form)::Bool
     job = f.rerun_of
     snap = app.snap
     (job === nothing || snap === nothing) && return false
     k = findfirst(r -> r.job === job, snap.jobs)
-    return k !== nothing && !isempty(snap.jobs[k].outputs)
+    k === nothing && return false
+    r = snap.jobs[k]
+    r.status == Core.JOB_DONE || return false
+    return any(it -> it.id in r.outputs, snap.items)
 end
 
 "Ask a running job to stop, through the worker."
@@ -268,9 +324,22 @@ function job_report_dialog(r::JobRow, report::AbstractString, warnings::Vector{S
     add("Settings:", :dim)
     isempty(r.args) && add("  None", :dim)
     for k in sort!(collect(keys(r.args)))
-        add("  $k = " * JSON3.write(r.args[k]), :text)
+        add("  $k = " * setting_text(r, k, r.args[k]), :text)
     end
     return ResultDialog("Job Report: " * job_title(r), lines, kinds)
+end
+
+# A setting's value for the report, as JSON (Inf and NaN too). Item ids show the item's
+# name with the id: `inputs`, an export's `item` and an append's `target`.
+function setting_text(r::JobRow, key::AbstractString, v)::String
+    named(id) = haskey(r.names, id) ? "$(r.names[id]) ($id)" : String(id)
+    if key == "inputs" && v isa AbstractDict
+        value(x) = JSON3.write(x isa AbstractString ? named(x) : x; allow_inf = true)
+        parts = ["$(JSON3.write(string(k))): $(value(x))" for (k, x) in sort!(collect(v); by = first)]
+        return "{" * join(parts, ", ") * "}"
+    end
+    key in ("item", "target") && v isa AbstractString && !isempty(v) && return JSON3.write(named(v))
+    return JSON3.write(v; allow_inf = true)
 end
 
 # --- Toasts ---
@@ -319,50 +388,129 @@ function job_ended_toast!(app, r::JobRow)
 end
 
 # --- Layout ---
+#
+# Cards are laid out per job and cached by what they show and their width, so a long job
+# history is measured once, and only for the cards that come into view. Cards not drawn yet
+# get their height from an estimate of their wrapped lines, which drawing then corrects.
 
-"One card: its height, its texts cut to fit, and whether it can run again."
-struct CardLayout
-    height::Float32
+const CARD_WARNINGS = 3   # a card shows at most this many warnings; Report shows all
+
+"The warnings a card shows: the first $(CARD_WARNINGS), then \"And N more warnings. See Report.\"."
+function card_warnings(warnings::Vector{String})::Vector{String}
+    length(warnings) <= CARD_WARNINGS && return copy(warnings)
+    n = length(warnings) - CARD_WARNINGS
+    return vcat(warnings[1:CARD_WARNINGS], "And $n more warning$(n == 1 ? "" : "s"). See Report.")
+end
+
+"What a card shows, measured to fit its width: the texts, the lines and whether it can run again."
+struct CardText
     title::String
     target::String
+    time::String
     summary::Vector{String}
     warnings::Vector{String}
     rerun::Bool
 end
 
 """
-    JobsLayout
+    CardEntry
 
-The cards of one snapshot at one width and scale (`card_layout`), and the top of each,
-from the top of the list, in device pixels. `total` is the list's height.
+The card of one job at one width and scale. `key` is a hash of what it shows (`card_key`).
+Until the card is first drawn, `text` is `nothing` and its line counts are estimates; the
+height follows the line counts.
 """
-struct JobsLayout
-    snap::Snapshot
+mutable struct CardEntry
+    key::UInt64
     width::Float32
     scale::Float32
-    cards::Vector{CardLayout}
-    tops::Vector{Float32}
-    total::Float32
+    has_target::Bool
+    summary_lines::Int
+    warning_lines::Int
+    height::Float32
+    text::Union{Nothing,CardText}
 end
 
 """
-    card_layout(r, width, scale, measure, wrap) -> CardLayout
+    JobsView
 
-Lay out the card of job `r`, `width` device px wide, as the prototype's `.job`: padding
-9 12 10, rows 5 apart, a 1 px line under it. The rows: a 16 px row with the icon, the title
-(semibold 12.5, cut to fit) and the time on the right; the target (11.5, cut); then the
-4 px bar while it runs, or the summary (cut; a failed job's error wraps, red, at most
-$(ERROR_LINES) lines); the warnings (wrapped, amber); the 22 px row of link buttons.
-`measure(role, size, text)` and `wrap(role, size, text, max_width)` work in device px.
+The layout of the Jobs tab's cards:
+
+- `snap`, `width`, `height`, `scale`: the snapshot and the list's box it was built for.
+- `bar`: the scrollbar shows; `card_w`: the cards' width (10 px less with the bar).
+- `entries`: the card of each job, by id. They outlive snapshots: a job whose card did
+  not change is not measured again.
+- `tops`: each card's top, from the list's top; `total`: the list's height (device px).
+- `measured`: how many cards were measured since the project opened; `drawn`: how many
+  cards the last frame drew (tests read both).
 """
-function card_layout(r::JobRow, width::Real, scale::Real, measure, wrap)::CardLayout
+mutable struct JobsView
+    snap::Union{Nothing,Snapshot}
+    width::Float32
+    height::Float32
+    scale::Float32
+    bar::Bool
+    card_w::Float32
+    entries::Dict{String,CardEntry}
+    tops::Vector{Float32}
+    total::Float32
+    measured::Int
+    drawn::Int
+end
+
+JobsView() = JobsView(nothing, 0f0, 0f0, 0f0, false, 0f0, Dict{String,CardEntry}(), Float32[], 0f0, 0, 0)
+
+# A hash of what a card shows. A running card's percent and bar are read live, so they
+# are not in it.
+function card_key(r::JobRow)::UInt64
+    r.status == Core.JOB_RUNNING && return hash((r.status, r.command, job_title(r), job_target(r)))
+    return hash((r.status, r.command, job_title(r), job_target(r), job_summary(r), r.warnings, r.started))
+end
+
+# The lines `text` likely wraps to at `width`, without measuring (about 0.55 em a character).
+function estimate_lines(text::AbstractString, width::Real, scale::Real)::Int
+    per_line = max(1, floor(Int, width / (0.55 * SUB_SIZE * scale)))
+    return sum(p -> max(1, cld(length(p), per_line)), split(text, '\n'))
+end
+
+# The text width of a card's sub lines.
+card_text_w(width::Real, scale::Real) = Float32(width) - fpx(scale, 2 * CARD_SIDE + CARD_INDENT)
+
+# A card's height from its line counts (see `draw_job_card` for the rows).
+function card_height(r::JobRow, has_target::Bool, summary_lines::Int, warning_lines::Int,
+        scale::Real)::Float32
     p(v) = fpx(scale, v)
     sub_h = p(SUB_SIZE * 1.25)
+    h = p(CARD_TOP + CARD_ICON + CARD_GAP) + (has_target ? sub_h : 0f0)
+    h += r.status == Core.JOB_RUNNING ? p(CARD_GAP + JOB_BAR_H) : p(CARD_GAP) + summary_lines * sub_h
+    warning_lines > 0 && (h += p(CARD_GAP) + warning_lines * sub_h)
+    return h + p(CARD_GAP + ACT_H + CARD_BOTTOM) + hairline(scale)
+end
+
+# A new card entry with estimated line counts.
+function estimated_entry(r::JobRow, key::UInt64, width::Float32, scale::Float32)::CardEntry
+    text_w = card_text_w(width, scale)
+    summary = r.status == Core.JOB_RUNNING ? 0 :
+        r.status == Core.JOB_FAILED ? min(ERROR_LINES, estimate_lines(job_summary(r), text_w, scale)) : 1
+    warnings = sum((estimate_lines(w, text_w, scale) for w in card_warnings(r.warnings)); init = 0)
+    has_target = !isempty(job_target(r))
+    return CardEntry(key, width, scale, has_target, summary, warnings,
+        card_height(r, has_target, summary, warnings, scale), nothing)
+end
+
+"""
+    card_text(r, width, scale, measure, wrap) -> CardText
+
+Measure the card of job `r` at `width` device px: the title (semibold 12.5) cut to leave
+room for the time, the target and the summary (11.5) cut to fit; a failed job's error
+wraps, at most $(ERROR_LINES) lines; the warnings (`card_warnings`) wrap.
+`measure(role, size, text)` and `wrap(role, size, text, max_width)` work in device px.
+"""
+function card_text(r::JobRow, width::Real, scale::Real, measure, wrap)::CardText
     running = r.status == Core.JOB_RUNNING
-    right = running ? "100 %" : clock_text(r.started)
-    title_w = width - p(2 * CARD_SIDE + CARD_INDENT) - measure(FONT_REGULAR, TIME_SIZE, right) - p(8)
+    time = running ? "" : clock_text(r.started)
+    text_w = card_text_w(width, scale)
+    title_w = text_w - measure(FONT_REGULAR, TIME_SIZE, running ? "100 %" : time) - fpx(scale, 8)
     title = elide(measure, job_title(r), title_w; role = FONT_SEMIBOLD, size = BODY_FONT_SIZE)
-    text_w = width - p(2 * CARD_SIDE + CARD_INDENT)
     target = elide(measure, job_target(r), text_w; size = SUB_SIZE)
     summary = String[]
     if r.status == Core.JOB_FAILED
@@ -375,32 +523,104 @@ function card_layout(r::JobRow, width::Real, scale::Real, measure, wrap)::CardLa
         summary = [elide(measure, job_summary(r), text_w; size = SUB_SIZE)]
     end
     warnings = String[]
-    for w in r.warnings
+    for w in card_warnings(r.warnings)
         append!(warnings, wrap(FONT_REGULAR, SUB_SIZE, w, text_w))
     end
-    h = p(CARD_TOP + CARD_ICON + CARD_GAP) + (isempty(target) ? 0f0 : sub_h)
-    h += running ? p(CARD_GAP + JOB_BAR_H) : p(CARD_GAP) + length(summary) * sub_h
-    isempty(warnings) || (h += p(CARD_GAP) + length(warnings) * sub_h)
-    h += p(CARD_GAP + ACT_H + CARD_BOTTOM) + hairline(scale)
-    return CardLayout(h, title, target, summary, warnings, job_owner(r.command) !== nothing)
+    return CardText(title, target, time, summary, warnings, job_owner(r.command) !== nothing)
 end
 
-# The layout of the jobs of `snap` at `width`, from the cache when nothing changed.
-function jobs_layout!(app, snap::Snapshot, width::Float32)::JobsLayout
-    s = app.window.scale
-    c = app.ui.jobs_cache
-    c isa JobsLayout && c.snap === snap && c.width == width && c.scale == s && return c
-    measure = (role, size, text) -> text_width(role, size, text)
-    cards = CardLayout[card_layout(r, width, s, measure, wrap_lines) for r in snap.jobs]
-    tops = Float32[]
+# The card of `r` at `width`: the cached one when nothing changed, else a new estimate.
+function fit_card!(v::JobsView, r::JobRow, width::Float32, scale::Float32)::CardEntry
+    key = card_key(r)
+    e = get(v.entries, r.id, nothing)
+    (e !== nothing && e.key == key && e.width == width && e.scale == scale) && return e
+    e = estimated_entry(r, key, width, scale)
+    v.entries[r.id] = e
+    return e
+end
+
+# The tops of the cards and the list's height, from the entries.
+function place_cards!(v::JobsView, rows::Vector{JobRow})
+    resize!(v.tops, length(rows))
     y = 0f0
-    for card in cards
-        push!(tops, y)
-        y += card.height
+    for (k, r) in enumerate(rows)
+        v.tops[k] = y
+        y += v.entries[r.id].height
     end
-    layout = JobsLayout(snap, width, s, cards, tops, y)
-    app.ui.jobs_cache = layout
-    return layout
+    v.total = y
+    return nothing
+end
+
+"""
+    jobs_view!(app, snap, view) -> JobsView
+
+The cards' layout for `snap` in the list box `view`, built again only when the snapshot,
+the box size or the scale changed. The scrollbar is decided once per build: the cards
+are laid out at the narrow width when they overflow it, so the choice cannot flip.
+No text is measured here.
+"""
+function jobs_view!(app, snap::Snapshot, view::Box)::JobsView
+    s = Float32(app.window.scale)
+    v = app.ui.jobs_cache
+    v isa JobsView || (v = app.ui.jobs_cache = JobsView())
+    w, h = width(view), height(view)
+    v.snap === snap && v.width == w && v.height == h && v.scale == s && return v
+    rows = snap.jobs
+    ids = Set(r.id for r in rows)
+    filter!(kv -> first(kv) in ids, v.entries)
+    narrow = w - fpx(s, SCROLLBAR_W)
+    total = 0f0
+    for r in rows
+        e = get(v.entries, r.id, nothing)
+        fits = e !== nothing && e.key == card_key(r) && e.width == narrow && e.scale == s
+        total += fits ? something(e).height : estimated_entry(r, UInt64(0), narrow, s).height
+    end
+    v.bar = total > h
+    v.card_w = v.bar ? narrow : w
+    foreach(r -> fit_card!(v, r, v.card_w, s), rows)
+    place_cards!(v, rows)
+    v.snap, v.width, v.height, v.scale = snap, w, h, s
+    return v
+end
+
+# The cards that overlap the band `scroll .. scroll + h` of the list.
+function cards_in_view(v::JobsView, scroll::Real, h::Real)::UnitRange{Int}
+    n = length(v.tops)
+    n == 0 && return 1:0
+    first = max(1, searchsortedlast(v.tops, Float32(scroll)))
+    last = searchsortedlast(v.tops, Float32(scroll + h) - 0.001f0)
+    return first:max(first - 1, min(last, n))
+end
+
+"""
+    measure_cards!(app, v, rows, scroll, h) -> scroll
+
+Measure the cards in view that were not measured yet, so they can be drawn. A card whose
+height changes moves the cards under it; one that starts above the view also moves the
+scroll by the change, so what the user looks at stays put. Returns the new scroll.
+"""
+function measure_cards!(app, v::JobsView, rows::Vector{JobRow}, scroll::Float32, h::Float32)::Float32
+    measure = (role, size, text) -> text_width(role, size, text)
+    for _ in 1:4   # a card that grows less can bring the next one into view
+        moved = false
+        for k in cards_in_view(v, scroll, h)
+            r = rows[k]
+            e = v.entries[r.id]
+            e.text === nothing || continue
+            t = card_text(r, e.width, e.scale, measure, wrap_lines)
+            e.text = t
+            e.summary_lines, e.warning_lines = length(t.summary), length(t.warnings)
+            new_h = card_height(r, e.has_target, e.summary_lines, e.warning_lines, e.scale)
+            v.measured += 1
+            new_h == e.height && continue
+            v.tops[k] < scroll && (scroll += new_h - e.height)
+            e.height = new_h
+            moved = true
+        end
+        moved || break
+        place_cards!(v, rows)
+    end
+    return scroll
 end
 
 # --- Drawing ---
@@ -456,31 +676,38 @@ end
 function draw_job_cards(app, dl, view::Box, snap::Snapshot)
     s = app.window.scale
     ui = app.ui
-    layout = jobs_layout!(app, snap, width(view))
-    if layout.total > height(view)   # the scrollbar takes 10 px of the cards' width
-        layout = jobs_layout!(app, snap, width(view) - fpx(s, SCROLLBAR_W))
-    end
-    ui.jobs_scroll, has_bar = scroll_area!(app, "scrollbar", view, layout.total, ui.jobs_scroll)
-    right = view.x1 - (has_bar ? fpx(s, SCROLLBAR_W) : 0f0)
+    rows = snap.jobs
+    v = jobs_view!(app, snap, view)
+    h = height(view)
+    scroll = clamp(ui.jobs_scroll, 0f0, max(v.total - h, 0f0))
+    scroll = measure_cards!(app, v, rows, scroll, h)
+    ui.jobs_scroll, _ = scroll_area!(app, "scrollbar", view, v.total, scroll)
+    right = view.x0 + v.card_w
     ig.PushClipRect((view.x0, view.y0), (right, view.y1), true)
-    for (k, r) in enumerate(snap.jobs)
-        top = view.y0 + layout.tops[k] - ui.jobs_scroll
-        c = layout.cards[k]
-        (top + c.height <= view.y0 || top >= view.y1) && continue
-        draw_job_card(app, dl, r, c, Box(view.x0, top, right, top + c.height))
+    range = cards_in_view(v, ui.jobs_scroll, h)
+    for k in range
+        e = v.entries[rows[k].id]
+        e.text === nothing && continue   # comes into view at the next frame's measure
+        top = view.y0 + v.tops[k] - ui.jobs_scroll
+        draw_job_card(app, dl, rows[k], something(e.text), Box(view.x0, top, right, top + e.height))
     end
+    v.drawn = length(range)
     ig.PopClipRect()
     return nothing
 end
 
-"""
-    draw_job_card(app, dl, row, card, b)
+"Cancel's label: \"Cancelling...\" once the job was asked to stop (an atomic read)."
+cancel_label(r::JobRow)::String = r.job.cancel[] ? "Cancelling..." : "Cancel"
 
-One card in box `b`. A running card reads the live `job.progress[]` for its percent and
-bar, and keeps frames coming so the bar moves. Its buttons are Cancel and Report; a
-finished card has Run Again... (when its command is known) and Report.
 """
-function draw_job_card(app, dl, r::JobRow, c::CardLayout, b::Box)
+    draw_job_card(app, dl, row, text, b)
+
+One card in box `b`, with its measured `text`. A running card reads the live
+`job.progress[]` for its percent and bar, and keeps frames coming so the bar moves. Its
+buttons are Cancel and Report; Cancel reads "Cancelling..." and takes no clicks once
+asked. A finished card has Run Again... (when its command is known) and Report.
+"""
+function draw_job_card(app, dl, r::JobRow, c::CardText, b::Box)
     w = app.window::Window
     s = w.scale
     t = app.tokens
@@ -495,7 +722,7 @@ function draw_job_card(app, dl, r::JobRow, c::CardLayout, b::Box)
     mid = y + p(CARD_ICON / 2)
     draw_icon(dl, JOB_ICONS[r.status], (rnd(x), rnd(y)), CARD_ICON)
     progress = r.job.progress[]
-    right = running ? percent_text(progress) : clock_text(r.started)
+    right = running ? percent_text(progress) : c.time
     rw = text_width(FONT_REGULAR, TIME_SIZE, right)
     draw_text_mid(dl, FONT_REGULAR, TIME_SIZE, b.x1 - p(CARD_SIDE) - rw, mid, u32(t.text_dim), right)
     name_col = r.status == Core.JOB_CANCELLED ? t.text_dim : t.text
@@ -532,11 +759,12 @@ function draw_job_card(app, dl, r::JobRow, c::CardLayout, b::Box)
     end
     y += p(CARD_GAP)
     ax = x + p(CARD_ACTS)
-    labels = running ? ("Cancel", "Report") : c.rerun ? ("Run Again...", "Report") : ("Report",)
-    for label in labels
-        if button(app, label, label, ax, y; small = true, link = true)
-            label == "Cancel" ? cancel_job!(app, r) :
-                label == "Report" ? show_report!(app, r) : run_again!(app, r)
+    ids = running ? ["Cancel", "Report"] : c.rerun ? ["Run Again...", "Report"] : ["Report"]
+    for id in ids
+        label = id == "Cancel" ? cancel_label(r) : id
+        enabled = label != "Cancelling..."
+        if button(app, id, label, ax, y; small = true, link = true, enabled)
+            id == "Cancel" ? cancel_job!(app, r) : id == "Report" ? show_report!(app, r) : run_again!(app, r)
         end
         ax += round(button_width(app, label; small = true, link = true)) + p(4)
     end

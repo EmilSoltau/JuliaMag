@@ -337,8 +337,8 @@ function gate_tool(gate::Union{Nothing,Channel{Int}} = nothing; id::AbstractStri
             for j in k+1:target
                 gate === nothing && sleep(0.3)
                 Core.is_cancelled(progress) && throw(Core.JobCancelled())
+                println(report, "Step $j of $n")   # before the progress, which tests wait on
                 Core.report(progress, j / n)
-                println(report, "Step $j of $n")
             end
             k = max(k, target)
         end
@@ -397,4 +397,28 @@ function fake_job_row(; id::AbstractString = "job-1", command::AbstractString = 
     return UI.JobRow(job, String(id), String(command), kind, String(title), copy(a),
         Dict{String,String}(String(k) => String(v) for (k, v) in names), String(expression), job.started,
         job.finished, status, String(error), copy(outputs), copy(warnings))
+end
+
+"""
+    add_finished_jobs!(s, n)
+
+Put `n` finished XYZ import jobs into session `s` at once, as a long job history loaded
+from disk: every 50th failed with two warnings, the rest done. No work runs.
+"""
+function add_finished_jobs!(s::Core.Session, n::Integer)
+    lock(s.jobs_lock) do
+        for k in 1:n
+            id = "job-$(s.next_job)"
+            s.next_job += 1
+            failed = k % 50 == 0
+            args = Dict{String,Any}("path" => "/data/line_$k.xyz", "mode" => "new", "name" => "")
+            error = failed ? "the file ended in the middle of line $k, so nothing was read from it" : ""
+            push!(s.jobs, Core.Job(id, "import.geosoft_xyz", args,
+                Threads.Atomic{Int}(Int(failed ? Core.JOB_FAILED : Core.JOB_DONE)), Threads.Atomic{Float64}(1.0),
+                Threads.Atomic{Bool}(false), "2026-10-31T09:15:02.100Z", "2026-10-31T09:15:04.200Z",
+                Core.JobReport(), failed ? ["line 3 is short", "no CRS"] : String[], String[], error, nothing))
+        end
+    end
+    Core.bump!(s)
+    return nothing
 end

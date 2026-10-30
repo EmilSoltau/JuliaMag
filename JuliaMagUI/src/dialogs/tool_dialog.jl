@@ -192,8 +192,8 @@ end
 function status_text(f::Form)::String
     job = f.rerun_of
     if job !== nothing
-        hhmm = length(job.started) >= 16 ? job.started[12:16] : job.started
-        return "Settings of job $(job.id), $hhmm. Change any of them before running it again."
+        return "Settings of job $(job.id), $(clock_text(job.started)). " *
+            "Change any of them before running it again."
     end
     return f.source === :remembered ? "Opened with the settings of your last run in this project." :
         "Default settings."

@@ -7,6 +7,7 @@
 # `script_text` turns the history into a runnable Julia script.
 
 using JSON3
+import Dates
 
 """
 One step that can be undone. `undo`, `redo`, `drop` and `commit` take no arguments.
@@ -480,15 +481,12 @@ now_text() = Libc.strftime("%Y-%m-%dT%H:%M:%S%z", time())
 """
     job_time_text(t = time())
 
-`now_text` with milliseconds, such as `"2026-10-30T10:43:02.123+1000"`. Jobs record their
-start and end with it, so a short job can show how long it took.
+The time `t` (seconds since 1970) in UTC with milliseconds and a "Z", such as
+`"2026-10-31T09:15:02.123Z"`. Jobs record their start and end with it, so a short job can
+show how long it took. It does not depend on the machine's time zone or C library.
 """
-function job_time_text(t::Real = time())::String
-    whole = floor(t)
-    ms = min(floor(Int, (t - whole) * 1000), 999)
-    return string(Libc.strftime("%Y-%m-%dT%H:%M:%S", whole), ".", lpad(ms, 3, '0'),
-        Libc.strftime("%z", whole))
-end
+job_time_text(t::Real = time())::String =
+    Dates.format(Dates.unix2datetime(t), Dates.dateformat"yyyy-mm-ddTHH:MM:SS.sss") * "Z"
 
 """
     record!(s, command, args; job = "", outputs = String[], replaces = "", replaced = String[])

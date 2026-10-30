@@ -25,7 +25,7 @@ function item_box_of(ref)
     return UI.Box(r.Min.x, r.Min.y, r.Max.x, r.Max.y)
 end
 
-jobs_dialog(app) =(d = isempty(app.ui.dialogs) ? nothing : last(app.ui.dialogs); d)
+jobs_dialog(app) = isempty(app.ui.dialogs) ? nothing : last(app.ui.dialogs)
 
 # The snapshot row of `job` once it shows status `st`.
 function wait_row(ctx, app, job, st; timeout = 20)
@@ -153,25 +153,42 @@ window_testset("jobs tab") do
         end
     end
 
-    @testset "many jobs: only the cards in view are drawn, and the list scrolls" begin
+    @testset "2,000 jobs: only cards in view are measured, frames stay fast" begin
         with_project_app(kangaroo()) do ctx, app
             s = app.session
-            jobs = [Core.start_job!(s, "test.quick", Dict{String,Any}(), (p, r) -> nothing) for _ in 1:40]
-            foreach(Core.wait_job, jobs)
+            add_finished_jobs!(s, 2000)
             app.ui.left_tab = :jobs
-            ctx.wait_until(() -> length(app.snap.jobs) == 40; timeout = 10)
-            ctx.frames(3)
-            oldest = jobs[1].id
-            @test te.ItemExists(job_ref(jobs[end].id, "Report"))
-            @test !te.ItemExists(job_ref(oldest, "Report"))
+            ctx.wait_until(() -> length(app.snap.jobs) == 2000; timeout = 20)
+            ctx.frames(5)   # warm-up
+            v = app.ui.jobs_cache
+            @test v isa UI.JobsView && v.bar && length(v.tops) == 2000
             @test te.ItemExists("JuliaMag/left/jobs/scrollbar")
-            app.ui.jobs_scroll = 1f6   # past the end: clamped to the last card
+            @test 0 < v.drawn <= 12
+            @test v.measured <= v.drawn + 2          # only the cards in view were measured
+            # The next frames measure nothing new and stay fast.
+            m = v.measured
+            times = Int[]
+            for _ in 1:10
+                ctx.frames(1)
+                push!(times, app.draw_ns)
+            end
+            @test app.ui.jobs_cache.measured == m
+            @test maximum(times) < 16_000_000
+            newest, oldest = app.snap.jobs[1].id, app.snap.jobs[end].id
+            @test te.ItemExists(job_ref(newest, "Report")) && !te.ItemExists(job_ref(oldest, "Report"))
+            # Scrolled to the middle: only the cards now in view are measured.
+            app.ui.jobs_scroll = v.tops[1000]
             ctx.frames(3)
+            v = app.ui.jobs_cache
+            @test v.measured - m <= v.drawn + 2
+            @test te.ItemExists(job_ref(app.snap.jobs[1000].id, "Report"))
+            # Past the end: clamped, the oldest card shows.
+            app.ui.jobs_scroll = 1f9
+            ctx.frames(3)
+            @test 0 < app.ui.jobs_scroll < app.ui.jobs_cache.total
             @test te.ItemExists(job_ref(oldest, "Report"))
-            @test !te.ItemExists(job_ref(jobs[end].id, "Report"))
-            layout = app.ui.jobs_cache
-            @test layout isa UI.JobsLayout && length(layout.cards) == 40
-            @test 0 < app.ui.jobs_scroll < layout.total
+            ctx.frames(2)
+            @test !te.ItemExists(job_ref(newest, "Report"))
         end
     end
 

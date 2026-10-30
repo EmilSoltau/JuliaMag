@@ -371,8 +371,8 @@ What the UI shows and where, apart from the project data. Changed on the render 
   see modal.jl).
 - `opening`: the ids of tools, importers and exporters whose dialog the worker is
   preparing; a second open of one waits for the first.
-- `jobs_scroll`: how far the Jobs tab is scrolled, in device pixels; `jobs_cache`: its card
-  layout for the last key (a `JobsLayout`, see jobs.jl).
+- `jobs_scroll`: how far the Jobs tab is scrolled, in device pixels; `jobs_cache`: its
+  cards' layout and the cached card of each job (a `JobsView`, see jobs.jl).
 - `job_bars`: where the progress bar of each running job was drawn in the last frame
   (tests read it).
 - `jobs_seen`: the status of each job when a snapshot last showed it, so a job that leaves
