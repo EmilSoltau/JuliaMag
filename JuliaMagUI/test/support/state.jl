@@ -1,4 +1,5 @@
-# Helpers for tests of the app state, the worker queue and snapshots. No window needed.
+# Helpers for tests of the app state, the worker queue and snapshots. No window needed,
+# except for `with_project_app`, which runs the app in a window (support/app.jl).
 
 using Test
 import JuliaMagCore as Core
@@ -138,3 +139,27 @@ function session_with(; lines::Integer = 3, channels::Integer = 2, name::Abstrac
     Core.save_project(p)
     return s
 end
+
+"""
+    with_project_app(f, s; kwargs...)
+
+`with_test_app` with session `s` as the app's project: `f(ctx, app)` runs once the first
+snapshot is in. The session is closed afterwards.
+"""
+function with_project_app(f, s::Core.Session; kwargs...)
+    try
+        return with_test_app(; kwargs...) do ctx
+            app = ctx.app_state()
+            UI.set_session!(app, s)
+            ctx.wait_until(() -> app.snap !== nothing)
+            ctx.frames(2)
+            f(ctx, app)
+        end
+    finally
+        isopen(s) && Core.close_session!(s)
+    end
+end
+
+"The project of the prototype: 60 lines and 24 channels in \"Kangaroo Hills 2024\"."
+kangaroo() = session_with(lines = 60, channels = 24, name = "Kangaroo Hills 2024",
+    project = "Kangaroo Hills 2024")

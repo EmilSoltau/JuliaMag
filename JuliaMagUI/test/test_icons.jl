@@ -83,7 +83,8 @@ const PROTOTYPE_HTML = joinpath(@__DIR__, "..", "..", "prototype", "juliamag-ui.
         @test ICON_SIZES[icon_size_index(disabled, 10)] == 16
         @test ICON_SIZES[icon_size_index(nav, 22)] == 48
         @test ICON_SIZES[icon_size_index(on_accent, 32)] == 22
-        @test ICON_SIZES[icon_size_index(dim, 18)] == 14
+        @test ICON_SIZES[icon_size_index(dim, 18)] == 16
+        @test ICON_SIZES[icon_size_index(dim, 16)] == 16   # the ribbon scroll arrows
         @test ICON_SIZES[icon_size_index(normal, 24)] == 24   # the header logo
 
         # The biggest database icon of each style: ink, the accent fill at 22 %, straight alpha.

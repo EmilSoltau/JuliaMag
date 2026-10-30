@@ -105,6 +105,7 @@ read this list.
   It reads only `app.session` and `app.snap`, so it is safe on the render thread.
 - `run(app)`: acts at once or pushes a request. `checked(app)`: the state of a toggle.
 - `searchable`: shown in the command search; `menu`: ids of the commands in the menu of a split button.
+- `menu_label`: the text in such a menu, such as `"Geosoft XYZ..."` for `"Import Geosoft XYZ..."`.
 """
 struct Command
     id::String
@@ -119,6 +120,7 @@ struct Command
     checked::Function
     searchable::Bool
     menu::Vector{String}
+    menu_label::String
 end
 
 function Command(id::AbstractString, name::AbstractString, run::Function;
@@ -126,10 +128,10 @@ function Command(id::AbstractString, name::AbstractString, run::Function;
         help::AbstractString = "", places::AbstractVector{Core.Place} = Core.Place[],
         shortcut::AbstractString = "", enabled::Function = app -> nothing,
         checked::Function = app -> false, searchable::Bool = true,
-        menu::AbstractVector{<:AbstractString} = String[])
+        menu::AbstractVector{<:AbstractString} = String[], menu_label::AbstractString = name)
     return Command(String(id), String(name), String(label), String(icon), String(help),
         Vector{Core.Place}(places), String(shortcut), enabled, run, checked, searchable,
-        Vector{String}(menu))
+        Vector{String}(menu), String(menu_label))
 end
 
 const SMALL_WORDS = ("and", "of", "to", "the", "a", "in", "on", "or", "for")
@@ -232,6 +234,7 @@ kind_group(k::Core.ItemKind) = k == Core.ITEM_GRID ? "Grid and Image" : "Databas
 function importer_command(i::Core.ImporterSpec)
     return Command(i.id, "Import " * title_case(i.name) * "...", app -> request!(app, OpenImport(i.id));
         label = "Import", icon = icon_for(i.id), help = "Import " * i.name * " from a file.",
+        menu_label = i.name * "...",
         places = [Core.Place(kind_group(i.kind), "Import"; size = :small)],
         enabled = app -> has_session(app) ? nothing : NEED_PROJECT)
 end
@@ -240,6 +243,7 @@ function exporter_command(e::Core.ExporterSpec)
     return Command(e.id, "Export " * title_case(e.name) * "...",
         app -> request!(app, OpenExport(e.id, default_item(app, e.kind)));
         label = "Export", icon = icon_for(e.id), help = "Export to a " * e.extension * " file.",
+        menu_label = e.name * "...",
         places = [Core.Place(kind_group(e.kind), "Export"; size = :small)],
         enabled = app -> needs(app, (e.kind,)))
 end

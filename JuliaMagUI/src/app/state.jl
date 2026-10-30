@@ -293,6 +293,9 @@ What the UI shows and where, apart from the project data. Changed on the render 
   `tip`: the tooltip to draw at the end of this frame, or `nothing`; `tip_hovered`: an
   item with a tooltip is hovered in this frame.
 - `requests`: what commands asked the UI to open (Task 8); each frame handles and empties it.
+- `ribbon_scroll`: how far the ribbon is scrolled to the left, in device pixels, on tab
+  `ribbon_scroll_tab`; another tab starts at 0.
+- `menu`: the open drop-down menu (an `OpenMenu`, see menu.jl), or `nothing`.
 """
 Base.@kwdef mutable struct UiState
     tab::String = "Database"
@@ -315,6 +318,9 @@ Base.@kwdef mutable struct UiState
     tip::Any = nothing
     tip_hovered::Bool = false
     requests::Vector{Any} = Any[]
+    ribbon_scroll::Float32 = 0f0
+    ribbon_scroll_tab::String = ""
+    menu::Any = nothing
 end
 
 """
@@ -363,8 +369,8 @@ Make `s` (a session or `nothing`) the app's project. This is the only way to cha
 `app.session`. It drops everything that belongs to the old project: the snapshot (a
 build of the old session that comes back later is dropped too), the count of shown
 warnings, a failed build, the Data tree's current database, selection, expanded
-nodes and filter, the open dialogs and the requests not handled yet (they were made for
-the old project). Call it on the render thread. It does not close the old session.
+nodes and filter, the open dialogs and menu, and the requests not handled yet (they were
+made for the old project). Call it on the render thread. It does not close the old session.
 """
 function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     app.session = s
@@ -380,5 +386,6 @@ function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     ui.filter = ""
     empty!(ui.dialogs)   # the next frame also closes their ImGui popups
     empty!(ui.requests)
+    ui.menu = nothing
     return nothing
 end

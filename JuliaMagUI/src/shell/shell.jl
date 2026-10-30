@@ -1,6 +1,6 @@
 # The app frame: one full-window ImGui window that holds the header, the tab strip, the
 # ribbon band, the main row (left pane, central area) and the status bar. Dialogs, the
-# ribbon peek, toasts and the tooltip come after it, in that order.
+# ribbon peek, the open menu, toasts and the tooltip come after it, in that order.
 
 # Heights and widths of the shell, in logical pixels (prototype CSS).
 const HEADER_H = 34
@@ -73,8 +73,9 @@ const PEEK_FLAGS = ig.ImGuiWindowFlags_NoDecoration | ig.ImGuiWindowFlags_NoMove
 """
     draw_app(app)
 
-Draw one frame of the app: the shell, then the dialogs, the ribbon peek, the toasts and
-the tooltip. It handles the requests of the last frame first and the shortcuts last.
+Draw one frame of the app: the shell, then the dialogs, the ribbon peek, the open menu,
+the toasts and the tooltip. It handles the requests of the last frame first and the
+shortcuts last.
 Call it on the render thread once per frame, after `drain!` and `refresh!`.
 """
 function draw_app(app)
@@ -83,6 +84,7 @@ function draw_app(app)
     handle_requests!(app)
     prune_toasts!(app)
     sync_current_db!(app)
+    begin_menu_frame!(app)
     ui.tip = nothing
     ui.tip_hovered = false
     modal = !isempty(ui.dialogs)
@@ -109,14 +111,18 @@ function draw_app(app)
     draw_dialogs(app)
     ig.End()
 
+    collapsed && ui.ribbon_peek && draw_ribbon_peek(app, layout.ribbon)
+    # A click on the menu of a peeking ribbon keeps the peek; Esc closes the menu first.
+    mouse = unsafe_load(ig.GetIO().MousePos)
+    on_menu = inside_menu(app, mouse.x, mouse.y)
+    had_menu = draw_menu(app)
     if collapsed && ui.ribbon_peek
-        draw_ribbon_peek(app, layout.ribbon)
         clicked = ig.IsMouseClicked(0)
-        mouse = unsafe_load(ig.GetIO().MousePos)
-        if clicked && !inside(layout.tabs, mouse.x, mouse.y) && !inside(layout.ribbon, mouse.x, mouse.y)
+        if clicked && !on_menu && !inside(layout.tabs, mouse.x, mouse.y) &&
+                !inside(layout.ribbon, mouse.x, mouse.y)
             ui.ribbon_peek = false
         end
-        !modal && ig.IsKeyPressed(lib.ImGuiKey_Escape, false) && (ui.ribbon_peek = false)
+        !modal && !had_menu && ig.IsKeyPressed(lib.ImGuiKey_Escape, false) && (ui.ribbon_peek = false)
     end
     draw_toasts(app)
     handle_shortcuts!(app)
@@ -180,14 +186,15 @@ end
 """
     draw_ribbon_band(app, dl, b)
 
-The ribbon band: `ribbon` fill with a 1 px `border` line at the bottom. Task 10 draws the
-groups in it.
+The ribbon band: `ribbon` fill with a 1 px `border` line at the bottom, and the groups of
+the active tab (`draw_ribbon`).
 """
 function draw_ribbon_band(app, dl, b::Box)
     t = app.tokens
     hl = hairline(app.window.scale)
     ig.AddRectFilled(dl, (b.x0, b.y0), (b.x1, b.y1), u32(t.ribbon))
     ig.AddRectFilled(dl, (b.x0, b.y1 - hl), (b.x1, b.y1), u32(t.border))
+    draw_ribbon(app, dl, b)
     return nothing
 end
 

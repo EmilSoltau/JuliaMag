@@ -34,10 +34,10 @@ const ICON_STYLES = (:normal, :disabled, :nav, :on_accent, :dim)
 The sizes the atlas holds for each style, as the prototype uses them:
 `:normal` at every size, `:disabled` for buttons and menus, `:nav` for the backstage
 nav (18) and its cards (48), `:on_accent` for selected rows (16) and dialog heads (22),
-`:dim` for the search pill and the ribbon chevron (14).
+`:dim` for the search pill and the ribbon chevron (14) and the ribbon scroll arrows (16).
 Another size is drawn scaled from the next bigger size of its style.
 """
-const ICON_STYLE_SIZES = (ICON_SIZES, (16, 18, 32), (18, 48), (16, 22), (14,))
+const ICON_STYLE_SIZES = (ICON_SIZES, (16, 18, 32), (18, 48), (16, 22), (14, 16))
 
 # The placeholder colour of each prototype colour variable in the SVG files.
 # tools/extract_icons.jl writes the same table.

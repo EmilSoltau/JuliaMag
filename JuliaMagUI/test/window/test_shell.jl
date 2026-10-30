@@ -8,26 +8,6 @@ using JuliaMagUI: LIGHT, DARK, THEME_LIGHT, THEME_DARK
 
 const SHELL_SHOTS = joinpath(@__DIR__, "..", "shots")
 
-"""
-    with_project_app(f, s; kwargs...)
-
-`with_test_app` with session `s` as the app's project: `f(ctx, app)` runs once the first
-snapshot is in. The session is closed afterwards.
-"""
-function with_project_app(f, s::Core.Session; kwargs...)
-    try
-        return with_test_app(; kwargs...) do ctx
-            app = ctx.app_state()
-            UI.set_session!(app, s)
-            ctx.wait_until(() -> app.snap !== nothing)
-            ctx.frames(2)
-            f(ctx, app)
-        end
-    finally
-        isopen(s) && Core.close_session!(s)
-    end
-end
-
 # How many popups ImGui has open now.
 function open_popups(ctx)
     n = Ref(-1)
@@ -58,9 +38,6 @@ function UI.draw_modal(app, d::BrokenDialog)
         throw(ArgumentError("the form broke"))
     end
 end
-
-kangaroo() = session_with(lines = 60, channels = 24, name = "Kangaroo Hills 2024",
-    project = "Kangaroo Hills 2024")
 
 window_testset("shell") do
     mkpath(SHELL_SHOTS)
