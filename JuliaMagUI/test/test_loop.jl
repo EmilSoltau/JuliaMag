@@ -23,7 +23,8 @@ rgb(p) = (Float32(p.r), Float32(p.g), Float32(p.b))
         @test px(1f0, 10) == 10f0
         @test px(2f0, 6.3) == 13f0
         @test px(1.5f0, 26) == 39f0
-        @test px(1.25f0, 34) == 42f0
+        @test px(1.25f0, 34) == 43f0
+        @test px(1.5f0, 3) == 5f0 && px(1.5f0, 5) == 8f0   # a half rounds up, as in a browser
     end
 
     @testset "min_size_limit" begin
@@ -51,7 +52,7 @@ rgb(p) = (Float32(p.r), Float32(p.g), Float32(p.b))
             @test vec4(ig.c_get(s.Colors, ig.ImGuiCol_FrameBg)) == LIGHT.input
             @test vec4(ig.c_get(s.Colors, ig.ImGuiCol_Button)) == LIGHT.ribbon
             @test vec4(ig.c_get(s.Colors, ig.ImGuiCol_CheckMark)) == LIGHT.accent
-            @test vec4(ig.c_get(s.Colors, ig.ImGuiCol_ModalWindowDimBg)) == LIGHT.backdrop
+            @test vec4(ig.c_get(s.Colors, ig.ImGuiCol_ModalWindowDimBg)) == (0f0, 0f0, 0f0, 0f0)   # draw_dialog draws it
 
             # Applying again does not scale twice.
             apply_style!(LIGHT, 2f0)

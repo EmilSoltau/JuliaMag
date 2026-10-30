@@ -285,8 +285,13 @@ What the UI shows and where, apart from the project data. Changed on the render 
 - `expanded`: the keys of expanded tree nodes; `filter`: the Data tree filter text.
 - `search`: the command search text while it is open, else `nothing`; `search_index`: its
   highlighted row.
-- `dialogs`: the modal stack (Task 9).
+- `dialogs`: the modal stack, bottom first. Only modal dialogs go here: a dialog in the
+  stack means "a modal is open" (see `handle_shortcuts!`). Change it with `push_dialog!`
+  and `pop_dialog!`. `drawn_dialogs`: each dialog drawn in the last frame with its ImGui
+  popup id, so a dialog that left the stack also leaves ImGui's popup stack.
 - `tooltip_since`, `tooltip_id`: when the mouse came onto the item with that id.
+  `tip`: the tooltip to draw at the end of this frame, or `nothing`; `tip_hovered`: an
+  item with a tooltip is hovered in this frame.
 - `requests`: what commands asked the UI to open (Task 8); each frame handles and empties it.
 """
 Base.@kwdef mutable struct UiState
@@ -304,8 +309,11 @@ Base.@kwdef mutable struct UiState
     search::Union{Nothing,String} = nothing
     search_index::Int = 0
     dialogs::Vector{Any} = Any[]
+    drawn_dialogs::Vector{Tuple{Any,UInt32}} = Tuple{Any,UInt32}[]
     tooltip_since::Float64 = 0.0
     tooltip_id::UInt32 = 0
+    tip::Any = nothing
+    tip_hovered::Bool = false
     requests::Vector{Any} = Any[]
 end
 
@@ -354,8 +362,9 @@ AppState(config::AppConfig, tokens::Tokens; session::Union{Nothing,Core.Session}
 Make `s` (a session or `nothing`) the app's project. This is the only way to change
 `app.session`. It drops everything that belongs to the old project: the snapshot (a
 build of the old session that comes back later is dropped too), the count of shown
-warnings, a failed build, and the Data tree's current database, selection, expanded
-nodes and filter. Call it on the render thread. It does not close the old session.
+warnings, a failed build, the Data tree's current database, selection, expanded
+nodes and filter, the open dialogs and the requests not handled yet (they were made for
+the old project). Call it on the render thread. It does not close the old session.
 """
 function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     app.session = s
@@ -369,5 +378,7 @@ function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     ui.selected = nothing
     empty!(ui.expanded)
     ui.filter = ""
+    empty!(ui.dialogs)   # the next frame also closes their ImGui popups
+    empty!(ui.requests)
     return nothing
 end

@@ -150,6 +150,8 @@ using JuliaMagUI: snapshot, Snapshot, AppState, UiState, set_session!
             push!(app.ui.expanded, app.ui.current_db)
             app.ui.filter = "MA"
             app.seen_warnings = 2
+            push!(app.ui.dialogs, :a_dialog_of_the_old_project)
+            push!(app.ui.requests, UI.OpenDialog(:about))
             with_test_session(fresh_session()) do other
                 # The same revision number, but another project: it must be read anew.
                 @test Core.revision(other) == app.snap.revision
@@ -157,6 +159,8 @@ using JuliaMagUI: snapshot, Snapshot, AppState, UiState, set_session!
                 @test app.session === other && app.snap === nothing && app.seen_warnings == 0
                 @test app.ui.current_db == "" && app.ui.selected === nothing
                 @test isempty(app.ui.expanded) && app.ui.filter == ""
+                # Dialogs and requests of the old project do not outlive it.
+                @test isempty(app.ui.dialogs) && isempty(app.ui.requests)
                 refresh_now!(app)
                 @test isempty(app.snap.items) && app.snap.folder == other.project.folder
                 set_session!(app, old)

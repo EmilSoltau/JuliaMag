@@ -13,7 +13,7 @@ foreach(f -> endswith(f, ".svg") && include_dependency(joinpath(ICON_DIR, f)), r
 
 The icon sizes in the atlas, in logical pixels.
 """
-const ICON_SIZES = (10, 12, 14, 16, 18, 22, 32, 48)
+const ICON_SIZES = (10, 12, 14, 16, 18, 22, 24, 32, 48)
 
 """
     ICON_STYLES
@@ -24,18 +24,20 @@ How an icon is coloured:
 - `:disabled`: `text_disabled` for every colour.
 - `:nav`: on the brand colour of the backstage nav; ink `on_accent` (white), accent `brand_tint`.
 - `:on_accent`: on an accent fill; ink `on_accent` (white), accent `accent`.
+- `:dim`: ink `text_dim`, as the prototype's search pill and ribbon chevron.
 """
-const ICON_STYLES = (:normal, :disabled, :nav, :on_accent)
+const ICON_STYLES = (:normal, :disabled, :nav, :on_accent, :dim)
 
 """
     ICON_STYLE_SIZES
 
 The sizes the atlas holds for each style, as the prototype uses them:
 `:normal` at every size, `:disabled` for buttons and menus, `:nav` for the backstage
-nav (18) and its cards (48), `:on_accent` for selected rows (16) and dialog heads (22).
+nav (18) and its cards (48), `:on_accent` for selected rows (16) and dialog heads (22),
+`:dim` for the search pill and the ribbon chevron (14).
 Another size is drawn scaled from the next bigger size of its style.
 """
-const ICON_STYLE_SIZES = (ICON_SIZES, (16, 18, 32), (18, 48), (16, 22))
+const ICON_STYLE_SIZES = (ICON_SIZES, (16, 18, 32), (18, 48), (16, 22), (14,))
 
 # The placeholder colour of each prototype colour variable in the SVG files.
 # tools/extract_icons.jl writes the same table.
@@ -108,6 +110,8 @@ function style_colours(t::Tokens, style::Symbol)
         (white, t.brand_tint, t.green, t.red, t.amber)
     elseif style === :on_accent
         (white, t.accent, t.green, t.red, t.amber)
+    elseif style === :dim
+        (t.text_dim, t.accent, t.green, t.red, t.amber)
     else
         throw(ArgumentError("icon style must be one of $(ICON_STYLES), got :$style"))
     end
@@ -368,15 +372,16 @@ function icon_size_index(s::Int, size::Integer)::Int
 end
 
 """
-    draw_icon(dl, name, pos, size; style = :normal)
+    draw_icon(dl, name, pos, size; style = :normal, alpha = 1)
 
 Draw icon `name` at `pos` (device pixels, top left) on the draw list `dl`,
-`size` logical pixels wide. See `ICON_STYLES` for `style`.
+`size` logical pixels wide. See `ICON_STYLES` for `style`. `alpha` fades it (toasts).
 An unknown name draws the icon `tool`. A size the style does not hold (see
 `ICON_STYLE_SIZES`) is drawn scaled from the next bigger one.
 Without an icon atlas (its upload failed) it draws nothing.
 """
-function draw_icon(dl, name::AbstractString, pos, size::Integer; style::Symbol = :normal)
+function draw_icon(dl, name::AbstractString, pos, size::Integer; style::Symbol = :normal,
+        alpha::Real = 1)
     s = findfirst(==(style), ICON_STYLES)
     s === nothing && throw(ArgumentError("icon style must be one of $(ICON_STYLES), got :$style"))
     atlas = get(ICON_ATLASES, ig.GetCurrentContext(), nothing)
@@ -388,6 +393,6 @@ function draw_icon(dl, name::AbstractString, pos, size::Integer; style::Symbol =
     tex = ig.ImTextureRef(ig.ImTextureID(atlas.texture))
     ig.AddImage(dl, tex, (x0, y0), (x0 + d, y0 + d),
         (x / atlas.width, y / atlas.height), ((x + w) / atlas.width, (y + h) / atlas.height),
-        0xffffffff)
+        0x00ffffff | (round(UInt32, 255 * clamp(Float32(alpha), 0f0, 1f0)) << 24))
     return nothing
 end

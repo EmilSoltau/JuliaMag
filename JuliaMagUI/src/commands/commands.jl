@@ -59,6 +59,7 @@ handle_request!(app, @nospecialize(request)) = false
 
 Hand every request of `app.ui.requests` to `handle_request!` and empty the list.
 A request that no method handles is dropped with a `@debug` message.
+A handler that throws is logged and shown as an error toast; the other requests still run.
 Requests that a handler pushes wait for the next frame.
 Call it on the render thread once per frame.
 """
@@ -68,7 +69,14 @@ function handle_requests!(app)
     batch = copy(requests)
     empty!(requests)
     for r in batch
-        handle_request!(app, r) === true || @debug "No handler for this request, dropped" request = r
+        handled = try
+            handle_request!(app, r)
+        catch e
+            e isa InterruptException && rethrow()
+            toast!(app, :error, safe_user_message(e, catch_backtrace()))
+            true
+        end
+        handled === true || @debug "No handler for this request, dropped" request = r
     end
     return nothing
 end

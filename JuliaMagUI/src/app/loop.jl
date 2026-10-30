@@ -21,6 +21,7 @@ The app window.
 - `wake`: set by `wake!` from any thread; the loop then draws a frame at once.
 - `animating_until`: the loop polls instead of waiting until this `time()`.
 - `input_frames`: frames still to draw without waiting, after input.
+- `renderer`: the OpenGL `GL_RENDERER` text, such as `"llvmpipe (LLVM 17.0.6, 256 bits)"`.
 
 The other fields are for the loop itself.
 """
@@ -38,14 +39,16 @@ mutable struct Window
     input_frames::Int
     quit::Bool
     capture_path::Union{Nothing,String}
+    renderer::String
 end
 
 """
     px(w, x)
 
-`x` logical pixels as device pixels, rounded. Every layout size goes through it.
+`x` logical pixels as device pixels, rounded; a half rounds up, as a browser snaps
+(3 px at scale 1.5 is 5). Every layout size goes through it.
 """
-px(scale::Real, x::Real) = round(Float32(x) * Float32(scale))
+px(scale::Real, x::Real) = round(Float32(x) * Float32(scale), RoundNearestTiesUp)
 px(w::Window, x::Real) = px(w.scale, x)
 
 """
@@ -247,6 +250,20 @@ function draw_frame!(w::Window, @nospecialize(ui), @nospecialize(on_close),
     return !w.quit
 end
 
+# The OpenGL renderer of the current context, or "" when OpenGL does not say.
+function gl_renderer()::String
+    p = GL.glGetString(GL.GL_RENDERER)
+    return p == C_NULL ? "" : unsafe_string(p)
+end
+
+"""
+    software_renderer(name) -> Bool
+
+Is the OpenGL renderer `name` (`GL_RENDERER`) a software one, such as Mesa's `llvmpipe`?
+"""
+software_renderer(name::AbstractString)::Bool =
+    any(k -> occursin(k, name), ("llvmpipe", "softpipe", "Software"))
+
 const MOUSE_PASSTHROUGH = 0x0002000D   # GLFW 3.4; GLFW.jl has no name for it
 
 function create_glfw_window(title::AbstractString, size::Tuple{Int,Int}, passive::Bool)::GLFW.Window
@@ -344,7 +361,7 @@ function open_and_run(@nospecialize(ui), title::String, size::NTuple{2,Int},
         monitor = content_scale(handle)
         s = fixed ? scale : monitor
         w = Window(handle, ctx, tokens, s, fixed, monitor, min_size, 0,
-            Threads.Atomic{Bool}(false), 0.0, 0, false, nothing)
+            Threads.Atomic{Bool}(false), 0.0, 0, false, nothing, gl_renderer())
         apply_style!(tokens, s)
         load_fonts!(w, fonts)
         set_min_size!(w)
@@ -393,20 +410,6 @@ function run_loop!(w::Window, @nospecialize(ui), @nospecialize(on_close),
         # Run due libuv timers and IO now. With yield alone they ran one idle wait late.
         Base.process_events()
         yield()
-    end
-    return nothing
-end
-
-# The empty app: the canvas colour with the app name in the middle. Task 9 fills it.
-function draw_empty(w::Window)
-    with_font(FONT_SEMIBOLD, 13) do
-        text = ig.CalcTextSize(APP_NAME)
-        vp = unsafe_load(ig.GetMainViewport())
-        # Whole pixels keep the text sharp.
-        pos = (round(vp.Pos.x + (vp.Size.x - text.x) / 2),
-            round(vp.Pos.y + (vp.Size.y - text.y) / 2))
-        col = ig.GetColorU32(ig.ImVec4(w.tokens.text_dim...))
-        ig.AddText(ig.GetBackgroundDrawList(), pos, col, APP_NAME)
     end
     return nothing
 end

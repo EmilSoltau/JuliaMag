@@ -5,6 +5,14 @@ import JuliaMagUI as UI
 # A request type no task handles.
 struct UnknownRequest end
 
+# Requests whose handlers fail or count, for the error test of `handle_requests!`.
+struct FailingRequest end
+struct CountingRequest
+    count::Base.RefValue{Int}
+end
+UI.handle_request!(app, ::FailingRequest) = error("the handler broke")
+UI.handle_request!(app, r::CountingRequest) = (r.count[] += 1; true)
+
 @testset "commands" begin
     @testset "list, enabled and places" begin
         with_app(test_app_state(fresh_session())) do app
@@ -111,6 +119,18 @@ struct UnknownRequest end
             @test_logs (:debug, "No handler for this request, dropped") (:debug, "No handler for this request, dropped") min_level = Base.CoreLogging.Debug UI.handle_requests!(app)
             @test isempty(app.ui.requests)
             UI.handle_requests!(app)   # empty list: nothing happens
+        end
+    end
+
+    @testset "handle_requests! survives a handler that throws" begin
+        with_app(test_app_state(nothing)) do app
+            count = Ref(0)
+            push!(app.ui.requests, CountingRequest(count), FailingRequest(), CountingRequest(count))
+            @test_logs (:error, "Unexpected error") UI.handle_requests!(app)
+            # The rest of the batch ran, and the error became a toast.
+            @test count[] == 2 && isempty(app.ui.requests)
+            t = only(app.toasts)
+            @test t.kind == :error && occursin("the handler broke", t.text)
         end
     end
 

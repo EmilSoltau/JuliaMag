@@ -18,19 +18,26 @@ include("app/x11.jl")
 include("app/glfw_errors.jl")
 include("app/loop.jl")
 include("theme/icons.jl")
+include("shell/draw.jl")
 include("app/toasts.jl")
 include("app/worker.jl")
 include("app/state.jl")
 include("commands/commands.jl")
 include("commands/keys.jl")
+include("app/modal.jl")
+include("shell/shell.jl")
+include("shell/header.jl")
+include("shell/tabs.jl")
+include("shell/statusbar.jl")
+include("shell/central.jl")
 
 """
     main(; project = nothing, config_dir = config_dir(), extra_ui = nothing, on_app = nothing,
          size = (1480, 920), scale = nothing, fonts = :system, engine = nothing,
          passive = false)
 
-Start the app. Today it opens the empty window; later tasks fill it and open `project`.
-The theme comes from the settings in `config_dir`.
+Start the app: the window with the shell (`draw_app`). Opening `project` comes in a later
+task. The theme comes from the settings in `config_dir`.
 It makes the `AppState` and its worker, and stops the worker when the window closes.
 
 The other keywords are for tests, screenshots and benchmarks:
@@ -69,7 +76,7 @@ function (a::AppFrame)(w::Window)
     app.window = w
     drain!(app)
     refresh!(app)
-    draw_empty(w)
+    draw_app(app)
     a.extra_ui === nothing || a.extra_ui(w)
     return nothing
 end

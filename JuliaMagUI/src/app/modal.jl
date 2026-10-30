@@ -1,0 +1,276 @@
+# Modal dialogs: the stack, the dialog frame and the confirm box.
+#
+# `app.ui.dialogs` holds the open dialogs, bottom first. Each frame `draw_dialogs` draws
+# them as nested ImGui modal popups: dialog k+1 opens inside dialog k, as ImGui wants.
+# A dialog type adds a method to `draw_modal(app, d)`, which calls `draw_dialog`.
+
+"""
+    push_dialog!(app, d)
+
+Open dialog `d` on top of the others. Only modal dialogs go on the stack: while it is
+not empty, shortcuts other than Ctrl+K and Esc do nothing.
+"""
+push_dialog!(app, d) = (push!(app.ui.dialogs, d); d)
+
+"""
+    pop_dialog!(app)
+
+Close the top dialog. Does nothing when no dialog is open.
+"""
+pop_dialog!(app) = (isempty(app.ui.dialogs) || pop!(app.ui.dialogs); nothing)
+
+"""
+    draw_modal(app, d)
+
+Draw dialog `d` with `draw_dialog`. Each dialog type adds a method.
+"""
+function draw_modal(app, @nospecialize(d))
+    @error "This dialog cannot be drawn, so it is closed" dialog = d
+    filter!(x -> x !== d, app.ui.dialogs)
+    return nothing
+end
+
+"""
+    draw_dialogs(app)
+
+Draw the dialog stack. Call it once per frame, inside the app window, after the shell.
+A dialog that left the stack since the last frame also leaves ImGui's popup stack here.
+"""
+function draw_dialogs(app)
+    close_stale_popups!(app)
+    isempty(app.ui.dialogs) || draw_modal(app, first(app.ui.dialogs))
+    return nothing
+end
+
+# Close the ImGui popups of dialogs that were drawn last frame and are no longer on the
+# stack (closed by a button, by `set_session!` or by a test), with every popup above them.
+function close_stale_popups!(app)
+    drawn = app.ui.drawn_dialogs
+    dialogs = app.ui.dialogs
+    k = 0
+    while k < length(drawn) && k < length(dialogs) && first(drawn[k+1]) === dialogs[k+1]
+        k += 1
+    end
+    k == length(drawn) && return nothing
+    level = popup_level(last(drawn[k+1]))
+    level >= 0 && lib.igClosePopupToLevel(level, true)
+    resize!(drawn, k)
+    return nothing
+end
+
+# The place of popup `id` in ImGui's open popup stack (0 is the bottom), or -1.
+function popup_level(id::UInt32)::Int
+    ctx = Ptr{lib.ImGuiContext}(ig.GetCurrentContext())
+    stack = unsafe_load(ctx.OpenPopupStack)
+    for i in 1:stack.Size
+        unsafe_load(stack.Data, i).PopupId == id && return i - 1
+    end
+    return -1
+end
+
+"""
+    dialog_ref(level) -> String
+
+The ImGui window name of the dialog at `level` of the stack (1 is the bottom).
+Test engine references to its items start with `"//" * dialog_ref(level) * "/"`.
+"""
+dialog_ref(level::Integer) = "###dialog$level"
+
+const DIALOG_FLAGS = ig.ImGuiWindowFlags_NoTitleBar | ig.ImGuiWindowFlags_NoResize |
+    ig.ImGuiWindowFlags_NoMove | ig.ImGuiWindowFlags_NoSavedSettings |
+    ig.ImGuiWindowFlags_AlwaysAutoResize | ig.ImGuiWindowFlags_NoScrollbar
+
+"""
+    draw_dialog(f, app, d; title, icon = "", width = 520, ok_label = "OK", ok_enabled = true,
+                on_ok, on_cancel = () -> pop_dialog!(app), footer_left = nothing)
+
+The frame of modal dialog `d`, as the prototype's `openDialog`: centred over the
+`backdrop`, `width` px wide, radius 10, `menu` fill, 1 px `border_strong`, shadow.
+The header is 46 high: a 22 px `icon`, the `title` (15 semibold) and a close x; drag it to
+move the dialog. `f()` draws the body, padded 14 by 16. The footer holds what
+`footer_left()` draws on the left, then Cancel and the primary button (`ok_label`, greyed
+when `ok_enabled` is false).
+
+Esc, Cancel and the close x call `on_cancel()`; the primary button calls `on_ok()`, and so
+does Enter while a text field of the dialog is active. `on_ok` decides whether the dialog
+closes (`pop_dialog!`). Errors in the callbacks become error toasts.
+"""
+function draw_dialog(f, app, d; title::AbstractString, icon::AbstractString = "",
+        width::Real = 520, ok_label::AbstractString = "OK", ok_enabled::Bool = true,
+        on_ok::Function, on_cancel::Function = () -> pop_dialog!(app),
+        footer_left::Union{Nothing,Function} = nothing)
+    dialogs = app.ui.dialogs
+    level = findfirst(x -> x === d, dialogs)
+    level === nothing && return nothing
+    w = app.window::Window
+    s = w.scale
+    t = app.tokens
+    p(x) = px(s, x)
+    hl = hairline(s)
+    name = dialog_ref(level)
+    id = ig.GetID(name)
+    drawn = app.ui.drawn_dialogs
+    length(drawn) >= level ? (drawn[level] = (d, id)) : push!(drawn, (d, id))
+    ig.IsPopupOpen(name) || ig.OpenPopup(name)
+
+    vp = unsafe_load(ig.GetMainViewport())
+    dw = p(width)
+    ig.SetNextWindowPos((round(vp.Pos.x + vp.Size.x / 2), round(vp.Pos.y + vp.Size.y / 2 - p(30))),
+        ig.ImGuiCond_Appearing, (0.5, 0.5))
+    ig.SetNextWindowSizeConstraints((dw, 0f0), (dw, max(vp.Size.y - p(40), p(100))))
+    ig.PushStyleVar(ig.ImGuiStyleVar_WindowPadding, (0, 0))
+    ig.PushStyleVar(ig.ImGuiStyleVar_WindowBorderSize, 0)
+    ig.PushStyleVar(ig.ImGuiStyleVar_WindowRounding, p(10))
+    ig.PushStyleColor(ig.ImGuiCol_PopupBg, (0f0, 0f0, 0f0, 0f0))   # the frame below draws the fill
+    open = ig.BeginPopupModal(name, C_NULL, DIALOG_FLAGS)
+    ig.PopStyleColor()
+    ig.PopStyleVar(3)
+    open || return nothing
+
+    top = level == length(dialogs)
+    typing = unsafe_load(ig.GetIO()).WantTextInput
+    pos = ig.GetWindowPos()
+    size = ig.GetWindowSize()
+    b = Box(pos.x, pos.y, pos.x + dw, pos.y + size.y)
+    dl = ig.GetWindowDrawList()
+    ig.PushClipRect(dl, (vp.Pos.x, vp.Pos.y), (vp.Pos.x + vp.Size.x, vp.Pos.y + vp.Size.y), false)
+    ig.AddRectFilled(dl, (vp.Pos.x, vp.Pos.y), (vp.Pos.x + vp.Size.x, vp.Pos.y + vp.Size.y),
+        u32(t.backdrop))
+    draw_shadow(dl, b, p(10), p(10), p(28), t.shadow)
+    ig.PopClipRect(dl)
+    ig.AddRectFilled(dl, (b.x0, b.y0), (b.x1, b.y1), u32(t.menu), p(10))
+
+    # Header: icon, title, close x; a drag on it moves the dialog.
+    head = Box(b.x0 + hl, b.y0 + hl, b.x1 - hl, b.y0 + hl + p(46))
+    mid = (head.y0 + head.y1 - hl) / 2
+    close = Box(head.x1 - p(10 + 22), mid - p(11), head.x1 - p(10), mid + p(11))
+    _, _, dragging = hit("##move", Box(head.x0, head.y0, close.x0, head.y1))
+    dragging && move_dialog!(vp, b, s)
+    x = head.x0 + p(16)
+    if !isempty(icon)
+        draw_icon(dl, icon, (x, mid - p(11)), 22)
+        x += p(22 + 10)
+    end
+    ig.PushClipRect(dl, (x, head.y0), (close.x0 - p(10), head.y1), true)
+    draw_text_mid(dl, FONT_SEMIBOLD, 15, x, mid, u32(t.text), title)
+    ig.PopClipRect(dl)
+    cancel = false
+    clicked, hovered = icon_button(app, "Close", "close", close; size = 22)   # `.dlg-h .ic` is 22 px
+    hovered && item_tip!(app, "Close"; shortcut = "Esc")
+    cancel |= clicked
+    ig.AddRectFilled(dl, (head.x0, head.y1 - hl), (head.x1, head.y1), u32(t.border))
+
+    # Body.
+    ig.SetCursorScreenPos((head.x0 + p(16), head.y1 + p(14)))
+    ig.BeginGroup()
+    ig.PushTextWrapPos(dw - hl - p(16))
+    ig.PushItemWidth(dw - 2 * hl - p(32))   # the body width; `paragraph` wraps to it
+    f()
+    ig.PopItemWidth()
+    ig.PopTextWrapPos()
+    ig.EndGroup()
+    body_end = ig.GetItemRectMax().y + p(14)
+
+    # Footer: the left buttons, then Cancel and the primary button on the right.
+    ig.AddRectFilled(dl, (head.x0, body_end), (head.x1, body_end + hl), u32(t.border))
+    by = body_end + hl + p(12)
+    if footer_left !== nothing
+        ig.SetCursorScreenPos((head.x0 + p(16), by))
+        ig.BeginGroup()
+        footer_left()
+        ig.EndGroup()
+    end
+    ok_w = round(button_width(app, ok_label; primary = true))
+    cancel_w = round(button_width(app, "Cancel"))
+    ok_x = head.x1 - p(16) - ok_w
+    cancel |= button(app, "Cancel", "Cancel", ok_x - p(8) - cancel_w, by)
+    ok = button(app, ok_label, ok_label, ok_x, by; primary = true, enabled = ok_enabled)
+    footer_end = by + p(26 + 12) + hl
+    ig.SetCursorScreenPos((b.x0, footer_end))
+    ig.Dummy((dw, 0f0))
+    ig.AddRect(dl, (b.x0, b.y0), (b.x1, footer_end), u32(t.border_strong), p(10), hl)
+
+    if top
+        cancel |= ig.IsKeyPressed(lib.ImGuiKey_Escape, false)
+        enter = ig.IsKeyPressed(lib.ImGuiKey_Enter, false) || ig.IsKeyPressed(lib.ImGuiKey_KeypadEnter, false)
+        ok |= typing && enter && ok_enabled
+    end
+    # The next dialog opens inside this one.
+    level < length(dialogs) && draw_modal(app, dialogs[level+1])
+    ig.EndPopup()
+    if cancel
+        guarded(app, _ -> on_cancel())
+    elseif ok
+        guarded(app, _ -> on_ok())
+    end
+    return nothing
+end
+
+# Follow a drag of the dialog header, keeping a part of the dialog on the screen.
+function move_dialog!(vp, b::Box, scale::Real)
+    delta = unsafe_load(ig.GetIO().MouseDelta)
+    x = clamp(b.x0 + delta.x, vp.Pos.x + px(scale, 8) - width(b) + px(scale, 80),
+        vp.Pos.x + vp.Size.x - px(scale, 80))
+    y = clamp(b.y0 + delta.y, vp.Pos.y, vp.Pos.y + vp.Size.y - px(scale, 46))
+    ig.SetWindowPos((round(x), round(y)))
+    return nothing
+end
+
+"""
+    paragraph(app, text; colour = :text_dim, size = 12.5, pitch = 1.4)
+
+Wrapped text in the dialog body, as the prototype's `.help` paragraph: lines `pitch`
+times the font size apart, as wide as the current item width (the body width in
+`draw_dialog`). Takes its space as an ImGui item.
+"""
+function paragraph(app, text::AbstractString; colour::Symbol = :text_dim, size::Real = BODY_FONT_SIZE,
+        pitch::Real = 1.4)
+    s = app.window.scale
+    x0 = ig.GetCursorScreenPos().x
+    max_w = max(Float32(ig.CalcItemWidth()), 1f0)
+    lines = wrap_lines(FONT_REGULAR, size, text, max_w)
+    line_h = Float32(size * pitch * s)   # not rounded: a browser keeps the fraction
+    y = ig.GetCursorScreenPos().y
+    dl = ig.GetWindowDrawList()
+    col = u32(getfield(app.tokens, colour))
+    for l in lines
+        draw_text_mid(dl, FONT_REGULAR, size, x0, y + line_h / 2, col, l; line = pitch)
+        y += line_h
+    end
+    ig.Dummy((max_w, round(line_h * length(lines))))
+    return nothing
+end
+
+"""
+    ConfirmDialog
+
+A yes or no question; see `confirm!`.
+"""
+struct ConfirmDialog
+    title::String
+    text::String
+    action::String
+    danger::Bool
+    on_yes::Function
+end
+
+"""
+    confirm!(app, title, text; action, danger = false, on_yes)
+
+Ask before doing something, as the prototype's `confirmBox`: a 420 px dialog with `text`,
+Cancel and the primary button `action`. A `danger` question has the warning icon, else
+the info icon. The primary button closes the dialog and calls `on_yes(app)`.
+"""
+function confirm!(app, title::AbstractString, text::AbstractString; action::AbstractString,
+        danger::Bool = false, on_yes::Function)
+    return push_dialog!(app, ConfirmDialog(String(title), String(text), String(action), danger, on_yes))
+end
+
+function draw_modal(app, d::ConfirmDialog)
+    draw_dialog(app, d; title = d.title, icon = d.danger ? "warn" : "info", width = 420,
+        ok_label = d.action,
+        on_ok = () -> (filter!(x -> x !== d, app.ui.dialogs); d.on_yes(app))) do
+        paragraph(app, d.text)
+    end
+    return nothing
+end

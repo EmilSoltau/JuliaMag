@@ -77,12 +77,14 @@ const PROTOTYPE_HTML = joinpath(@__DIR__, "..", "..", "prototype", "juliamag-ui.
             @test all(r -> (r[3] > 0) == (size in sizes), a4.rects[s, k, :])
         end
         # A size a style does not hold comes from its next bigger size, else its biggest.
-        normal, disabled, nav, on_accent = 1, 2, 3, 4
+        normal, disabled, nav, on_accent, dim = 1, 2, 3, 4, 5
         @test ICON_SIZES[icon_size_index(normal, 20)] == 22
         @test ICON_SIZES[icon_size_index(normal, 64)] == 48
         @test ICON_SIZES[icon_size_index(disabled, 10)] == 16
         @test ICON_SIZES[icon_size_index(nav, 22)] == 48
         @test ICON_SIZES[icon_size_index(on_accent, 32)] == 22
+        @test ICON_SIZES[icon_size_index(dim, 18)] == 14
+        @test ICON_SIZES[icon_size_index(normal, 24)] == 24   # the header logo
 
         # The biggest database icon of each style: ink, the accent fill at 22 %, straight alpha.
         a = build_icon_atlas(DARK, 1f0)
@@ -108,5 +110,9 @@ const PROTOTYPE_HTML = joinpath(@__DIR__, "..", "..", "prototype", "juliamag-ui.
         nav = colours(:nav)
         @test has(nav, DARK.on_accent, 1)
         @test has(nav, DARK.brand_tint, 0.22)
+        # At 14 px the 1.6 strokes are thinner than a pixel: look at the colour, any strong alpha.
+        dimmed = colours(:dim)
+        ink(set, c) = any(p -> p[4] > 128 && all(abs(Int(p[i]) - byte(c[i])) <= 4 for i in 1:3), set)
+        @test ink(dimmed, DARK.text_dim) && !ink(dimmed, DARK.icon)
     end
 end

@@ -107,15 +107,15 @@ function app_with_database()
 end
 
 """
-    session_with(; lines = 3, channels = 2, name = "Survey", rows = 2) -> Session
+    session_with(; lines = 3, channels = 2, name = "Survey", rows = 2, project = "p") -> Session
 
-A fresh session with one database item called `name` that has `lines` lines
-(L1001, L1002, ...) of `rows` rows each and `channels` Float64 channels (C1, C2, ...).
-The item is the only one in the project.
+A fresh session of a project called `project` with one database item called `name` that
+has `lines` lines (L1001, L1002, ...) of `rows` rows each and `channels` Float64 channels
+(C1, C2, ...). The item is the only one in the project.
 """
 function session_with(; lines::Integer = 3, channels::Integer = 2, name::AbstractString = "Survey",
-        rows::Integer = 2)
-    s = fresh_session()
+        rows::Integer = 2, project::AbstractString = "p")
+    s = Core.new_session(joinpath(mktempdir(), "p"), project)
     p = s.project
     id = Core.new_item_id(p, Core.ITEM_DATABASE)
     db = Core.create_database(joinpath(p.folder, "databases", id), id)

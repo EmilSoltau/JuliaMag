@@ -8,19 +8,13 @@ using JuliaMagUI: LIGHT, DARK, THEME_LIGHT, THEME_DARK, px, draw_icon, ICON_ATLA
 
 const HARNESS_SHOTS = joinpath(@__DIR__, "..", "shots")
 
-# A pixel of a loaded PNG as 0-255 RGB.
-rgb255(p) = (round(Int, 255 * Float32(p.r)), round(Int, 255 * Float32(p.g)),
-    round(Int, 255 * Float32(p.b)))
-rgb255(c::NTuple{4,Float32}) = (round(Int, 255 * c[1]), round(Int, 255 * c[2]),
-    round(Int, 255 * c[3]))
-near(a, b; tol = 3) = all(abs(a[i] - b[i]) <= tol for i in 1:3)
 
 # Every icon at `size` logical px in rows, with `gap` px between them.
 function draw_icon_grid(w; size = 32, gap = 16, left = 24, top = 24, style = :normal)
     names = UI.ICON_ATLASES[w.ctx].names
     step = size + gap
     per_row = 24
-    dl = ig.GetBackgroundDrawList()
+    dl = ig.GetForegroundDrawList()   # over the app
     for (i, name) in enumerate(names)
         row, col = divrem(i - 1, per_row)
         draw_icon(dl, name, (px(w, left + col * step), px(w, top + row * step)), size; style)
@@ -45,10 +39,10 @@ window_testset("harness") do
 
     @testset "with_test_app, shot and a 32 px icon" begin
         path = joinpath(HARNESS_SHOTS, "harness-database.png")
-        icon_at = (40, 40)
+        icon_at = (600, 300)   # over the empty central area, which has the canvas colour
         seen = Ref{Any}(nothing)
         app = Ref{Any}(nothing)
-        draw = w -> draw_icon(ig.GetBackgroundDrawList(), "database", icon_at, 32)
+        draw = w -> draw_icon(ig.GetForegroundDrawList(), "database", icon_at, 32)
         with_test_app(; theme = THEME_LIGHT, extra_ui = draw) do ctx
             seen[] = ctx.window
             app[] = ctx.app_state()
@@ -209,7 +203,8 @@ window_testset("shot tool") do
         @test status == 1   # "open" is not built yet
         img = PNGFiles.load(joinpath(out, "dark.png"))
         @test size(img) == (800, 1200)
-        @test near(rgb255(img[10, 10]), rgb255(DARK.canvas); tol = 1)
+        @test near(rgb255(img[10, 300]), rgb255(DARK.header); tol = 1)
+        @test near(rgb255(img[300, 400]), rgb255(DARK.canvas); tol = 1)
         @test !isfile(joinpath(out, "never.png"))
         @test redirect_stdio(() -> shot_main(["only-one-argument"]); stderr = devnull) == 2
     end

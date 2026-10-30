@@ -81,7 +81,8 @@ function run_action(ctx::TestContext, action::String, arg, out_dir::AbstractStri
         ctx.type(String(arg))
     elseif action == "theme"
         tokens = theme_tokens(String(arg))
-        ctx.on_render(w -> UI.set_theme!(w, tokens))
+        app = ctx.app_state()
+        ctx.on_render(w -> UI.apply_tokens!(app, tokens))   # the app draws with its tokens
         ctx.frames(SETTLE_FRAMES)
     elseif action == "scale"
         (arg isa Real && 0.5 <= arg <= 4) || error("scale must be a number from 0.5 to 4")

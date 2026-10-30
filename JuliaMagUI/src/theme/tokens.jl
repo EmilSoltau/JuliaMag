@@ -135,7 +135,6 @@ const STYLE_COLOURS = (
     ig.ImGuiCol_Text => :text,
     ig.ImGuiCol_TextDisabled => :text_disabled,
     ig.ImGuiCol_PopupBg => :menu,
-    ig.ImGuiCol_ModalWindowDimBg => :backdrop,
     ig.ImGuiCol_CheckMark => :accent,
     ig.ImGuiCol_SliderGrab => :accent,
     ig.ImGuiCol_SliderGrabActive => :accent,
@@ -172,6 +171,9 @@ function apply_style!(t::Tokens, scale::Real)
     for (slot, name) in STYLE_COLOURS
         ig.c_set!(style.Colors, slot, ig.ImVec4(getfield(t, name)...))
     end
+    # ImGui fades its modal dim in over some frames. `draw_dialog` draws the `backdrop`
+    # itself, at once and once per dialog, as the prototype does.
+    ig.c_set!(style.Colors, ig.ImGuiCol_ModalWindowDimBg, ig.ImVec4(0, 0, 0, 0))
     for (name, value) in pairs(STYLE_SIZES)
         setproperty!(style, name, value isa Tuple ? ig.ImVec2(value...) : value)
     end
@@ -180,7 +182,7 @@ function apply_style!(t::Tokens, scale::Real)
     for name in BORDER_SIZES
         setproperty!(style, name, border)
     end
-    style.FontSizeBase = BODY_FONT_SIZE
+    style.FontSizeBase = body_font_size()
     style.FontScaleDpi = s
     return nothing
 end

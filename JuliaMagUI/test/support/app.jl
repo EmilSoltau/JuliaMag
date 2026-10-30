@@ -14,6 +14,14 @@ import JuliaMagUI as UI
 # The loop stops the engine before it destroys the ImGui context.
 UI.stop_test_engine(engine::te.Engine) = te.Stop(engine)
 
+# A pixel of a loaded PNG, or a token colour, as 0-255 RGB.
+rgb255(p) = (round(Int, 255 * Float32(p.r)), round(Int, 255 * Float32(p.g)),
+    round(Int, 255 * Float32(p.b)))
+rgb255(c::NTuple{4,Float32}) = (round(Int, 255 * c[1]), round(Int, 255 * c[2]),
+    round(Int, 255 * c[3]))
+"Are two 0-255 RGB colours within `tol` in every channel?"
+near(a, b; tol = 3) = all(abs(a[i] - b[i]) <= tol for i in 1:3)
+
 """
     has_display() -> Bool
 
