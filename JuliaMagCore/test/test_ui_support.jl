@@ -37,11 +37,12 @@ isdefined(@__MODULE__, :fresh_session) || include(joinpath(@__DIR__, "support", 
         # The copy is not the session's own vector.
         push!(warnings(s), "x")
         @test warnings(s)[end] == "w1"
+        r4 = revision(s)
         job = run_tool(s, "database.channel_math"; inputs = Dict("database" => id), expr = "MAG2 = MAG * 2",
                        lines = "all")
-        r4 = revision(s)
         wait_job(job)
-        @test revision(s) > r4
+        # One bump when the job starts, one when it leaves JOB_RUNNING.
+        @test revision(s) >= r4 + 2
         @test isopen(s)
         close_session!(s)
         @test !isopen(s)
@@ -76,7 +77,7 @@ isdefined(@__MODULE__, :fresh_session) || include(joinpath(@__DIR__, "support", 
         s = fresh_session()
         gate = Threads.Atomic{Bool}(false)
         slow = (p, r) -> begin
-            while !gate[] && !is_cancelled(p)
+            while !gate[]
                 sleep(0.001)
             end
             return ProjectItem[]
@@ -87,11 +88,42 @@ isdefined(@__MODULE__, :fresh_session) || include(joinpath(@__DIR__, "support", 
         while isopen(s) && time() - t0 < 30
             sleep(0.001)
         end
-        @test !isopen(s)
+        # The close waits for the running job, so it is still open.
+        @test s.state[] == 1
+        @test !istaskdone(closer)
         @test_throws SessionClosedError start_job!(s, "test.slow", Dict{String,Any}(), slow; undoable = false)
         gate[] = true
         wait(closer)
+        @test s.state[] == 2
         @test all(j -> status(j) != JOB_RUNNING, jobs(s))
         @test length(jobs(s)) == 1 && status(j1) != JOB_RUNNING
+    end
+
+    @testset "an edit that waits for the lock is refused when the session closes meanwhile" begin
+        s = fresh_session()
+        id = make_test_database!(s)
+        before = length(s.undo_stack)
+        held = Base.Event()
+        release = Base.Event()
+        holder = Threads.@spawn lock(s.lock) do
+            notify(held)
+            wait(release)
+        end
+        wait(held)
+        edit = Threads.@spawn try
+            rename_item!(s, id, "late")
+            nothing
+        catch e
+            e
+        end
+        sleep(0.3)                      # the edit has passed the first check and waits for the lock
+        s.state[] = 1                   # the close has started
+        notify(release)
+        wait(holder)
+        @test fetch(edit) isa SessionClosedError
+        @test length(s.undo_stack) == before
+        @test item(s.project, id).name != "late"
+        s.state[] = 0
+        close_session!(s)
     end
 end

@@ -77,6 +77,7 @@ function set_grid_crs!(s::Session, id::AbstractString, crs::AbstractString)
     code = String(strip(crs))
     isempty(code) || valid_crs(code) || throw(ArgumentError("coordinate system \"$code\" is not known"))
     lock(s.lock) do
+        check_open(s)
         change_grid_crs!(s, id, code)
         record!(s, "grid.set_grid_crs", Dict{String,Any}("item" => String(id), "crs" => code))
     end
@@ -111,6 +112,7 @@ function set_grid_georef!(s::Session, id::AbstractString; x0::Union{Nothing,Real
     georef(g) = Tuple(getfield(g, k) for k in GEOREF_FIELDS)
     set_georef!(g, v) = foreach((k, x) -> setfield!(g, k, x), GEOREF_FIELDS, v)
     lock(s.lock) do
+        check_open(s)
         check_not_busy(s, id)
         old = georef(grid(s.project, id))
         new = Tuple(get(given, k, o) for (k, o) in zip(GEOREF_FIELDS, old))
@@ -145,6 +147,7 @@ function set_grid_style!(s::Session, id::AbstractString, style::GridStyle)
     end
     new = copy_style(style)
     lock(s.lock) do
+        check_open(s)
         edit_grid_meta!(g -> copy_style(g.style), (g, v) -> (g.style = copy_style(v)), s, id,
                         "set the style of grid $id", new)
         args = Dict{String,Any}("item" => String(id))

@@ -640,6 +640,7 @@ Throws `ProtectedError` before anything is written if the channel is protected.
 function set_cell!(s::Session, item_id::AbstractString, id::LineId, name::AbstractString, row::Integer, x)
     check_open(s)
     lock(s.lock) do
+        check_open(s)
         check_not_busy(s, item_id)
         db = database(s.project, item_id)
         channel(db, name).protected && throw(ProtectedError(String(name)))
@@ -664,6 +665,7 @@ Select or deselect a line and save `database.json`. Undoable and recorded.
 function set_line_selected!(s::Session, item_id::AbstractString, id::LineId, flag::Bool)
     check_open(s)
     lock(s.lock) do
+        check_open(s)
         check_not_busy(s, item_id)
         old = line(database(s.project, item_id), id).selected
         put(v::Bool) = () -> lock(s.lock) do
@@ -743,6 +745,7 @@ function remove_item!(s::Session, id::AbstractString)
     key = String(id)
     p = s.project
     lock(s.lock) do
+        check_open(s)
         check_not_busy(s, key)
         it = item(p, key)
         k = something(findfirst(i -> i === it, p.items))
@@ -794,6 +797,7 @@ function rename_item!(s::Session, id::AbstractString, name::AbstractString)
     isempty(new) && throw(ArgumentError("the name of an item cannot be blank"))
     p = s.project
     lock(s.lock) do
+        check_open(s)
         check_not_busy(s, key)
         old = item(p, key).name
         put(v::String) = () -> lock(s.lock) do
@@ -862,6 +866,7 @@ function set_channel_protected!(s::Session, id::AbstractString, name::AbstractSt
     check_open(s)
     key, ch = String(id), String(name)
     lock(s.lock) do
+        check_open(s)
         edit_channel_meta!(c -> c.protected, (c, v) -> (c.protected = v), s, key, ch,
                            (flag ? "protect " : "unprotect ") * ch, flag)
         record!(s, "database.set_channel_protected", Dict{String,Any}("item" => key, "channel" => ch,
@@ -900,6 +905,7 @@ function set_channel_info!(s::Session, id::AbstractString, name::AbstractString;
     info(c) = Tuple(getfield(c, k) for k in CHANNEL_INFO_FIELDS)
     set_info!(c, v) = foreach((k, x) -> setfield!(c, k, x), CHANNEL_INFO_FIELDS, v)
     lock(s.lock) do
+        check_open(s)
         check_not_busy(s, key)
         old = info(channel(database(s.project, key), ch))
         isempty(given) && return nothing
@@ -930,6 +936,7 @@ function rename_channel!(s::Session, id::AbstractString, old::AbstractString, ne
     check_open(s)
     key, from, to = String(id), String(old), String(new)
     lock(s.lock) do
+        check_open(s)
         check_not_busy(s, key)
         db = database(s.project, key)
         c = channel(db, from)
@@ -974,6 +981,7 @@ function delete_channel!(s::Session, id::AbstractString, name::AbstractString)
     check_open(s)
     key, ch = String(id), String(name)
     lock(s.lock) do
+        check_open(s)
         check_not_busy(s, key)
         db = database(s.project, key)
         c = channel(db, ch)
