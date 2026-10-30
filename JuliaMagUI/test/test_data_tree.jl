@@ -4,7 +4,7 @@ import JuliaMagUI as UI
 using JuliaMagUI: TreeRow, tree_rows, snapshot, row_target, row_key, has_children, properties,
     visible_rows, tree_menu, drag_width, menu_layout, MenuItem, menu_separator, Box,
     next_row, rename_problem, decimals_text, parse_decimals, channel_info_problem, fmt_int,
-    role_tag, ResultDialog, RenameDialog, ChannelPropsDialog, height
+    role_tag, ResultDialog, RenameDialog, ChannelPropsDialog, height, fmt_num, short_num
 
 labels(rows) = [r.label for r in rows]
 row(rows, key) = rows[findfirst(r -> r.key == key, rows)]
@@ -27,6 +27,7 @@ row(rows, key) = rows[findfirst(r -> r.key == key, rows)]
     end
 
     s = kangaroo_data()
+    try
     snap = snapshot(s)
     db = only(k for (k, v) in snap.databases)
     grid, gone = [it.id for it in snap.items if it.kind == Core.ITEM_GRID]
@@ -89,12 +90,16 @@ row(rows, key) = rows[findfirst(r -> r.key == key, rows)]
         f = tree_rows(snap, Set{String}(), "mag")   # case-insensitive, parents open
         @test labels(f) == ["Databases", "Kangaroo Hills 2024", "Channels", "MAG", "MAG_IGRF",
             "Grids", "KH2024_MAG_IGRF"]
+        # A top folder without a match is left out.
         f = tree_rows(snap, Set{String}(), "t2010")
-        @test labels(f) == ["Databases", "Kangaroo Hills 2024", "Lines", "T2010", "Grids"]
+        @test labels(f) == ["Databases", "Kangaroo Hills 2024", "Lines", "T2010"]
         f = tree_rows(snap, Set{String}(), "kangaroo")   # a database name shows the database only
-        @test labels(f) == ["Databases", "Kangaroo Hills 2024", "Grids"]
+        @test labels(f) == ["Databases", "Kangaroo Hills 2024"]
         f = tree_rows(snap, Set{String}(), "lon, lat")   # a pair by its text
-        @test labels(f) == ["Databases", "Kangaroo Hills 2024", "Channels", "LON, LAT", "Grids"]
+        @test labels(f) == ["Databases", "Kangaroo Hills 2024", "Channels", "LON, LAT"]
+        f = tree_rows(snap, Set{String}(), "regional")
+        @test labels(f) == ["Grids", "Regional_TMI_GA2019"]
+        @test isempty(tree_rows(snap, Set{String}(), "no such name"))
         f = tree_rows(snap, Set{String}(), "  ")   # blank is no filter
         @test labels(f) == ["Databases", "Grids"]
     end
@@ -102,8 +107,20 @@ row(rows, key) = rows[findfirst(r -> r.key == key, rows)]
     @testset "role tags and numbers" begin
         @test role_tag(Core.ROLE_NONE) == "" && role_tag(Core.ROLE_LINE) == "line" &&
               role_tag(Core.ROLE_ELEVATION) == "elevation"
+        # The prototype's words for the geographic roles.
+        @test role_tag(Core.ROLE_LON) == "longitude" && role_tag(Core.ROLE_LAT) == "latitude"
         @test fmt_int(0) == "0" && fmt_int(999) == "999" && fmt_int(1000) == "1,000" &&
               fmt_int(-1234567) == "-1,234,567"
+        @test fmt_num(380_000, 0) == "380,000" && fmt_num(-260.34, 1) == "-260.3" &&
+              fmt_num(607, 1) == "607.0" && fmt_num(-0.04, 1) == "0.0"
+        # Huge and non-finite values never throw (a Float32 grid can hold 3.4e38).
+        @test fmt_num(1e20, 1) == "1.0e20" && fmt_num(3e38, 0) == "3.0e38" && fmt_num(-3e38, 1) == "-3.0e38"
+        @test fmt_num(Float64(typemax(Int)), 0) == "9.22337e18"
+        @test fmt_num(Float64(Float32(1.70141e38)), 1) == "1.70141e38"
+        @test fmt_num(NaN, 1) == "NaN" && fmt_num(Inf, 0) == "Inf" && fmt_num(-Inf, 1) == "-Inf"
+        @test short_num(25.0) == "25" && short_num(12.5) == "12.5" && short_num(1e20) == "1.0e20" &&
+              short_num(-3e38) == "-3.0e38" && short_num(Float64(typemax(Int))) == "9.22337e18" &&
+              short_num(NaN) == "NaN" && short_num(Inf) == "Inf"
     end
 
     @testset "properties" begin
@@ -125,7 +142,7 @@ row(rows, key) = rows[findfirst(r -> r.key == key, rows)]
         p = properties(snap, (:channel, db, "LON"))
         @test p.title == "Channel LON"
         @test p.rows == ["Label" => "LONGITUDE", "Data type" => "Float64", "Units" => "deg",
-            "Role" => "lon", "Protected" => "Yes", "Format" => "Normal", "Decimals" => "6"]
+            "Role" => "longitude", "Protected" => "Yes", "Format" => "Normal", "Decimals" => "6"]
         p = properties(snap, (:pair, db, "LON,LAT"))
         @test p.rows == ["Type" => "Position pair", "X" => "LON", "Y" => "LAT",
             "System" => "GDA2020 (EPSG:7844)", "Current" => "No"]
@@ -196,7 +213,13 @@ row(rows, key) = rows[findfirst(r -> r.key == key, rows)]
             empty!(app.ui.requests)
             items[1].action(app)
             r = only(app.ui.requests)
-            @test r isa UI.OpenToolDialog && r.id == "database.statistics" && r.item == db
+            @test r isa UI.OpenToolDialog && r.id == "database.statistics" && r.item == db &&
+                  isempty(r.values)
+            # The channel's Statistics also names the channel.
+            empty!(app.ui.requests)
+            tree_menu(app, row(rows, "$db/channels/MAG"))[1].action(app)
+            r = only(app.ui.requests)
+            @test r.id == "database.statistics" && r.item == db && r.values == Dict{String,Any}("channel" => "MAG")
             empty!(app.ui.requests)
             gi = tree_menu(app, row(rows, grid))
             gi[2].action(app)
@@ -270,9 +293,11 @@ row(rows, key) = rows[findfirst(r -> r.key == key, rows)]
         @test channel_info_problem("x", "10") == "Decimals must be a whole number from 0, or auto."
         @test channel_info_problem("2", "0") == "Width must be a whole number from 1."
         @test channel_info_problem("2", "") == "Width must be a whole number from 1."
-        r = ResultDialog("Statistics", "count 3")
-        @test r.title == "Statistics" && r.text == "count 3"
+        r = ResultDialog("Statistics", "count 3\nmin 1")
+        @test r.title == "Statistics" && r.text == "count 3\nmin 1" && r.lines == ["count 3", "min 1"]
     end
 
-    Core.close_session!(s)
+    finally
+        Core.close_session!(s)
+    end
 end

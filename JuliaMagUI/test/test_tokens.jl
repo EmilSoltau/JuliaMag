@@ -1,5 +1,5 @@
 using Test
-using JuliaMagUI: Tokens, LIGHT, DARK, hex_rgba, tokens_for,
+using JuliaMagUI: Tokens, LIGHT, DARK, hex_rgba, tokens_for, RENDERED_TOKENS,
     THEME_LIGHT, THEME_DARK, THEME_SYSTEM
 
 # Read every `--name: value;` pair of one CSS block into a Dict.
@@ -25,7 +25,10 @@ end
         @test LIGHT.brand == hex_rgba("#7D4A9B") && DARK.brand == LIGHT.brand
         @test LIGHT.shadow == (0f0, 0f0, 0f0, 0.11f0) && DARK.backdrop == (0f0, 0f0, 0f0, 0.45f0)
         @test DARK.brand_tint == hex_rgba("#FFD36E")
-        @test fieldcount(Tokens) == 36
+        @test fieldcount(Tokens) == 37
+        # Measured from the prototype's render (Chromium's text selection), not its CSS.
+        @test RENDERED_TOKENS == (:text_selection,)
+        @test LIGHT.text_selection == hex_rgba("#3367D1") && DARK.text_selection == hex_rgba("#0439A4")
         @test hex_rgba("#FF0000") == (1f0, 0f0, 0f0, 1f0)
         @test_throws ArgumentError hex_rgba("red")
     end
@@ -36,7 +39,7 @@ end
         dark_block = match(r":root\[data-theme=\"dark\"\] \{(.*?)\n\}"s, html)[1]
         light = css_tokens(light_block)
         dark = merge(light, css_tokens(dark_block))   # dark inherits what it does not set
-        names = fieldnames(Tokens)
+        names = filter(n -> !(n in RENDERED_TOKENS), fieldnames(Tokens))
         for (tokens, css) in ((LIGHT, light), (DARK, dark)), name in names
             @test haskey(css, name)
             @test getfield(tokens, name) == css_rgba(css[name])

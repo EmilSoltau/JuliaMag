@@ -198,7 +198,8 @@ end
 
 """
     with_test_app(f; project = nothing, theme = THEME_LIGHT, size = (1480, 920), scale = 1f0,
-                  config_dir = mktempdir(), extra_ui = nothing, timeout = 120)
+                  config_dir = mktempdir(), extra_ui = nothing, timeout = 120,
+                  draw_errors_ok = false)
 
 Start the real app (`JuliaMagUI.main`) with the bundled fonts and an ImGuiTestEngine
 context, run `f(ctx::TestContext)` as one registered test, then close the app.
@@ -206,13 +207,18 @@ context, run `f(ctx::TestContext)` as one registered test, then close the app.
 `extra_ui(w)` is drawn after the app in every frame.
 An error in `f` is thrown again once the window is closed. Returns what `f` returns.
 
+An error while drawing a frame does not end the app (the frame guard turns it into a
+toast). So a test cannot miss one, the run fails when the app recorded any draw error
+(`app.draw_errors`), unless `draw_errors_ok` says the test expects them.
+
 The whole test, start and close included, has `timeout` seconds.
 After that, the next action throws `TestTimeout`, and the test engine's watchdog stops an
 action that hangs; the app then closes and the error reaches the caller.
 """
 function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGHT,
         size::Tuple{Integer,Integer} = (1480, 920), scale::Real = 1f0,
-        config_dir::AbstractString = mktempdir(), extra_ui = nothing, timeout::Real = 120)
+        config_dir::AbstractString = mktempdir(), extra_ui = nothing, timeout::Real = 120,
+        draw_errors_ok::Bool = false)
     deadline = time() + timeout
     TEST_TIMEOUT[] = timeout
     config, _ = UI.load_config(config_dir)
@@ -268,5 +274,9 @@ function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGH
         te.DestroyContext(engine)
     end
     failure[] === nothing || throw(failure[])
+    a = app[]
+    if !draw_errors_ok && a !== nothing && !isempty(a.draw_errors)
+        error("the app had errors while drawing: " * join((e.text for e in a.draw_errors), "; "))
+    end
     return result[]
 end

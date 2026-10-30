@@ -64,7 +64,15 @@ function more_shots(ctx, app, name)
     ctx.shot(joinpath(DATA_SHOTS, "data-menu-db-$name.png"))
     ctx.click("//###menu/Rename...")
     ctx.frames(3)
-    ctx.shot(joinpath(DATA_SHOTS, "data-rename-$name.png"))
+    path = ctx.shot(joinpath(DATA_SHOTS, "data-rename-$name.png"))
+    # The selected name has the prototype's selection colour and on-accent text.
+    img = PNGFiles.load(path)
+    tokens = app.tokens
+    # The box is y 421 to 435, as the prototype's (proto-data-rename-*.png); x 590 is
+    # between two glyphs of "Kangaroo".
+    col = [near(rgb255(img[y + 1, 591]), rgb255(tokens.text_selection)) for y in 418:438]
+    @test findfirst(col) + 417 == 421 && findlast(col) + 417 == 435
+    @test any(near(rgb255(img[y, x]), rgb255(tokens.on_accent); tol = 30) for y in 420:436, x in 574:690)
     ctx.key("Escape")
     ctx.frames(2)
     right_click(tree_ref("$db/channels/MAG"))
@@ -235,7 +243,7 @@ window_testset("data tab") do
             ctx.frames(1)
             @test length(app.ui.dialogs) == 1   # a bad number: Apply is greyed
             fill_field("//###dialog1/##Decimals", "auto")
-            fill_field("//###dialog1/##Units", "nT/m")
+            fill_field("//###dialog1/##Units", "  nT/m ")   # spaces are stripped
             ctx.click("//###dialog1/Exponential")
             ctx.click("//###dialog1/Apply")
             ch() = only(c for c in app.snap.databases[db].channels if c.name == "IGRF")
@@ -308,18 +316,37 @@ window_testset("data tab") do
             end
             ctx.frames(1)
             @test app.ui.selected[1] === :line && app.ui.tree_scroll > 0
+            # The selected row lies wholly inside the tree view.
+            rows = UI.cached_tree_rows!(app)
+            k = findfirst(r -> UI.row_target(r) == app.ui.selected, rows)
+            v = app.ui.tree_view
+            top = v.y0 + UI.fpx(1, UI.TREE_PAD) + (k - 1) * UI.fpx(1, UI.TREE_ROW_H) - app.ui.tree_scroll
+            @test v.y0 <= top && top + UI.fpx(1, UI.TREE_ROW_H) <= v.y1
+            # After a menu action the arrow keys still move in the tree.
+            app.ui.tree_scroll = 0f0
+            ctx.frames(2)
+            right_click(tree_ref(db))
+            ctx.click("//###menu/Rename...")
+            ctx.key("Escape")
+            ctx.frames(2)
+            @test isempty(app.ui.dialogs) && app.ui.tree_focused
+            ctx.key("Down")
+            @test app.ui.selected == (:lines, db, "")
         end
     end
 
     @testset "the filter shows matches with their parents; Esc clears it" begin
         with_project_app(kangaroo_data()) do ctx, app
             db = app.ui.current_db
+            union!(app.ui.expanded, ["databases", db, "$db/lines"])
+            ctx.frames(2)
+            @test te.ItemExists(tree_ref("$db/lines/L1001"))   # drawn before the filter
             ctx.type("JuliaMag/left/##Filter", "t2010")
             ctx.frames(2)
             @test app.ui.filter == "t2010"
             @test te.ItemExists(tree_ref("$db/lines/T2010"))
-            ctx.frames(1)
             @test !te.ItemExists(tree_ref("$db/lines/L1001"))
+            @test !te.ItemExists(tree_ref("grids"))   # no grid matches
             ctx.shot(joinpath(DATA_SHOTS, "data-filter-light.png"))
             te.ItemClick("JuliaMag/left/##Filter")
             ctx.key("Escape")
@@ -361,19 +388,109 @@ window_testset("data tab") do
             (progress, io) -> (wait(go); Core.ProjectItem[]))
         try
             with_project_app(s) do ctx, app
-                ctx.frames(2)
-                path = ctx.shot(joinpath(DATA_SHOTS, "data-jobs-badge.png"))
-                img = PNGFiles.load(path)
-                # The badge: a 16 px accent pill after "Jobs".
-                row = img[168 + 17, :]
-                xs = [x for x in 80:140 if near(rgb255(row[x]), rgb255(LIGHT.accent); tol = 6)]
-                @test !isempty(xs) && 14 <= last(xs) - first(xs) + 1 <= 17
-                notify(go)
+                try
+                    ctx.frames(2)
+                    path = ctx.shot(joinpath(DATA_SHOTS, "data-jobs-badge.png"))
+                    img = PNGFiles.load(path)
+                    # The badge: a 16 px accent pill after "Jobs".
+                    row = img[168 + 17, :]
+                    xs = [x for x in 80:140 if near(rgb255(row[x]), rgb255(LIGHT.accent); tol = 6)]
+                    @test !isempty(xs) && 14 <= last(xs) - first(xs) + 1 <= 17
+                finally
+                    notify(go)   # before the session closes, which waits for the job
+                end
                 Core.wait_job(job)
                 ctx.wait_until(() -> UI.running_jobs(app.snap) == 0)
             end
         finally
             notify(go)
+        end
+    end
+
+    @testset "a grid with huge values: the Properties panel stays sensible" begin
+        with_project_app(kangaroo_data(; vmin = 1e20, vmax = Float64(Float32(1.70141e38)))) do ctx, app
+            grid = first(it.id for it in app.snap.items if it.kind == Core.ITEM_GRID && !it.missing)
+            push!(app.ui.expanded, "grids")
+            ctx.frames(2)
+            ctx.click(tree_ref(grid))
+            ctx.frames(5)   # the app keeps drawing
+            p = UI.properties(app.snap, app.ui.selected)
+            @test p.rows[end] == ("Values" => "Float32, 1.0e20 to 1.70141e38 nT")
+            @test isempty(app.draw_errors)
+        end
+    end
+
+    @testset "the frame guard: a draw error becomes one toast and one log entry" begin
+        logger = Test.TestLogger(min_level = Base.CoreLogging.Error)
+        Base.CoreLogging.with_logger(logger) do
+            with_test_app(; extra_ui = w -> error("the hook broke"), draw_errors_ok = true) do ctx
+                app = ctx.app_state()
+                ctx.frames(6)
+                @test count(t -> t.kind === :error, app.toasts) == 1
+                @test only(app.toasts).text == "Something went wrong: the hook broke"
+                e = only(app.draw_errors)
+                @test e.count >= 6 && e.text == "Something went wrong: the hook broke"
+                ctx.click("JuliaMag/left/Jobs")   # the app still takes input
+                @test app.ui.left_tab === :jobs
+            end
+        end
+        @test count(r -> r.level == Base.CoreLogging.Error, logger.logs) == 1
+    end
+
+    @testset "chevrons and checkboxes belong to their row" begin
+        with_project_app(kangaroo_data()) do ctx, app
+            db = app.ui.current_db
+            union!(app.ui.expanded, ["databases", db, "$db/lines"])
+            ctx.frames(2)
+            ctx.click(tree_ref(db, "chevron"))   # closes it, selects it, focuses the tree
+            @test !(db in app.ui.expanded) && app.ui.selected == (:database, db, "") && app.ui.tree_focused
+            ctx.click(tree_ref(db, "chevron"))
+            ctx.frames(1)
+            ctx.click(tree_ref("$db/lines/L1002", "check"))
+            @test app.ui.selected == (:line, db, "L1002")
+            ctx.wait_until(() -> !line_selected(app, db, "L1002"))
+            # The row keeps its hover fill under the mouse on the checkbox.
+            te.MouseMove(tree_ref("$db/lines/L1003", "check"))
+            ctx.frames(2)
+            img = PNGFiles.load(ctx.shot(joinpath(DATA_SHOTS, "data-hover-check.png")))
+            y = 202 + 4 + 26 * 5 + 13 + 1   # the row of L1003, 1-based
+            @test near(rgb255(img[y, 10]), rgb255(LIGHT.hover))
+            # A right click on a chevron opens the row's menu.
+            right_click(tree_ref(db, "chevron"))
+            ctx.frames(1)
+            @test UI.menu_open(app, "tree") && app.ui.menu.items[end].label == "Remove from Project"
+            ctx.key("Escape")
+        end
+    end
+
+    @testset "an open context menu follows the project" begin
+        with_project_app(kangaroo_data()) do ctx, app
+            db = app.ui.current_db
+            union!(app.ui.expanded, ["databases", db, "$db/channels"])
+            ctx.frames(2)
+            right_click(tree_ref("$db/channels/IGRF"))
+            ctx.frames(1)
+            @test any(it -> it.label == "Protect", app.ui.menu.items)
+            UI.submit!(app, "Protect IGRF", s -> Core.set_channel_protected!(s, db, "IGRF", true))
+            ctx.wait_until(() -> any(it -> it.label == "Unprotect", app.ui.menu.items))
+            @test UI.menu_open(app, "tree")
+            ctx.key("Escape")
+        end
+    end
+
+    @testset "the result dialog copies its text" begin
+        with_project_app(kangaroo_data()) do ctx, app
+            text = join(["line $k " * "x"^(k == 3 ? 300 : 3) for k in 1:2000], "\n")
+            UI.push_dialog!(app, UI.ResultDialog("Report", text))
+            ctx.frames(3)
+            ctx.click("//###dialog1/Copy")
+            got = Ref("")
+            ctx.on_render(w -> (got[] = unsafe_string(ig.GetClipboardText())))
+            @test got[] == text
+            @test any(t -> t.text == "Report copied", app.toasts)
+            ctx.click("//###dialog1/Close")
+            ctx.frames(2)
+            @test isempty(app.ui.dialogs)
         end
     end
 

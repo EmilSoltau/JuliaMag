@@ -225,15 +225,17 @@ struct Tip
 end
 
 """
-    item_tip!(app, title; shortcut = "", help = "", reason = nothing, id = "")
+    item_tip!(app, title; shortcut = "", help = "", reason = nothing, id = "",
+              hovered = ig.IsItemHovered())
 
 Give the last ImGui item a tooltip. It shows after the mouse stays $(TOOLTIP_DELAY) s on
-the item, and not again after a click until the mouse leaves the item.
+the item, and not again after a click until the mouse leaves the item. Pass `hovered`
+when the item counts as hovered in another way (a row under its own chevron).
 """
 function item_tip!(app, title::AbstractString; shortcut::AbstractString = "",
         help::AbstractString = "", reason::Union{Nothing,AbstractString} = nothing,
-        id::AbstractString = "")
-    ig.IsItemHovered() || return nothing
+        id::AbstractString = "", hovered::Bool = ig.IsItemHovered())
+    hovered || return nothing
     ui = app.ui
     ui.tip_hovered = true
     item = ig.GetItemID()

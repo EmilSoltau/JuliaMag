@@ -184,9 +184,10 @@ The project of the prototype's Data tab, with its names: the database "Kangaroo 
 (50 lines L1001-L1050 and 10 ties T2001-T2010 of flight 12, 172,900 rows, the nine
 channels TIME to MAG_IGRF with their roles and units, the pairs X,Y in EPSG:7855
 (current) and LON,LAT in EPSG:7844), the grid "KH2024_MAG_IGRF" (400 x 800, 25 m) and the
-grid "Regional_TMI_GA2019" whose folder is missing.
+grid "Regional_TMI_GA2019" whose folder is missing. `vmin` and `vmax` are the value
+range the grid reports.
 """
-function kangaroo_data()
+function kangaroo_data(; vmin::Real = -260.3, vmax::Real = 607.1)
     s = Core.new_session(joinpath(mktempdir(), "p"), "Kangaroo Hills 2024")
     p = s.project
     id = Core.new_item_id(p, Core.ITEM_DATABASE)
@@ -215,7 +216,7 @@ function kangaroo_data()
     gid = Core.new_item_id(p, Core.ITEM_GRID)
     g = Core.create_grid(joinpath(p.folder, "grids", gid), "KH2024_MAG_IGRF", Float32, 400, 800;
         dx = 25, dy = 25, x0 = 380_000, y0 = 7_905_000, crs = "EPSG:7855", units = "nT")
-    g.vmin, g.vmax, g.count = -260.3, 607.1, 320_000
+    g.vmin, g.vmax, g.count = vmin, vmax, 320_000
     Core.save_grid_meta(g)
     Core.add_item!(p, Core.ProjectItem(gid, Core.ITEM_GRID, "KH2024_MAG_IGRF", "grids/$gid", "", ""))
     Core.add_item!(p, Core.ProjectItem(Core.new_item_id(p, Core.ITEM_GRID), Core.ITEM_GRID,

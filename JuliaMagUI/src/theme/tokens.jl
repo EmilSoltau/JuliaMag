@@ -1,5 +1,6 @@
 # Colour tokens. The values are copied from prototype/juliamag-ui.html (lines 9-46).
 # A test reads the prototype and checks every value, so the two cannot drift apart.
+# `RENDERED_TOKENS` are the few the CSS does not name; they are measured from the render.
 # Widget code never has a colour literal. It reads a field of the active `Tokens`.
 
 """
@@ -23,7 +24,7 @@ end
     Tokens
 
 One straight RGBA colour (0 to 1) per prototype token.
-Field names are the prototype names in snake case.
+Field names are the prototype names in snake case. `RENDERED_TOKENS` come last.
 """
 struct Tokens
     header::NTuple{4,Float32}
@@ -62,7 +63,17 @@ struct Tokens
     brand::NTuple{4,Float32}
     brand_dark::NTuple{4,Float32}
     brand_tint::NTuple{4,Float32}
+    text_selection::NTuple{4,Float32}
 end
+
+"""
+    RENDERED_TOKENS
+
+Tokens the prototype's CSS does not name, measured from its render in Chromium:
+`text_selection` is the fill of selected text in a text field (Chromium's own highlight,
+drawn with white text), from proto-data-rename-{light,dark}.png.
+"""
+const RENDERED_TOKENS = (:text_selection,)
 
 const LIGHT = Tokens(
     hex_rgba("#EEF1F5"), hex_rgba("#FFFFFF"), hex_rgba("#EEF1F5"), hex_rgba("#E4E8EE"),
@@ -76,6 +87,7 @@ const LIGHT = Tokens(
     hex_rgba("#0E9384"), hex_rgba("#E3F5F2"),
     hex_rgba("#DDE3EA"), hex_rgba("#F6F8FA"), rgba(20, 26, 34, 0.28),
     hex_rgba("#7D4A9B"), hex_rgba("#693D83"), hex_rgba("#FFD36E"),
+    hex_rgba("#3367D1"),
 )
 
 # The dark block does not set brand, brand_dark and brand_tint. They keep the light value.
@@ -91,6 +103,7 @@ const DARK = Tokens(
     hex_rgba("#2CC2AE"), hex_rgba("#1B3331"),
     hex_rgba("#3A424D"), hex_rgba("#21262D"), rgba(0, 0, 0, 0.45),
     LIGHT.brand, LIGHT.brand_dark, LIGHT.brand_tint,
+    hex_rgba("#0439A4"),
 )
 
 @enum ThemeMode THEME_LIGHT THEME_DARK THEME_SYSTEM
@@ -146,6 +159,7 @@ const STYLE_COLOURS = (
     ig.ImGuiCol_Separator => :border,
     ig.ImGuiCol_ScrollbarGrab => :border_strong,
     ig.ImGuiCol_NavCursor => :accent,
+    ig.ImGuiCol_TextSelectedBg => :text_selection,
 )
 
 # Relative luminance of a token, to pick the light or dark ImGui preset as a base.

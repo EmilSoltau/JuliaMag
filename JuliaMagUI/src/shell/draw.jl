@@ -170,18 +170,49 @@ function text_input!(app, id::AbstractString, buf::Vector{UInt8}, b::Box; flags:
         pad_y = max(text_y(FONT_REGULAR, size, centre_y(b)) - b.y0, 0f0)
         ig.PushStyleVar(ig.ImGuiStyleVar_FramePadding, (0f0, pad_y))
         ig.PushStyleVar(ig.ImGuiStyleVar_FrameBorderSize, 0f0)
-        for slot in (ig.ImGuiCol_FrameBg, ig.ImGuiCol_FrameBgHovered, ig.ImGuiCol_FrameBgActive)
+        # No frame, and no selection fill of ImGui's (it is 3 px taller than Chromium's):
+        # `draw_selected_text` draws it.
+        for slot in (ig.ImGuiCol_FrameBg, ig.ImGuiCol_FrameBgHovered, ig.ImGuiCol_FrameBgActive,
+                ig.ImGuiCol_TextSelectedBg)
             ig.PushStyleColor(slot, (0f0, 0f0, 0f0, 0f0))
         end
         ig.SetCursorScreenPos((b.x0, b.y0))
         ig.SetNextItemWidth(max(width(b), 1f0))
         focus && ig.SetKeyboardFocusHere()
         c = ig.InputText(id, buf, length(buf), flags)
-        ig.PopStyleColor(3)
+        ig.PopStyleColor(4)
         ig.PopStyleVar(2)
+        ig.IsItemActive() && draw_selected_text(app, buf, b, size)
         c
     end
     return changed, ig.IsItemActive()
+end
+
+# Selected text of the active field (the last item) as Chromium draws it: white on
+# `text_selection`, over ImGui's own text. The box is as high as the rounded ascender plus
+# descender (`text_baseline`) and centred in the field, a half pixel rounded up, as the
+# prototype's render shows. Call it inside `with_font(FONT_REGULAR, size)`.
+function draw_selected_text(app, buf::Vector{UInt8}, b::Box, size::Real)
+    st = lib.igGetInputTextState(ig.GetItemID())
+    (st == C_NULL || !lib.ImGuiInputTextState_HasSelection(st)) && return nothing
+    i, j = minmax(Int(lib.ImGuiInputTextState_GetSelectionStart(st)),
+        Int(lib.ImGuiInputTextState_GetSelectionEnd(st)))
+    bytes = codeunits(field_text(buf))
+    j = min(j, length(bytes))
+    i >= j && return nothing
+    scroll = unsafe_load(st).Scroll.x
+    x0 = b.x0 - scroll + ig.CalcTextSize(String(bytes[1:i])).x
+    x1 = b.x0 - scroll + ig.CalcTextSize(String(bytes[1:j])).x
+    _, ascender, descender = text_baseline(FONT_REGULAR, size, centre_y(b))
+    y0 = rnd(centre_y(b) - (ascender + descender) / 2)
+    y1 = y0 + ascender + descender
+    top = text_y(FONT_REGULAR, size, centre_y(b))   # where ImGui put the text
+    dl = ig.GetWindowDrawList()
+    ig.PushClipRect((b.x0, b.y0), (b.x1, b.y1), true)
+    ig.AddRectFilled(dl, (round(x0), y0), (round(x1), y1), u32(app.tokens.text_selection))
+    ig.AddText(dl, (round(x0), top), u32(app.tokens.on_accent), String(bytes[i+1:j]))
+    ig.PopClipRect()
+    return nothing
 end
 
 """
@@ -252,15 +283,21 @@ function draw_shadow(dl, b::Box, radius::Real, dy::Real, blur::Real, col::NTuple
 end
 
 """
-    hit(id, b; flags = 0) -> (clicked, hovered, held)
+    hit(id, b; flags = 0, overlap = false) -> (clicked, hovered, held)
 
 An invisible ImGui button over box `b`, so every control is an item with an id that the
 test engine can click. Call it inside an ImGui window.
+
+With `overlap`, items submitted after it on top of it (a row's chevron) take the mouse
+over themselves, and `hovered` stays true while the mouse is on them.
 """
-function hit(id::AbstractString, b::Box; flags::Integer = 0)
+function hit(id::AbstractString, b::Box; flags::Integer = 0, overlap::Bool = false)
     ig.SetCursorScreenPos((b.x0, b.y0))
+    overlap && lib.igSetNextItemAllowOverlap()
     clicked = ig.InvisibleButton(id, (max(width(b), 1f0), max(height(b), 1f0)), flags)
-    return clicked, ig.IsItemHovered(), ig.IsItemActive()
+    hovered = overlap ? ig.IsItemHovered(lib.ImGuiHoveredFlags_AllowWhenOverlappedByItem) :
+        ig.IsItemHovered()
+    return clicked, hovered, ig.IsItemActive()
 end
 
 """

@@ -91,8 +91,12 @@ pair_sub(q::Core.PositionPair) = string(q.x, ",", q.y)
 
 The tag of a channel role, such as `\"x\"` or `\"elevation\"`; `\"\"` for no role.
 """
-role_tag(role::Core.ChannelRole) = role == Core.ROLE_NONE ? "" :
+role_tag(role::Core.ChannelRole) = get(ROLE_WORDS, role) do
     lowercase(replace(string(role), "ROLE_" => ""))
+end
+
+# The prototype's words where they are not the role's own name.
+const ROLE_WORDS = Dict(Core.ROLE_NONE => "", Core.ROLE_LON => "longitude", Core.ROLE_LAT => "latitude")
 
 """
     fmt_int(n) -> String
@@ -110,13 +114,21 @@ function fmt_int(n::Integer)::String
     return (n < 0 ? "-" : "") * join(groups, ",")
 end
 
+# Numbers this big or bigger are written with an exponent ("1.70141e38"): they do not fit
+# an `Int`, and a grid of Float32 values can hold up to 3.4e38.
+const HUGE_NUMBER = 1e15
+
+# `x` with an exponent and 6 significant digits, or "NaN", "Inf", "-Inf".
+exp_num(x::Real) = isfinite(x) ? string(round(Float64(x); sigdigits = 6)) : string(Float64(x))
+
 """
     fmt_num(x, digits) -> String
 
 `x` with `digits` decimals and commas between thousands, as the prototype's `fmtNum`.
+A value of 1e15 or more, NaN and Inf are written as `exp_num` does (`"1.0e20"`, `"NaN"`).
 """
 function fmt_num(x::Real, digits::Integer)::String
-    isfinite(x) || return string(x)
+    (isfinite(x) && abs(x) < HUGE_NUMBER) || return exp_num(x)
     digits == 0 && return fmt_int(round(Int, x))
     r = round(abs(Float64(x)); digits)
     whole = floor(Int, r)
@@ -125,8 +137,9 @@ function fmt_num(x::Real, digits::Integer)::String
     return (neg ? "-" : "") * fmt_int(whole) * "." * lpad(string(frac), digits, '0')
 end
 
-# A number as short as it reads: 25 for 25.0.
-short_num(x::Real) = isinteger(x) ? fmt_int(round(Int, x)) : string(Float64(x))
+# A number as short as it reads: 25 for 25.0; huge and non-finite values as `exp_num`.
+short_num(x::Real) = !(isfinite(x) && abs(x) < HUGE_NUMBER) ? exp_num(x) :
+    isinteger(x) ? fmt_int(round(Int, x)) : string(Float64(x))
 
 const MISSING_TEXT = "folder not found"
 const BROKEN_TEXT = "cannot be read"
@@ -140,7 +153,7 @@ shows its rows when its key is in `expanded`. The database `current` is bold.
 
 A `filter` (case-insensitive, blank for none) keeps the database, grid, line, channel and
 pair rows whose name holds it, with their parents, all open. A database that matches by
-name shows itself; its folders show only when they hold a match.
+name shows itself; a folder (top folders too) shows only when it holds a match.
 """
 function tree_rows(snap::Snapshot, expanded::AbstractSet{String}, filter::AbstractString;
         current::AbstractString = "")::Vector{TreeRow}
@@ -151,16 +164,19 @@ function tree_rows(snap::Snapshot, expanded::AbstractSet{String}, filter::Abstra
     dbs = [it for it in snap.items if it.kind == Core.ITEM_DATABASE]
     grids = [it for it in snap.items if it.kind == Core.ITEM_GRID]
 
-    push!(rows, TreeRow(FOLDER_KEYS.databases, 0, :databases, "Databases"; right = string(length(dbs)),
-        icon = "folder", bold = true))
+    folder = TreeRow(FOLDER_KEYS.databases, 0, :databases, "Databases"; right = string(length(dbs)),
+        icon = "folder", bold = true)
+    push!(rows, folder)
     if filtering || FOLDER_KEYS.databases in expanded
         for it in dbs
             add_database_rows!(rows, snap, it, expanded, filtering, hit, it.id == current)
         end
     end
+    filtering && last(rows) === folder && pop!(rows)   # no match under it
 
-    push!(rows, TreeRow(FOLDER_KEYS.grids, 0, :grids, "Grids"; right = string(length(grids)),
-        icon = "folder", bold = true))
+    folder = TreeRow(FOLDER_KEYS.grids, 0, :grids, "Grids"; right = string(length(grids)),
+        icon = "folder", bold = true)
+    push!(rows, folder)
     if filtering || FOLDER_KEYS.grids in expanded
         for it in grids
             filtering && !hit(it.name) && continue
@@ -171,6 +187,7 @@ function tree_rows(snap::Snapshot, expanded::AbstractSet{String}, filter::Abstra
                 dim = it.missing || broken, italic = it.missing || broken))
         end
     end
+    filtering && last(rows) === folder && pop!(rows)
     return rows
 end
 
@@ -460,15 +477,17 @@ function default_action!(app, row::TreeRow)
     return nothing
 end
 
-run_tool_on!(app, tool_id::AbstractString, item::AbstractString) =
-    request!(app, OpenToolDialog(tool_id; item))
+run_tool_on!(app, tool_id::AbstractString, item::AbstractString; values = Dict{String,Any}()) =
+    request!(app, OpenToolDialog(tool_id; item, values))
 
-# A menu row for tool `id` acting on `item` (T11-C1: it asks for the tool dialog).
-function tool_item(app, id::AbstractString, item::AbstractString; label = nothing)
+# A menu row for tool `id` acting on `item` (T11-C1: it asks for the tool dialog), with
+# settings `values` to start with.
+function tool_item(app, id::AbstractString, item::AbstractString; label = nothing,
+        values = Dict{String,Any}())
     cmd = find_command(app, id)
     cmd === nothing && return nothing
     return MenuItem(something(label, cmd.name); icon = cmd.icon, help = cmd.help, id = cmd.id,
-        reason = cmd.enabled(app), action = a -> run_tool_on!(a, id, item))
+        reason = cmd.enabled(app), action = a -> run_tool_on!(a, id, item; values))
 end
 
 # The menu rows of the commands in a split button's menu (the importers or exporters).
@@ -544,7 +563,7 @@ function tree_menu(app, row::TreeRow)::Vector{MenuItem}
         c = v === nothing ? nothing : findfirst(x -> x.name == sub, v.channels)
         c === nothing && return items
         ch = v.channels[c]
-        x = tool_item(app, "database.statistics", id)
+        x = tool_item(app, "database.statistics", id; values = Dict{String,Any}("channel" => sub))
         x === nothing || push!(items, x)
         push!(items, MenuItem("Channel Properties..."; icon = "props",
             action = a -> open_channel_properties!(a, id, sub)))
@@ -640,7 +659,10 @@ function draw_tree(app, dl, view::Box, rows::Vector{TreeRow})
     ui.tree_reveal = false
     mouse = unsafe_load(ig.GetIO().MousePos)
     clicked_any = ig.IsMouseClicked(0) || ig.IsMouseClicked(1)
-    clicked_any && !inside(view, mouse.x, mouse.y) && (ui.tree_focused = false)
+    # A click elsewhere takes the keys from the tree; a click on its context menu does not.
+    clicked_any && !inside(view, mouse.x, mouse.y) && !inside_menu(app, mouse.x, mouse.y) &&
+        (ui.tree_focused = false)
+    ui.tree_view = view
 
     ig.PushID("tree")
     ui.tree_scroll, bar = scroll_area!(app, "scrollbar", view, content, ui.tree_scroll)
@@ -654,9 +676,15 @@ function draw_tree(app, dl, view::Box, rows::Vector{TreeRow})
     ui.tree_drawn = length(range)
     ig.PopClipRect()
     ig.PopID()
-    # The context menu stays open while the tree is drawn (it opened at a point).
+    # The context menu belongs to the selected row. It stays open while the tree draws
+    # that row's menu, and its rows follow the snapshot (Protect becomes Unprotect).
     m = ui.menu
-    m isa OpenMenu && m.owner == "tree" && keep_menu!(app, "tree", m.anchor)
+    if m isa OpenMenu && m.owner == "tree"
+        picked = ui.selected
+        k = picked === nothing ? nothing : findfirst(r -> r.key == row_key(picked...), rows)
+        items = k === nothing ? MenuItem[] : tree_menu(app, rows[k])
+        isempty(items) || keep_menu!(app, "tree", m.anchor; items)
+    end
     tree_keys!(app, rows, sel, view)
     return nothing
 end
@@ -716,34 +744,57 @@ function draw_tree_row(app, dl, row::TreeRow, b::Box, selected::Bool)
     f(v) = fpx(s, v)
     hl = hairline(s)
     mid = centre_y(b)
-    ig.PushID(row.key)
-    x = b.x0 + f(9 + 16 * row.depth)
-    chev = Box(x, b.y0, x + f(14), b.y1)
+    folder = row.kind in (:databases, :grids, :lines, :channels)
+
+    # Where the parts go: chevron, checkbox, icon, name; from the right the count text
+    # (8 px before it) and the tag (6 px before it). The name ends where they start.
+    chev = Box(b.x0 + f(9 + 16 * row.depth), b.y0, b.x0 + f(9 + 16 * row.depth + 14), b.y1)
     kids = has_children(row)
     open = kids && (!isempty(strip(ui.filter)) || row.key in ui.expanded)
-    kids && first(hit("chevron", chev)) && toggle_open!(app, row.key)
-    x = chev.x1
-    cbox = nothing
-    if row.checkbox !== nothing
-        cbox = Box(x + f(4), mid - f(7), x + f(4 + 14), mid + f(7))
-        first(hit("check", Box(cbox.x0, b.y0, cbox.x1, b.y1))) && set_line_checked!(app, row, !row.checkbox)
-        x = cbox.x1
+    cbox = row.checkbox === nothing ? nothing : Box(chev.x1 + f(4), mid - f(7), chev.x1 + f(4 + 14), mid + f(7))
+    ix = (cbox === nothing ? chev.x1 : cbox.x1) + f(4)
+    name_x = ix + f(16 + 8)
+    edge = b.x1 - f(8)
+    cw = isempty(row.right) ? 0f0 : text_width(FONT_REGULAR, 12, row.right)
+    isempty(row.right) || (edge -= cw + f(8))
+    tag = nothing
+    if !isempty(row.tag)
+        tw = text_width(FONT_REGULAR, 10.5, row.tag)
+        tag = snap(Box(edge - tw - f(8) - 2 * hl, mid - f(8), edge, mid + f(8)))
+        edge = tag.x0 - f(6)
     end
-    clicked, hovered, _ = hit("row", b)
+    role = row.bold ? FONT_SEMIBOLD : FONT_REGULAR
+    name = elide(text_width, row.label, max(edge - name_x, 0f0); role)
+
+    ig.PushID(row.key)
+    # The row's button comes first and owns the row: hover, tooltip, right click and
+    # selection. The chevron and checkbox lie on top of it and take their own clicks.
+    clicked, hovered, _ = hit("row", b; overlap = true)
+    on_row = ig.IsItemHovered()   # not on the chevron or checkbox
+    name != row.label && item_tip!(app, row.label; hovered)
+    if kids && first(hit("chevron", chev))
+        toggle_open!(app, row.key)
+        select_row!(app, row)
+        ui.tree_focused = true
+    end
+    if cbox !== nothing && first(hit("check", Box(cbox.x0, b.y0, cbox.x1, b.y1)))
+        set_line_checked!(app, row, !(row.checkbox::Bool))
+        select_row!(app, row)
+        ui.tree_focused = true
+    end
     if clicked
         select_row!(app, row)
         ui.tree_focused = true
-        row.kind in (:databases, :grids, :lines, :channels) && toggle_open!(app, row.key)
+        folder && toggle_open!(app, row.key)
     end
-    if hovered && ig.IsMouseDoubleClicked(0) && !(row.kind in (:databases, :grids, :lines, :channels))
-        default_action!(app, row)
-    end
+    on_row && !folder && ig.IsMouseDoubleClicked(0) && default_action!(app, row)
     if hovered && ig.IsMouseClicked(1)
         select_row!(app, row)
         ui.tree_focused = true
         mouse = unsafe_load(ig.GetIO().MousePos)
         open_tree_menu!(app, row, mouse.x, mouse.y)
     end
+    ig.PopID()
 
     fill = selected ? t.selection : hovered ? t.hover : nothing
     if fill !== nothing
@@ -752,32 +803,15 @@ function draw_tree_row(app, dl, row::TreeRow, b::Box, selected::Bool)
     end
     kids && draw_icon(dl, open ? "chevDown" : "chevRight", (rnd(chev.x0), rnd(mid - f(7))), 14; style = :dim)
     cbox === nothing || draw_checkbox(app, dl, snap(cbox), row.checkbox::Bool)
-    ix = x + f(4)
     draw_icon(dl, row.icon, (rnd(ix), rnd(mid - f(8))), 16)
-    name_x = ix + f(16 + 8)
-
-    # The right side, from the right: the count text (8 px before it), then the tag (6 px
-    # before it). The name ends where they start.
-    edge = b.x1 - f(8)
-    if !isempty(row.right)
-        cw = text_width(FONT_REGULAR, 12, row.right)
-        draw_text_mid(dl, FONT_REGULAR, 12, edge - cw, mid, u32(t.text_dim), row.right)
-        edge -= cw + f(8)
-    end
-    if !isempty(row.tag)
-        tw = text_width(FONT_REGULAR, 10.5, row.tag)
-        tag = snap(Box(edge - tw - f(8) - 2 * hl, mid - f(8), edge, mid + f(8)))
+    isempty(row.right) || draw_text_mid(dl, FONT_REGULAR, 12, b.x1 - f(8) - cw, mid, u32(t.text_dim), row.right)
+    if tag !== nothing
         ig.AddRect(dl, (tag.x0, tag.y0), (tag.x1, tag.y1), u32(t.border), f(4), hl)
         draw_text_mid(dl, FONT_REGULAR, 10.5, tag.x0 + hl + f(4), centre_y(tag), u32(t.text_dim), row.tag;
             line = 14 / 10.5)
-        edge = tag.x0 - f(6)
     end
-    role = row.bold ? FONT_SEMIBOLD : FONT_REGULAR
-    name = elide(text_width, row.label, max(edge - name_x, 0f0); role)
     draw_text_mid(dl, role, BODY_FONT_SIZE, name_x, mid, u32(row.dim ? t.text_disabled : t.text), name;
         italic = row.italic)
-    hovered && name != row.label && item_tip!(app, row.label)
-    ig.PopID()
     return nothing
 end
 

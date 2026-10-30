@@ -7,13 +7,24 @@
 
 # --- Requests ---
 
-"Open the settings dialog of tool `id`, for `item` when it is set."
+"""
+Open the settings dialog of tool `id`, for `item` when it is set. `values` are settings
+to start with, by setting key, such as `"channel" => "MAG"` for the channel the user
+right-clicked.
+"""
 struct OpenToolDialog
     id::String
     item::Union{Nothing,String}
+    values::Dict{String,Any}
 end
-OpenToolDialog(id::AbstractString; item::Union{Nothing,AbstractString} = nothing) =
-    OpenToolDialog(String(id), item === nothing ? nothing : String(item))
+OpenToolDialog(id::AbstractString; item::Union{Nothing,AbstractString} = nothing,
+        values::AbstractDict = Dict{String,Any}()) =
+    OpenToolDialog(String(id), item === nothing ? nothing : String(item), Dict{String,Any}(values))
+OpenToolDialog(id::AbstractString, item::Union{Nothing,AbstractString}) = OpenToolDialog(id; item)
+
+# Requests compare by value (tests compare the requests a click pushed).
+Base.:(==)(a::OpenToolDialog, b::OpenToolDialog) = a.id == b.id && a.item == b.item && a.values == b.values
+Base.hash(r::OpenToolDialog, h::UInt) = hash(r.values, hash(r.item, hash(r.id, hash(:OpenToolDialog, h))))
 
 "Ask for a file, then open the import dialog of importer `importer_id`."
 struct OpenImport

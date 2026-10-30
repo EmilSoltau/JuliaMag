@@ -337,6 +337,7 @@ What the UI shows and where, apart from the project data. Changed on the render 
 - `tree_scroll`, `props_scroll`: how far the Data tree and the Properties panel are
   scrolled, in device pixels. `tree_focused`: the last click was on the tree, so the
   arrow keys move in it. `tree_reveal`: scroll the selected row into view in the next frame.
+  `tree_view`: where the tree was drawn last, in device pixels.
 - `tree_cache`: the rows of the Data tree for the last key (a `TreeCache`, see data.jl).
 - `tree_drawn`: how many tree rows the last frame drew (tests read it).
 - `drag`: the splitter being dragged (a `SplitterDrag`, see panes.jl), or `nothing`.
@@ -373,6 +374,7 @@ Base.@kwdef mutable struct UiState
     props_scroll::Float32 = 0f0
     tree_focused::Bool = false
     tree_reveal::Bool = false
+    tree_view::Box = Box(0, 0, 0, 0)
     tree_cache::Any = nothing
     tree_drawn::Int = 0
     drag::Any = nothing
@@ -392,6 +394,18 @@ Base.@kwdef mutable struct UiState
 end
 
 """
+    DrawError
+
+An error that cut frames short: `key` tells errors apart (type and message), `text` is
+what its toast said, `count` how many frames it cut.
+"""
+mutable struct DrawError
+    key::String
+    text::String
+    count::Int
+end
+
+"""
     AppState(config, tokens; session = nothing)
 
 Everything the app holds. The render thread owns it: only the render thread changes it,
@@ -407,6 +421,8 @@ and the worker hands results back through `drain!`.
 - `config_dir`: the folder that holds `settings.json`; the app saves its settings there.
 - `command_cache`: what `commands(app)` built last (see commands.jl).
 - `draw_ns`: how long the last `draw_app` took, in nanoseconds (tests and benchmarks read it).
+- `draw_errors`: each different error that cut a frame short (see `guarded_frame`), with
+  how often it came. Tests fail when it is not empty.
 
 The constructor starts the worker. Stop it with `stop_worker!(app.queue)`.
 """
@@ -425,12 +441,13 @@ mutable struct AppState
     config_dir::String
     command_cache::Any
     draw_ns::Int
+    draw_errors::Vector{DrawError}
 end
 
 AppState(config::AppConfig, tokens::Tokens; session::Union{Nothing,Core.Session} = nothing,
         config_dir::AbstractString = JuliaMagUI.config_dir()) =
     AppState(config, tokens, session, nothing, false, Worker(), UiState(), Toast[], nothing, 0,
-        nothing, String(config_dir), nothing, 0)
+        nothing, String(config_dir), nothing, 0, DrawError[])
 
 """
     set_session!(app, s)

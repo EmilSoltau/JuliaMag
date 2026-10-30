@@ -249,7 +249,7 @@ function finish_channel_info!(app, d::ChannelPropsDialog)
     (decimals === nothing || cols === nothing) && return nothing
     filter!(x -> x !== d, app.ui.dialogs)
     c = d.channel
-    label, units, format = field_text(d.label), field_text(d.units), d.format[]
+    label, units, format = String(strip(field_text(d.label))), String(strip(field_text(d.units))), d.format[]
     changed(new, old) = new == old ? nothing : new
     args = (label = changed(label, c.label), units = changed(units, c.units),
         decimals = changed(decimals, c.decimals), format = changed(format, c.format),
@@ -265,23 +265,39 @@ end
 """
     ResultDialog(title, text)
 
-The report of a quick tool: `text` in the mono font, with Copy and Close.
+The report of a quick tool: `text` in the mono font, with Copy and Close. The text is
+split into `lines` once; the dialog draws only the lines in view, and long lines scroll
+sideways.
 """
 struct ResultDialog
     title::String
     text::String
+    lines::Vector{String}
+    "The widest line in device px and the scale it was measured at (measured once)."
+    widest::Base.RefValue{Tuple{Float32,Float32}}
 end
 
-ResultDialog(title::AbstractString, text::AbstractString) = ResultDialog(String(title), String(text))
+ResultDialog(title::AbstractString, text::AbstractString) =
+    ResultDialog(String(title), String(text), String.(split(text, '\n')), Ref((0f0, 0f0)))
 
 const RESULT_MAX_H = 360   # the text scrolls past this height
+const RESULT_LINE = 1.4    # line height, times the 12 px mono font
+
+function widest_line(d::ResultDialog, scale::Float32)::Float32
+    w, at = d.widest[]
+    at == scale && return w
+    w = maximum(l -> text_width(FONT_MONO, 12, l), d.lines; init = 0f0)
+    d.widest[] = (w, scale)
+    return w
+end
 
 function draw_modal(app, d::ResultDialog)
     s = app.window.scale
-    lines = split(d.text, '\n')
-    line_h = fpx(s, 12 * 1.4)
+    line_h = fpx(s, 12 * RESULT_LINE)
+    n = length(d.lines)
     copy = () -> begin
-        button(app, "Copy", "Copy", ig.GetCursorScreenPos().x, ig.GetCursorScreenPos().y) || return nothing
+        pos = ig.GetCursorScreenPos()
+        button(app, "Copy", "Copy", pos.x, pos.y) || return nothing
         ig.SetClipboardText(d.text)
         toast!(app, :info, "Report copied")
         return nothing
@@ -289,15 +305,18 @@ function draw_modal(app, d::ResultDialog)
     draw_dialog(app, d; title = d.title, icon = "report", width = 640, ok_label = "Close",
         cancel_label = nothing, footer_left = copy, on_ok = () -> filter!(x -> x !== d, app.ui.dialogs)) do
         w = Float32(ig.CalcItemWidth())
-        h = min(length(lines) * line_h, fpx(s, RESULT_MAX_H))
-        ig.BeginChild("report", (w, h), 0, ig.ImGuiWindowFlags_NoBackground)
+        wide = widest_line(d, s) > w
+        bar = wide ? fpx(s, 10) : 0f0   # room for the sideways scrollbar
+        h = min(n * line_h, fpx(s, RESULT_MAX_H)) + bar
+        ig.BeginChild("report", (w, h), 0, ig.ImGuiWindowFlags_NoBackground | ig.ImGuiWindowFlags_HorizontalScrollbar)
         dl = ig.GetWindowDrawList()
-        pos = ig.GetCursorScreenPos()
-        for (k, l) in enumerate(lines)
-            draw_text_mid(dl, FONT_MONO, 12, pos.x, pos.y + (k - 0.5f0) * line_h, u32(app.tokens.text), l;
-                line = 1.4)
+        pos = ig.GetCursorScreenPos()   # the content's top left, scrolled
+        view_h = h - bar
+        for k in visible_rows(n, line_h, ig.GetScrollY(), view_h)
+            draw_text_mid(dl, FONT_MONO, 12, pos.x, pos.y + (k - 0.5f0) * line_h, u32(app.tokens.text),
+                d.lines[k]; line = RESULT_LINE)
         end
-        ig.Dummy((w, length(lines) * line_h))
+        ig.Dummy((max(widest_line(d, s), 1f0), n * line_h))
         ig.EndChild()
     end
     return nothing

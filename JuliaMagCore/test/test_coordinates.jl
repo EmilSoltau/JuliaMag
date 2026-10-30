@@ -27,6 +27,12 @@ channel_names(db) = [c.name for c in db.channels]
     @test crs_name("EPSG:7855") == "GDA2020 / MGA zone 55"
     @test crs_name("EPSG:32755") == "WGS 84 / UTM zone 55S"
     @test crs_name("nope") == "" && crs_name("") == ""
+    # The unit of the first axis is public API (the UI shows "25 m").
+    @test Base.ispublic(JuliaMagCore, :crs_axis_unit)
+    @test JuliaMagCore.crs_axis_unit("EPSG:7855") == ("metre", 1.0)
+    u = JuliaMagCore.crs_axis_unit("EPSG:7844")
+    @test u[1] == "degree" && u[2] ≈ pi / 180
+    @test JuliaMagCore.crs_axis_unit("nope") === nothing
     # an error in the work on a good code is a real error, not "invalid code"
     @test_throws ErrorException JuliaMagCore.with_crs(_ -> error("bug"), "EPSG:4326")
 end

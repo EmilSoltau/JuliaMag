@@ -81,11 +81,79 @@ function (a::AppFrame)(w::Window)
     app.window = w
     drain!(app)
     refresh!(app)
-    t = time_ns()
-    draw_app(app)
-    app.draw_ns = Int(time_ns() - t)
-    a.extra_ui === nothing || a.extra_ui(w)
+    guarded_frame(app) do
+        t = time_ns()
+        draw_app(app)
+        app.draw_ns = Int(time_ns() - t)
+        a.extra_ui === nothing || a.extra_ui(w)
+    end
     return nothing
+end
+
+"""
+    guarded_frame(f, app)
+
+Draw a frame with `f()`. An error in it never ends the app: ImGui's stacks (windows, ids,
+fonts, styles) go back to how they were before `f`, so the frame ends cleanly, and the
+error is noted with `note_draw_error!`.
+"""
+function guarded_frame(f, app)
+    state = Ref{lib.ImGuiErrorRecoveryState}()
+    lib.igErrorRecoveryStoreState(state)
+    try
+        f()
+    catch e
+        e isa InterruptException && rethrow()
+        bt = catch_backtrace()
+        recover_imgui_state(state)
+        note_draw_error!(app, e, bt)
+    end
+    return nothing
+end
+
+const MAX_DRAW_ERRORS = 100   # different errors kept; more are only logged at debug level
+
+"""
+    note_draw_error!(app, e, backtrace)
+
+Note an error that cut a frame short. The first time an error comes (by type and
+message) it is logged with its backtrace and shown as an error toast; after that it is
+only counted, so an error in every frame gives one toast and one log entry.
+"""
+function note_draw_error!(app, @nospecialize(e), bt)
+    key = draw_error_key(e)
+    k = findfirst(d -> d.key == key, app.draw_errors)
+    if k !== nothing
+        app.draw_errors[k].count += 1
+        return nothing
+    end
+    if length(app.draw_errors) >= MAX_DRAW_ERRORS
+        @debug "Another error while drawing" key
+        return nothing
+    end
+    text = draw_error_text(e)
+    push!(app.draw_errors, DrawError(key, text, 1))
+    @error "An error cut a frame short; the app goes on" exception = (e, bt)
+    toast!(app, :error, text)
+    return nothing
+end
+
+function draw_error_key(@nospecialize(e))::String
+    try
+        return string(typeof(e), ": ", sprint(showerror, e))
+    catch
+        return string(typeof(e))
+    end
+end
+
+# The toast text of a draw error, as `user_message` gives it but without logging.
+function draw_error_text(@nospecialize(e))::String
+    try
+        e isa USER_ERRORS && return plain_message(e)
+        return "Something went wrong: " * sprint(showerror, e)
+    catch
+        return "Something went wrong."
+    end
 end
 
 include("app/precompile.jl")

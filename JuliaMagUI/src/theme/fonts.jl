@@ -237,6 +237,18 @@ puts it: the line top rounded to a pixel, plus the half leading rounded down, pl
 ascender rounded. Call it inside `with_font(which, size)`.
 """
 function text_y(which::FontRole, size::Real, mid_y::Real; line::Real = 1.25)::Float32
+    baseline, _, _ = text_baseline(which, size, mid_y; line)
+    return round(baseline - unsafe_load(ig.GetFontBaked().Ascent))
+end
+
+"""
+    text_baseline(which, size, mid_y; line = 1.25) -> (baseline, ascender, descender)
+
+The baseline `text_y` uses, with the ascender and descender rounded as a browser rounds
+them (whole device pixels). A browser's text selection runs from `baseline - ascender` to
+`baseline + descender`.
+"""
+function text_baseline(which::FontRole, size::Real, mid_y::Real; line::Real = 1.25)
     loaded = loaded_font(which)
     style = Ptr{ig.lib.ImGuiStyle}(ig.GetStyle())
     em = Float32(size) * unsafe_load(style.FontScaleDpi)
@@ -245,5 +257,5 @@ function text_y(which::FontRole, size::Real, mid_y::Real; line::Real = 1.25)::Fl
     box = Float32(line) * em
     top = floor(Float32(mid_y) - box / 2 + 0.5f0)
     baseline = top + floor((box - ascender - descender) / 2) + ascender
-    return round(baseline - unsafe_load(ig.GetFontBaked().Ascent))
+    return baseline, ascender, descender
 end
