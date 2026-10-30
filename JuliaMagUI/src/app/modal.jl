@@ -136,6 +136,7 @@ function draw_dialog(f, app, d; title::AbstractString, icon::AbstractString = ""
     ig.PopStyleColor()
     ig.PopStyleVar(3)
     open || return nothing
+    keep_on_screen!(app, level, vp, s)
 
     top = level == length(dialogs)
     typing = unsafe_load(ig.GetIO()).WantTextInput
@@ -180,19 +181,34 @@ function draw_dialog(f, app, d; title::AbstractString, icon::AbstractString = ""
     cancel |= clicked
     ig.AddRectFilled(dl, (head.x0, head.y1 - hl), (head.x1, head.y1), u32(t.border))
 
-    # Body.
-    ig.SetCursorScreenPos((head.x0 + p(16), head.y1 + p(14)))
-    ig.BeginGroup()
-    ig.PushTextWrapPos(dw - hl - p(16))
-    ig.PushItemWidth(dw - 2 * hl - p(32))   # the body width; `paragraph` wraps to it
+    # Body: a child window, padded 14 by 16, as high as what it holds. When the dialog
+    # would be taller than the window less 40 px it scrolls, and the header and footer stay
+    # (the prototype's `.dlg` `max-height: calc(100vh - 40px)` and `.dlg-b` `overflow: auto`).
+    footer_h = hl + p(12 + 26 + 12) + hl
+    max_body = max(vp.Size.y - p(40) - (head.y1 - b.y0) - footer_h, p(60))
+    seed = unsafe_load(lib.igGetCurrentWindow().ID)
+    ig.SetCursorScreenPos((head.x0, head.y1))
+    ig.SetNextWindowSizeConstraints((0f0, 0f0), (dw - 2 * hl, max_body))
+    ig.PushStyleVar(ig.ImGuiStyleVar_WindowPadding, (p(16), p(14)))
+    ig.BeginChild("body", (dw - 2 * hl, 0f0),
+        lib.ImGuiChildFlags_AutoResizeY | lib.ImGuiChildFlags_AlwaysUseWindowPadding,
+        ig.ImGuiWindowFlags_NoBackground)
+    ig.PopStyleVar()
+    lib.igPushOverrideID(seed)   # the body's items keep the dialog's ids
+    body_w = Float32(ig.GetContentRegionAvail().x)   # less the scrollbar when it shows
+    ig.PushTextWrapPos(ig.GetCursorPos().x + body_w)
+    ig.PushItemWidth(body_w)   # `paragraph` and the forms wrap to it
     broken = run_body(f, app)
     broken && filter!(x -> x !== d, dialogs)
+    content_end = ig.GetItemRectMax().y + fpx(s, 14)   # unless it scrolls: ImGui truncates the child's height
+    scrolls = ig.GetScrollMaxY() >= 1
     ig.PopItemWidth()
     ig.PopTextWrapPos()
-    ig.EndGroup()
+    ig.PopID()
+    ig.EndChild()
     # A body of fractional height (hint lines are 14.85 px) puts the footer line on a
     # whole pixel, as a browser snaps the border it paints.
-    body_end = rnd(ig.GetItemRectMax().y + fpx(s, 14))
+    body_end = rnd(scrolls ? ig.GetItemRectMax().y : content_end)
 
     # Footer: the left buttons, then Cancel and the primary button on the right.
     ig.AddRectFilled(dl, (head.x0, body_end), (head.x1, body_end + hl), u32(t.border))
@@ -234,6 +250,27 @@ function draw_dialog(f, app, d; title::AbstractString, icon::AbstractString = ""
     return ok_box
 end
 
+# Place the dialog at `level` (the current window) again when its height changes (it
+# opens, Advanced opens, the body measures itself), as the prototype's `place()`:
+# `Math.max(20, Math.round((innerHeight - h) / 2 - 30))`, in CSS px. The height of a
+# dialog is at most the window less 40 px, so it stays on the screen. Like `place()` it
+# also centres the dialog across again. A drag, which keeps the height, is left alone.
+function keep_on_screen!(app, level::Integer, vp, scale::Real)
+    sizes = app.ui.dialog_heights
+    while length(sizes) < level
+        push!(sizes, -1f0)
+    end
+    h = Float32(ig.GetWindowSize().y)
+    sizes[level] == h && return nothing
+    sizes[level] = h
+    s = Float32(scale)
+    top = max(20f0, rnd((vp.Size.y - h) / (2s) - 30)) * s
+    # Across, centred in device px (the window's width in CSS px need not be whole).
+    left = floor(vp.Size.x / 2 + 0.5f0 - Float32(ig.GetWindowSize().x) / 2)
+    ig.SetWindowPos((vp.Pos.x + left, vp.Pos.y + top))
+    return nothing
+end
+
 # Is a multi-line text field active? Enter there makes a new line (review finding 8 of Task 9).
 function multiline_active()::Bool
     id = lib.igGetActiveID()
@@ -247,8 +284,9 @@ end
     run_body(f, app) -> Bool
 
 Run the dialog body `f()`. When it throws, put back the ImGui stacks (windows, ids,
-groups, styles, fonts) as they were before it, show the error as a toast and return
-true; the dialog then closes. So a broken form never ends the app.
+groups, styles, fonts) as they were before it, note the error as a draw error (a toast,
+one log entry, and a failed test in the harness: T13-C6) and return true; the dialog then
+closes. So a broken form never ends the app.
 """
 function run_body(f, app)::Bool
     state = Ref{lib.ImGuiErrorRecoveryState}()
@@ -260,7 +298,7 @@ function run_body(f, app)::Bool
         e isa InterruptException && rethrow()
         bt = catch_backtrace()
         recover_imgui_state(state)
-        toast!(app, :error, safe_user_message(e, bt))
+        note_draw_error!(app, e, bt)
         return true
     end
 end

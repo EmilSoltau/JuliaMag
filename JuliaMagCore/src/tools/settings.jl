@@ -771,9 +771,14 @@ function check_when(list::AbstractVector{<:SettingSpec}, owner::AbstractString)
 end
 
 """
+    deactivate_settings(list, values)::Dict{String,Any}
+
 A copy of `values` where each setting that is not used (see `is_active`) has its
 default. Keys that are not settings stay. This is what jobs, the history and the
 remembered settings keep.
+
+It is public, not exported: the UI calls it as `JuliaMagCore.deactivate_settings` so the
+script call it shows matches what the history writes.
 """
 function deactivate_settings(list::AbstractVector{<:SettingSpec}, values::AbstractDict)::Dict{String,Any}
     out = Dict{String,Any}(String(k) => v for (k, v) in values)

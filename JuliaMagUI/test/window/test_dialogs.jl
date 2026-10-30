@@ -20,12 +20,7 @@ menu_row(app, label) = "//" * app.ui.menu.ref * "/" * label
 # The pixel at device point (x, y) of a PNG, as 0-255 RGB.
 pixel(img, x, y) = rgb255(img[round(Int, y)+1, round(Int, x)+1])
 
-# A small XYZ file in a temp folder: 2 lines of 20 rows.
-function dialog_xyz()
-    path = joinpath(mktempdir(), "small.xyz")
-    write_synthetic_xyz(path; lines = 2, ties = 0, rows_per_line = 20)
-    return path
-end
+fpx_(scale, v) = Float32(v) * Float32(scale)
 
 tool_dialog(app) = (d = isempty(app.ui.dialogs) ? nothing : last(app.ui.dialogs); d isa ToolDialog ? d : nothing)
 
@@ -146,6 +141,8 @@ window_testset("tool dialogs") do
                 white = count(p -> near(rgb255(p), rgb255(LIGHT.on_accent); tol = 40),
                     img[round(Int, b.y0)+1:round(Int, b.y1), round(Int, b.x0)+1:round(Int, b.x1)])
                 @test white > 10
+                # The busy button keeps its full accent (it is not greyed).
+                @test near(pixel(img, b.x0 + 4, (b.y0 + b.y1) / 2), rgb255(LIGHT.accent); tol = 6)
             end
         end
     end
@@ -285,7 +282,7 @@ window_testset("tool dialogs") do
 
     @testset "import an XYZ file through the dialog, then run it again with replace" begin
         with_project_app(Core.new_session(joinpath(mktempdir(), "p"), "p")) do ctx, app
-            xyz = dialog_xyz()
+            xyz = small_xyz()
             app.pick_file = (; kw...) -> xyz
             ctx.click("JuliaMag/ribbon/More import formats")
             ctx.frames(1)
@@ -340,6 +337,105 @@ window_testset("tool dialogs") do
         end
     end
 
+    # Run and Cancel stay on the screen and work, however tall the form is (fix round 1).
+    function footer_reachable(ctx, app, w, h)
+        run, cancel = item_box(D1 * "Run"), item_box(D1 * "Cancel")
+        ok = run.y1 <= h && cancel.y1 <= h && run.y0 >= 0
+        d = tool_dialog(app)
+        d.form.values["expr"] = ""
+        empty!(d.buffers)
+        ctx.click(D1 * "Run")
+        ctx.wait_until(() -> haskey(d.form.errors, "expr"); timeout = 5)
+        ctx.click(D1 * "Cancel")
+        ctx.frames(2)
+        return ok && isempty(app.ui.dialogs)
+    end
+
+    @testset "a tall dialog scrolls its body; Run and Cancel stay reachable" begin
+        for (size, scale, sfx) in (((900, 560), 1f0, "900x560"), ((1480, 920), 1.5f0, "1.5x"))
+            with_project_app(kangaroo(); size, scale) do ctx, app
+                UI.request!(app, UI.OpenToolDialog("database.channel_math"; item = app.ui.current_db))
+                ctx.wait_until(() -> tool_dialog(app) !== nothing; timeout = 5)
+                ctx.frames(2)
+                ctx.click(D1 * "Tool Description")
+                ctx.frames(3)
+                vp = unsafe_load(ig.GetMainViewport())
+                b = item_box(D1 * "Run")
+                ctx.shot(joinpath(DIALOG_SHOTS, "dialog-tall-$sfx.png"))
+                # The dialog is at most the window less 40 px, 20 px from its top and bottom.
+                @test b.y1 <= vp.Size.y - fpx_(scale, 20) - fpx_(scale, 12) + 1
+                # The body scrolls: the wheel over it moves the Tool Description box.
+                te.MouseMove(D1 * "##expr")
+                te.MouseWheelY(-5)
+                ctx.frames(2)
+                ctx.shot(joinpath(DIALOG_SHOTS, "dialog-tall-scrolled-$sfx.png"))
+                @test footer_reachable(ctx, app, vp.Size.x, vp.Size.y)
+            end
+        end
+        many = session_with(lines = 3, channels = 300, name = "Wide")
+        with_project_app(many) do ctx, app
+            UI.request!(app, UI.OpenToolDialog("database.channel_math"; item = app.ui.current_db))
+            ctx.wait_until(() -> tool_dialog(app) !== nothing; timeout = 5)
+            ctx.frames(3)
+            ctx.shot(joinpath(DIALOG_SHOTS, "dialog-300-channels.png"))
+            vp = unsafe_load(ig.GetMainViewport())
+            @test footer_reachable(ctx, app, vp.Size.x, vp.Size.y)
+        end
+    end
+
+    @testset "a 300-channel combo fits the window and scrolls to the last channels" begin
+        many = session_with(lines = 3, channels = 300, name = "Wide")
+        with_project_app(many) do ctx, app
+            UI.request!(app, UI.OpenToolDialog("database.statistics"; item = app.ui.current_db))
+            ctx.wait_until(() -> tool_dialog(app) !== nothing; timeout = 5)
+            d = tool_dialog(app)
+            ctx.frames(2)
+            ctx.click(D1 * "channel")
+            ctx.frames(2)
+            m = app.ui.menu
+            vp = unsafe_load(ig.GetMainViewport())
+            @test m.box.y0 >= 8 && m.box.y1 <= vp.Size.y - 8
+            # The wheel scrolls the rows; the last ones come into view and can be picked.
+            te.MouseMoveToPos(((m.box.x0 + m.box.x1) / 2, (m.box.y0 + m.box.y1) / 2))
+            for _ in 1:40
+                te.MouseWheelY(-10)
+            end
+            ctx.frames(2)
+            @test m.scroll > 0
+            ctx.shot(joinpath(DIALOG_SHOTS, "dialog-menu-scrolled-light.png"))
+            ctx.click(menu_row(app, "C298"))
+            ctx.frames(2)
+            @test d.form.values["channel"] == "C298" && app.ui.menu === nothing
+            # The keyboard: End, then Enter picks the last channel.
+            ctx.click(D1 * "channel")
+            ctx.frames(2)
+            ctx.key("End")
+            ctx.frames(2)
+            ctx.key("Enter")
+            ctx.frames(2)
+            @test d.form.values["channel"] == "C300" && d in app.ui.dialogs
+        end
+    end
+
+    @testset "the import's path line is read-only text, not a field" begin
+        with_project_app(Core.new_session(joinpath(mktempdir(), "p"), "p")) do ctx, app
+            xyz = small_xyz()
+            app.pick_file = (; kw...) -> xyz
+            UI.request!(app, UI.OpenImport("import.geosoft_xyz"))
+            ctx.wait_until(() -> tool_dialog(app) !== nothing; timeout = 5)
+            ctx.frames(3)
+            @test !te.ItemExists(D1 * "##path")
+            d = tool_dialog(app)
+            path = joinpath(DIALOG_SHOTS, "dialog-import-path-light.png")
+            ctx.shot(path)
+            img = PNGFiles.load(path)
+            b = d.path_box
+            # No input frame: the row's ends are the dialog's own fill.
+            @test near(pixel(img, b.x1 - 2, (b.y0 + b.y1) / 2), rgb255(LIGHT.menu); tol = 2)
+            @test near(pixel(img, b.x1 - 2, b.y0 + 1), rgb255(LIGHT.menu); tol = 2)
+        end
+    end
+
     @testset "shots: Channel Math, Import, every widget, light and dark" begin
         with_tools([every_setting_tool()]) do
             for (theme, tokens, name) in ((THEME_LIGHT, LIGHT, "light"), (THEME_DARK, DARK, "dark"))
@@ -376,7 +472,15 @@ window_testset("tool dialogs") do
                         ctx.frames(3)
                         te.MouseMoveToPos((5f0, 5f0))
                         ctx.frames(2)
-                        ctx.shot(joinpath(DIALOG_SHOTS, "dialog-widgets-$name.png"))
+                        wpath = ctx.shot(joinpath(DIALOG_SHOTS, "dialog-widgets-$name.png"))
+                        if name == "light"   # the unit's baseline is 16 px under the field's top, as Chromium's
+                            img = PNGFiles.load(wpath)
+                            fb = item_box(D1 * "##factor")
+                            top = round(Int, fb.y0) - 1
+                            ux = round(Int, fb.x1) + 14
+                            inked(y) = any(x -> sum(pixel(img, x, y)) < 600, ux:ux+14)
+                            @test inked(top + 15) && !inked(top + 16)
+                        end
                         ctx.click(D1 * "table")
                         ctx.frames(2)
                         ctx.shot(joinpath(DIALOG_SHOTS, "dialog-widgets-combo-$name.png"))

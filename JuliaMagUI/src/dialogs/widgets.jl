@@ -288,8 +288,12 @@ function draw_setting!(app, d, g::FormFlow, st::Core.NumberSetting)
         x !== nothing && (f.values[st.key] = setting_number(st, x))
         isempty(strip(new)) && st.auto && (f.values[st.key] = nothing)
     end
-    isempty(st.unit) || draw_text_mid(ig.GetWindowDrawList(), FONT_REGULAR, 11.5, box.x1 + fpx(s, 6),
-        centre_y(c), u32(app.tokens.text_dim), st.unit)
+    # The unit (`.unit`, 11.5 px) is centred on the row as the field's text is: Chromium puts
+    # its baseline 16 px under the field's top, 1 px above the field's text (measured).
+    isempty(st.unit) || with_font(FONT_REGULAR, 11.5) do
+        ig.AddText(ig.GetWindowDrawList(), (round(box.x1 + fpx(s, 6)), input_text_y(FONT_REGULAR, 11.5, centre_y(snap(box)))),
+            u32(app.tokens.text_dim), st.unit)
+    end
     auto_hint = "Blank means auto, worked out from the data."
     setting_hint!(app, d, g, st, st.auto && isempty(st.help) ? auto_hint : st.help)
     return nothing
@@ -634,12 +638,10 @@ function draw_setting!(app, d, g::FormFlow, st::Union{Core.ExtentSetting,Core.Po
     for (k, name) in enumerate(names)
         key = "$(st.key)/$k"
         x = c.x0 + (k - 1) * (w + gap)
+        # A dim letter (W, S, E, N or X, Y) stays at the left, also when the field is filled.
         new = field!(app, d, "$(st.key)_$k", Box(x, c.y0, x + w, c.y1), get(f.texts, key, "");
-            right = true, placeholder = name, error = err)
-        if new !== nothing
-            f.texts[key] = new
-            delete!(f.errors, st.key)
-        end
+            right = true, prefix = name[1:1], error = err)
+        new === nothing || set_part_text!(f, st, k, new)
     end
     setting_hint!(app, d, g, st)
     return nothing

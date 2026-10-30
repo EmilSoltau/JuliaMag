@@ -150,6 +150,10 @@ end
         # An unknown key is reported under its own key; the pairs follow the setting order.
         @test setting_problems(spec, Dict("mode" => "bad", "zzz" => 1)) ==
               ["mode" => "Import into must be one of: new, append.", "zzz" => "$(spec.name) has no setting \"zzz\"."]
+        # The UI writes its script calls through it, so it is public.
+        @test Base.ispublic(JuliaMagCore, :deactivate_settings)
+        d = JuliaMagCore.deactivate_settings(spec.settings, Dict("mode" => "new", "target" => "db-1", "path" => "a.xyz"))
+        @test d["target"] == "" && d["path"] == "a.xyz" && d["mode"] == "new"
     end
 
     @testset "Bool controls, chains and bad conditions" begin

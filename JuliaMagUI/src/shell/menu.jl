@@ -58,6 +58,8 @@ pixels, and whether the owner was drawn in this frame (`seen`). `box` is where t
 `level` is the number of dialogs open when it opened: 0 for a menu of the shell, k for a
 menu of the dialog at level k. `ref` is the ImGui name of its window, where test engine
 references to its rows start (`"###menu"` for the shell's menu).
+A menu taller than the window scrolls: `scroll` is how far, in device px. `key` is the row
+the keyboard highlights (0 for none); `reveal` scrolls the checked row into view once.
 """
 mutable struct OpenMenu
     owner::String
@@ -70,30 +72,38 @@ mutable struct OpenMenu
     box::Box
     level::Int
     ref::String
+    scroll::Float32
+    key::Int
+    reveal::Bool
 end
 
 """
     MenuLayout
 
-The menu box and its rows, in device pixels.
+The menu box and its rows, in device pixels. A menu taller than the window keeps its box
+in the window and its rows move up by `scroll` (0 to `scroll_max`).
 """
 struct MenuLayout
     box::Box
     rows::Vector{Box}
+    scroll::Float32
+    scroll_max::Float32
 end
 
 """
-    menu_layout(anchor, items, viewport, scale, measure; min_width = 200, gap = 2) -> MenuLayout
+    menu_layout(anchor, items, viewport, scale, measure; min_width = 200, gap = 2,
+                scroll = 0) -> MenuLayout
 
 Lay out a menu as the prototype's `openMenu`: under `anchor` with `gap` px between, or
 above it when there is no room below; moved left to stay 8 px inside `viewport`. A
 context menu passes the mouse point as an empty `anchor` and `gap = 0`. Padding 4, 1 px
 border, rows 24 high, separators 9. A row is 6 + icon 16 + 8 + label + (16 + shortcut) +
 10 wide. The menu is `min_width` to 360 wide. `measure(text, size)` is the regular text
-width in device pixels.
+width in device pixels. It is at most the viewport's height less 16 px (the prototype's
+`max-height: calc(100vh - 16px)`); its rows then scroll by `scroll`, clamped.
 """
 function menu_layout(anchor::Box, items::AbstractVector{MenuItem}, viewport::Box, scale::Real,
-        measure; min_width::Real = MENU_MIN_WIDTH, gap::Real = 2)::MenuLayout
+        measure; min_width::Real = MENU_MIN_WIDTH, gap::Real = 2, scroll::Real = 0)::MenuLayout
     p(v) = px(scale, v)
     hl = hairline(scale)
     icons = any(it -> !isempty(it.icon) || it.checked !== nothing, items)
@@ -106,7 +116,10 @@ function menu_layout(anchor::Box, items::AbstractVector{MenuItem}, viewport::Box
         row_w = max(row_w, w)
     end
     w = max(min(round(row_w + p(8) + 2 * hl), p(MENU_MAX_WIDTH)), p(min_width))
-    h = 2 * hl + p(8) + sum(row_h, items; init = 0f0)
+    content = 2 * hl + p(8) + sum(row_h, items; init = 0f0)
+    h = min(content, height(viewport) - p(16))
+    scroll_max = content - h
+    top_scroll = clamp(Float32(scroll), 0f0, scroll_max)
     x = anchor.x0
     y = anchor.y1 + p(gap)
     y + h > viewport.y1 - p(8) && (y = max(viewport.y0 + p(8), anchor.y0 - p(gap) - h))
@@ -114,12 +127,12 @@ function menu_layout(anchor::Box, items::AbstractVector{MenuItem}, viewport::Box
     x = max(viewport.x0 + p(8), x)
     box = Box(round(x), round(y), round(x) + w, round(y) + h)
     rows = Box[]
-    ry = box.y0 + hl + p(4)
+    ry = box.y0 + hl + p(4) - top_scroll
     for it in items
         push!(rows, Box(box.x0 + hl + p(4), ry, box.x1 - hl - p(4), ry + row_h(it)))
         ry += row_h(it)
     end
-    return MenuLayout(box, rows)
+    return MenuLayout(box, rows, top_scroll, scroll_max)
 end
 
 """
@@ -131,7 +144,7 @@ any open menu. Opened while a dialog is open, it belongs to the top dialog.
 function open_menu!(app, owner::AbstractString, anchor::Box, items::Vector{MenuItem};
         min_width::Real = MENU_MIN_WIDTH, gap::Real = 2)
     app.ui.menu = OpenMenu(String(owner), anchor, items, Float32(min_width), Float32(gap), true,
-        true, anchor, length(app.ui.dialogs), "###menu")
+        true, anchor, length(app.ui.dialogs), "###menu", 0f0, 0, true)
     return nothing
 end
 
@@ -212,7 +225,7 @@ function draw_menu(app)::Bool
     ig.PopStyleVar(3)
     chosen = draw_menu_rows(app, m, l)
     ig.End()
-    act_on_menu!(app, m, chosen)
+    act_on_menu!(app, m, chosen, l)
     return true
 end
 
@@ -255,19 +268,40 @@ function draw_dialog_menu(app, level::Integer)
     ig.SetCursorScreenPos((b.x0, b.y0))
     ig.Dummy((width(b), height(b)))
     ig.EndPopup()
-    act_on_menu!(app, m, chosen)
+    act_on_menu!(app, m, chosen, l)
     return nothing
 end
 
-# Lay out menu `m` in the main viewport and remember where it goes.
+# Lay out menu `m` in the main viewport and remember where it goes. The first time, a
+# checked row out of view is scrolled into view.
 function place_menu!(app, m::OpenMenu)::MenuLayout
     s = app.window.scale
     vp = unsafe_load(ig.GetMainViewport())
     view = Box(vp.Pos.x, vp.Pos.y, vp.Pos.x + vp.Size.x, vp.Pos.y + vp.Size.y)
-    l = menu_layout(m.anchor, m.items, view, s, (text, size) -> text_width(FONT_REGULAR, size, text);
-        min_width = m.min_width, gap = m.gap)
+    layout() = menu_layout(m.anchor, m.items, view, s, (text, size) -> text_width(FONT_REGULAR, size, text);
+        min_width = m.min_width, gap = m.gap, scroll = m.scroll)
+    l = layout()
+    if m.reveal
+        m.reveal = false
+        k = findfirst(it -> it.checked === true, m.items)
+        if k !== nothing && l.scroll_max > 0
+            reveal_row!(m, l, k, s)
+            l = layout()
+        end
+    end
+    m.scroll = l.scroll
     m.box = l.box
     return l
+end
+
+# Scroll so row `k` is wholly inside the menu's padding box.
+function reveal_row!(m::OpenMenu, l::MenuLayout, k::Integer, scale::Real)
+    inner = inset(l.box, 0, hairline(scale) + px(scale, 4))
+    row = l.rows[k]
+    row.y0 < inner.y0 && (m.scroll -= inner.y0 - row.y0)
+    row.y1 > inner.y1 && (m.scroll += row.y1 - inner.y1)
+    m.scroll = clamp(m.scroll, 0f0, l.scroll_max)
+    return nothing
 end
 
 # Draw the menu box and its rows in the current window. Returns the row clicked, or `nothing`.
@@ -287,7 +321,11 @@ function draw_menu_rows(app, m::OpenMenu, l::MenuLayout)
     icons = any(it -> !isempty(it.icon) || it.checked !== nothing, m.items)
     chosen = nothing
     seen_ids = Set{String}()
+    # Rows that scrolled out of the box are neither drawn nor clickable.
+    view = inset(b, hl, hl)
+    ig.PushClipRect((view.x0, view.y0), (view.x1, view.y1), true)
     for (k, (it, row)) in enumerate(zip(m.items, l.rows))
+        (row.y1 <= view.y0 || row.y0 >= view.y1) && continue
         if it.separator
             ig.AddRectFilled(dl, (row.x0 + p(2), row.y0 + p(4)), (row.x1 - p(2), row.y0 + p(4) + hl),
                 u32(t.border))
@@ -297,7 +335,7 @@ function draw_menu_rows(app, m::OpenMenu, l::MenuLayout)
         id = it.label in seen_ids ? it.label * "##" * string(k) : it.label
         push!(seen_ids, it.label)
         clicked, hovered, held = hit(id, row)
-        enabled && hovered && ig.AddRectFilled(dl, (row.x0, row.y0), (row.x1, row.y1),
+        enabled && (hovered || k == m.key) && ig.AddRectFilled(dl, (row.x0, row.y0), (row.x1, row.y1),
             u32(held ? t.pressed : t.hover), p(5))
         x = row.x0 + p(6)
         mid = centre_y(row)
@@ -315,11 +353,35 @@ function draw_menu_rows(app, m::OpenMenu, l::MenuLayout)
             reason = it.reason, id = it.id)
         clicked && enabled && (chosen = it)
     end
+    ig.PopClipRect()
+    if l.scroll_max > 0   # a 6 px thumb in a 10 px bar, as the panes' scrollbars
+        track = inset(Box(b.x1 - hl - p(10), b.y0 + hl, b.x1 - hl, b.y1 - hl), p(2), p(4))
+        total = height(view) + l.scroll_max
+        th = max(height(track) * height(view) / total, p(20))
+        ty = track.y0 + (height(track) - th) * l.scroll / l.scroll_max
+        ig.AddRectFilled(dl, (track.x0, ty), (track.x1, ty + th), u32(t.border_strong), p(3))
+    end
     return chosen
 end
 
-# Run the row clicked, or close the menu on Esc or a click outside it and its anchor.
-function act_on_menu!(app, m::OpenMenu, chosen)
+# Run the row clicked, or the row the keyboard picked with Enter; scroll with the wheel
+# and the keys (Up, Down, Page Up, Page Down, Home, End move the highlight); close the
+# menu on Esc or a click outside it and its anchor.
+function act_on_menu!(app, m::OpenMenu, chosen, l::MenuLayout)
+    s = app.window.scale
+    io = unsafe_load(ig.GetIO())
+    if inside(m.box, io.MousePos.x, io.MousePos.y) && io.MouseWheel != 0
+        m.scroll = clamp(m.scroll - io.MouseWheel * px(s, 100), 0f0, l.scroll_max)
+    end
+    if chosen === nothing
+        k = menu_key(m, l, s)
+        if k != m.key && k != 0
+            m.key = k
+            reveal_row!(m, l, k, s)
+        end
+        enter = ig.IsKeyPressed(lib.ImGuiKey_Enter, false) || ig.IsKeyPressed(lib.ImGuiKey_KeypadEnter, false)
+        enter && m.key > 0 && (chosen = m.items[m.key])
+    end
     if chosen !== nothing
         chosen.stay || close_menu!(app)
         guarded(app, chosen.action)
@@ -330,4 +392,28 @@ function act_on_menu!(app, m::OpenMenu, chosen)
         inside(m.box, mouse.x, mouse.y) || inside(m.anchor, mouse.x, mouse.y) || close_menu!(app)
     end
     return nothing
+end
+
+# The row the arrow, page and Home/End keys move the highlight to, or `m.key`.
+function menu_key(m::OpenMenu, l::MenuLayout, scale::Real)::Int
+    ok(k) = !m.items[k].separator && m.items[k].reason === nothing
+    n = length(m.items)
+    candidates = filter(ok, 1:n)
+    isempty(candidates) && return m.key
+    start = m.key > 0 ? m.key : something(findfirst(it -> it.checked === true, m.items), 0)
+    page = max(1, floor(Int, (height(m.box) - px(scale, 8)) / px(scale, MENU_ROW_H)) - 1)
+    pressed(key) = ig.IsKeyPressed(key, true)
+    step = pressed(lib.ImGuiKey_DownArrow) ? 1 : pressed(lib.ImGuiKey_UpArrow) ? -1 :
+        pressed(lib.ImGuiKey_PageDown) ? page : pressed(lib.ImGuiKey_PageUp) ? -page : 0
+    ig.IsKeyPressed(lib.ImGuiKey_Home, false) && return first(candidates)
+    ig.IsKeyPressed(lib.ImGuiKey_End, false) && return last(candidates)
+    step == 0 && return m.key
+    start == 0 && return step > 0 ? first(candidates) : last(candidates)
+    target = clamp(start + step, 1, n)
+    if step > 0
+        k = findfirst(c -> c >= target, candidates)
+        return k === nothing ? last(candidates) : candidates[k]
+    end
+    k = findlast(c -> c <= target, candidates)
+    return k === nothing ? first(candidates) : candidates[k]
 end

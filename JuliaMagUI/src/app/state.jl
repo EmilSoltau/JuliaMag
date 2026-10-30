@@ -358,6 +358,10 @@ What the UI shows and where, apart from the project data. Changed on the render 
   ribbon.jl), or `nothing`.
 - `jobs_shown`: a job started from a dialog has switched the left pane to Jobs in this
   session (it does that once per session).
+- `dialog_heights`: the height of each dialog in the last frame, by level (to keep a
+  growing dialog on the screen).
+- `opening`: the ids of tools, importers and exporters whose dialog the worker is
+  preparing; a second open of one waits for the first.
 """
 Base.@kwdef mutable struct UiState
     tab::String = "Database"
@@ -394,6 +398,8 @@ Base.@kwdef mutable struct UiState
     menu::Any = nothing
     ribbon_cache::Any = nothing
     jobs_shown::Bool = false
+    dialog_heights::Vector{Float32} = Float32[]
+    opening::Set{String} = Set{String}()
 end
 
 """
@@ -495,5 +501,6 @@ function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     empty!(ui.requests)
     ui.menu = nothing
     ui.jobs_shown = false
+    empty!(ui.opening)
     return nothing
 end

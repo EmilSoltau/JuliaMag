@@ -16,7 +16,10 @@ The dialog of a `Form`. Besides the form it keeps what only the drawing needs:
 - `crs_names`: the name of each coordinate system code looked up (`""`: not known);
   `crs_pending`: codes being looked up; `crs_edited`: when each CRS field last changed.
 - `field_ids`: the ImGui id of each text field; `hint_boxes`: where each hint went;
-  `ok_box`: where the primary button went (tests read them).
+  `ok_box`: where the primary button went; `path_box`: where the import's path line went
+  (tests read them).
+- `confirmed`: the export file the user agreed to replace (the native save dialog asked,
+  or the Replace question), or `""`.
 """
 mutable struct ToolDialog
     form::Form
@@ -32,12 +35,14 @@ mutable struct ToolDialog
     field_ids::Dict{String,UInt32}
     hint_boxes::Dict{String,Union{Nothing,Box}}
     ok_box::Union{Nothing,Box}
+    path_box::Union{Nothing,Box}
+    confirmed::String
 end
 
 ToolDialog(app, f::Form; file_size::Integer = -1) =
     ToolDialog(f, Int(file_size), Dict{String,Vector{UInt8}}(), "", nothing, false, false,
         Dict{String,String}(), Set{String}(), Dict{String,Float64}(), Dict{String,UInt32}(),
-        Dict{String,Union{Nothing,Box}}(), nothing)
+        Dict{String,Union{Nothing,Box}}(), nothing, nothing, "")
 
 "The form's values changed outside its fields (a reset, a new input): fill the fields again."
 function form_changed!(app, f::Form)
@@ -66,13 +71,21 @@ function draw_modal(app, d::ToolDialog)
     title = (f.rerun_of === nothing ? "" : "Run Again: ") * form_title(f)
     b = draw_dialog(app, d; title, icon = owner_icon(o), subtitle = o.id, width = dialog_width(o),
         ok_label = ok_label(o), ok_busy = d.running, on_ok = () -> press_ok!(app, d),
-        on_cancel = () -> filter!(x -> x !== d, app.ui.dialogs),
+        on_cancel = () -> cancel_dialog!(app, d),
         footer_left = () -> draw_tool_footer(app, d)) do
         draw_tool_body(app, d)
     end
     b === nothing || (d.ok_box = b)
     return nothing
 end
+
+"""
+    cancel_dialog!(app, d)
+
+Close the dialog (Cancel, Esc, the close x). A quick tool that runs goes on without it:
+its result comes as a toast (see `finish_ok!`).
+"""
+cancel_dialog!(app, d::ToolDialog) = (filter!(x -> x !== d, app.ui.dialogs); nothing)
 
 # The footer's left side: "Reset to Defaults" and the "Tool Description" link.
 function draw_tool_footer(app, d::ToolDialog)
@@ -211,17 +224,39 @@ function set_advanced!(app, id::AbstractString, open::Bool)
     return nothing
 end
 
-# The file of an import: its path in a read-only mono field, its name and size under it.
+# The file of an import: its path as a line of mono text (it cannot be edited, so it has
+# no field frame), cut at the start when long, with the whole path in a tooltip; its name
+# and size under it, or the reason it cannot be imported in red.
 function import_file_rows!(app, d::ToolDialog, g::FormFlow)
     s = app.window.scale
     f = d.form
     b = next_box!(app, g, :row, fpx(s, FIELD_H))
     row_label!(app, b, "File")
-    field!(app, d, "path", control(g, b), f.path; role = FONT_MONO, size = 12,
-        flags = Int(lib.ImGuiInputTextFlags_ReadOnly))
+    c = control(g, b)
+    d.path_box = c
+    text = elide_start(f.path, width(c))
+    with_font(FONT_MONO, 12) do
+        ig.AddText(ig.GetWindowDrawList(), (round(c.x0), input_text_y(FONT_MONO, 12, centre_y(c))),
+            u32(app.tokens.text), text)
+    end
+    _, hovered, _ = hit("File path", c)
+    hovered && text != f.path && item_tip!(app, "File"; help = f.path)
+    err = get(f.errors, "path", nothing)
     size = d.file_size < 0 ? "" : ", " * file_size_text(d.file_size)
-    hint!(app, d, g, "path", basename(f.path) * size)
+    err === nothing ? hint!(app, d, g, "path", basename(f.path) * size) : hint!(app, d, g, "path", err; error = true)
     return nothing
+end
+
+# `path` in mono 12, or as much of its end as fits in `max_width` after "...".
+function elide_start(path::AbstractString, max_width::Real)::String
+    w(t) = text_width(FONT_MONO, 12, t)
+    w(path) <= max_width && return String(path)
+    chars = collect(path)
+    for n in 2:length(chars)
+        cut = "..." * String(chars[n:end])
+        w(cut) <= max_width && return cut
+    end
+    return ""
 end
 
 # The file of an export: a mono field and "Browse..." (a native save dialog).
@@ -314,34 +349,70 @@ left pane to Jobs.
 """
 function press_ok!(app, d::ToolDialog)
     d.running && return nothing
-    work = copy_form(d.form)
+    f = d.form
+    if f.owner isa Core.ExporterSpec   # a typed path gets the extension too, before it is looked for
+        p = with_extension(f.path, f.owner.extension)
+        p == f.path || (f.path = p; delete!(d.buffers, "path"))
+    end
+    work = copy_form(f)
+    confirmed = d.confirmed
     d.running = true
     session = app.session
     # The action never throws, so the spinner always stops: an error is a failed result.
-    submit!(app, "Check " * form_title(d.form), s -> try
+    submit!(app, "Check " * form_title(f), s -> try
         check!(work, s) || return (work.errors, nothing)
+        work.owner isa Core.ExporterSpec && work.path != confirmed && isfile(work.path) &&
+            return (work.errors, :replace)
         (work.errors, run_form(s, work))
     catch e
         e isa InterruptException && rethrow()
         (Dict{String,String}(), (false, safe_user_message(e, catch_backtrace()), nothing))
-    end; done = (app, r) -> app.session === session && finish_ok!(app, d, r[1], r[2]))
+    end; done = (app, r) -> begin
+        # A project closed or changed meanwhile: the result is dropped quietly.
+        s = app.session
+        (s === session && s !== nothing && isopen(s)) ? finish_ok!(app, d, r[1], r[2]) : (d.running = false)
+        nothing
+    end)
     return nothing
 end
 
+"""
+    finish_ok!(app, d, errors, result)
+
+Act on what the worker did for `press_ok!`: show the `errors`, ask before replacing an
+export file (`result === :replace`), or close the dialog for a run. A quick run that
+failed keeps the dialog and the user's edits, with the error as a toast. A dialog the user
+closed during a quick run is gone: the result comes as a toast, and a report of several
+lines as a toast whose "Show" opens it.
+"""
 function finish_ok!(app, d::ToolDialog, errors::Dict{String,String}, result)
     d.running = false
     f = d.form
+    open = d in app.ui.dialogs
+    title = form_title(f)
     if !isempty(errors)
+        open || (toast!(app, :error, errors[something(first_problem(f, errors))]); return nothing)
         f.errors = errors
         key = first_problem(f, errors)
         st = key === nothing ? nothing : find_setting(f, key)
         st !== nothing && st.advanced && !(f.owner.id in app.config.advanced_open) &&
             set_advanced!(app, f.owner.id, true)
-        key === nothing || (d.focus = key)
+        key === nothing || (d.focus = focus_key(f, key))
+        return nothing
+    end
+    if result === :replace
+        open || return nothing
+        path = f.path
+        name = basename(path)
+        confirm!(app, "Replace $name?", "$name is already in $(dirname(path)). Replacing it cannot be undone.";
+            action = "Replace", danger = true, on_yes = a -> (d.confirmed = path; press_ok!(a, d)))
+        return nothing
+    end
+    if result isa Tuple && length(result) == 3 && !result[1]
+        toast!(app, :error, String(result[2]))   # the dialog stays, with the user's edits
         return nothing
     end
     filter!(x -> x !== d, app.ui.dialogs)
-    title = form_title(f)
     if result isa Core.Job
         toast!(app, :info, "$title started."; sub = "It runs in the background. Progress is in the Jobs pane.",
             ms = 2600)
@@ -350,13 +421,13 @@ function finish_ok!(app, d::ToolDialog, errors::Dict{String,String}, result)
             app.ui.left_tab = :jobs
         end
     elseif result isa Tuple && length(result) == 3
-        ok, message = result[1], String(result[2])
-        if !ok
-            toast!(app, :error, message)
-        elseif occursin('\n', message)
+        message = String(result[2])
+        if !occursin('\n', message)
+            toast!(app, :ok, message)
+        elseif open
             push_dialog!(app, ResultDialog(title, message))
         else
-            toast!(app, :ok, message)
+            toast!(app, :ok, "$title is done."; actions = ["Show" => a -> push_dialog!(a, ResultDialog(title, message))])
         end
     end
     return nothing
@@ -421,7 +492,9 @@ end
     browse_path!(app, d)
 
 "Browse..." of an export: a native save dialog for the exporter's extension, starting at
-the item's name. The path picked (with the extension added when missing) becomes the form's file.
+the item's name. The path picked (with the extension added when missing) becomes the
+form's file. An existing file is replaced without asking again only when the save dialog
+gave exactly that path.
 """
 function browse_path!(app, d::ToolDialog)
     f = d.form
@@ -429,9 +502,12 @@ function browse_path!(app, d::ToolDialog)
     item = get(f.inputs, "item", "")
     folder = isempty(f.path) ? app.config.last_folder : dirname(f.path)
     start = joinpath(folder, export_name(app, e, item))
-    path = ask_file(app; save = true, title = form_title(f), extensions = [e.extension], start)
-    isempty(path) && return nothing
-    lowercase(splitext(path)[2]) == e.extension || (path *= e.extension)
+    picked = ask_file(app; save = true, title = form_title(f), extensions = [e.extension], start)
+    isempty(picked) && return nothing
+    path = with_extension(picked, e.extension)
+    # The save dialog asked before it gave a file that is there; with an added extension
+    # it did not see the file we write, so the Run asks then.
+    d.confirmed = path == picked ? path : ""
     f.path = path
     delete!(f.errors, "path")
     delete!(d.buffers, "path")
@@ -473,6 +549,9 @@ function handle_request!(app, r::OpenImport)
         start = app.config.last_folder)
     isempty(path) && return true
     remember_folder!(app, path)
+    # The dialog's importer is the one that runs; a file of another type is refused.
+    wrong = wrong_file_text(spec, path)
+    wrong === nothing || (toast!(app, :error, wrong); return true)
     open_form(app, spec; path)
     return true
 end

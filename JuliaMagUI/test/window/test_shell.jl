@@ -143,7 +143,10 @@ window_testset("shell") do
     end
 
     @testset "confirm box: Esc closes it, a second Esc does nothing" begin
-        with_project_app(kangaroo()) do ctx, app
+        # The broken dialog below is a draw error on purpose (T13-C6): one log entry.
+        logger = Test.TestLogger(min_level = Base.CoreLogging.Error)
+        Base.CoreLogging.with_logger(logger) do
+        with_project_app(kangaroo(); draw_errors_ok = true) do ctx, app
             yes = Ref(0)
             UI.confirm!(app, "Remove Kangaroo Hills 2024?", "It can be undone.";
                 action = "Remove", danger = true, on_yes = a -> (yes[] += 1))
@@ -203,6 +206,7 @@ window_testset("shell") do
             UI.push_dialog!(app, BrokenDialog())
             ctx.frames(3)
             @test isempty(app.ui.dialogs) && last(app.toasts).text == "The form broke."
+            @test only(app.draw_errors).count == 1
             @test open_popups(ctx) == 0
             ctx.click("JuliaMag/left/Jobs")
             @test app.ui.left_tab == :jobs
@@ -212,6 +216,8 @@ window_testset("shell") do
             UI.set_session!(app, nothing)
             @test isempty(app.ui.dialogs) && open_popups(ctx) == 0
         end
+        end
+        @test count(r -> r.level == Base.CoreLogging.Error, logger.logs) == 1
     end
 
     @testset "toasts: at most three, oldest goes first, they expire and close" begin

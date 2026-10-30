@@ -136,15 +136,20 @@ end
 """
     guarded(app, f)
 
-Call `f(app)`. An error becomes an error toast with `user_message`, so a button whose
-action fails never ends the frame.
+Call `f(app)`. An error never ends the frame: a user error (the core's errors and
+`ArgumentError`) becomes an error toast with its message; any other error is a bug, so it
+is noted as a draw error (`note_draw_error!`: logged, toasted, and failed by the tests).
 """
 function guarded(app, f)
     try
         f(app)
     catch e
         e isa InterruptException && rethrow()
-        toast!(app, :error, safe_user_message(e, catch_backtrace()))
+        if e isa USER_ERRORS
+            toast!(app, :error, plain_message(e))
+        else
+            note_draw_error!(app, e, catch_backtrace())
+        end
     end
     return nothing
 end

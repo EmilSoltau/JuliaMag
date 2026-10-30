@@ -340,9 +340,9 @@ function button(app, id::AbstractString, label::AbstractString, x::Real, y::Real
     b = Box(round(Float32(x)), round(Float32(y)), round(Float32(x)) + round(bw),
         round(Float32(y)) + px(s, small ? 22 : 26))
     clicked, hovered, held = hit(id, b)
+    a = Float32(alpha) * (primary && !enabled ? 0.5f0 : 1f0)   # busy keeps the full colour
     enabled &= !busy
     on = enabled && hovered
-    a = Float32(alpha) * (primary && !enabled ? 0.5f0 : 1f0)
     radius = px(s, small ? 5 : 6)
     if primary
         fill = on ? brighter(t.accent, 1.08f0) : t.accent

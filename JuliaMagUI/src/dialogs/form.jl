@@ -144,6 +144,33 @@ function read_numbers!(f::Form, st::Union{Core.ExtentSetting,Core.PointSetting},
     return nothing
 end
 
+"""
+    set_part_text!(form, st, k, text)
+
+The user typed `text` in field `k` of extent or point `st`. When every field holds a
+number (or every field is blank) the value follows at once, so the Tool Description
+stays current; otherwise it keeps its last value until `check!` reports the field.
+"""
+function set_part_text!(f::Form, st::Union{Core.ExtentSetting,Core.PointSetting}, k::Integer,
+        text::AbstractString)
+    f.texts["$(st.key)/$k"] = String(text)
+    delete!(f.errors, st.key)
+    texts = [strip(get(f.texts, key, "")) for key in number_keys(st)]
+    if all(isempty, texts)
+        f.values[st.key] = nothing
+    else
+        xs = parse_number.(texts)
+        any(isnothing, xs) || (f.values[st.key] = Float64[x for x in xs])
+    end
+    return nothing
+end
+
+"The key of the text field that takes the focus for a problem with setting `key`."
+function focus_key(f::Form, key::AbstractString)::String
+    st = find_setting(f, key)
+    return st isa Union{Core.ExtentSetting,Core.PointSetting} ? "$(key)_1" : String(key)
+end
+
 # --- Checking ---
 
 const NO_CHANNELS = "none"   # the text of a channel checklist set to None
@@ -173,6 +200,11 @@ function check!(f::Form, session)::Bool
     if f.owner isa Core.ExporterSpec && isempty(strip(f.path))
         errors["path"] = "Choose a file."
     end
+    o = f.owner
+    if o isa Core.ImporterSpec
+        text = wrong_file_text(o, f.path)
+        text === nothing || (errors["path"] = text)
+    end
     f.errors = errors
     return isempty(errors)
 end
@@ -185,6 +217,32 @@ function core_problems(f::Form, session)
         pushfirst!(problems, "item" => "Choose a $(lowercase(string(KIND_WORDS[o.kind])))." )
     end
     return problems
+end
+
+"""
+    wrong_file_text(importer, path) -> Union{Nothing,String}
+
+Why `path` cannot be imported with `importer`: its extension belongs to no importer or to
+another one, such as "small.csv is not a Geosoft XYZ file. Pick a .xyz file.". `nothing`
+when it fits. The dialog's importer is the one that runs, so a mismatch is refused.
+"""
+function wrong_file_text(spec::Core.ImporterSpec, path::AbstractString)::Union{Nothing,String}
+    found = Core.importer_for(path)
+    found !== nothing && found.id == spec.id && return nothing
+    exts = spec.extensions
+    list = length(exts) == 1 ? only(exts) : join(exts[1:end-1], ", ") * " or " * last(exts)
+    return "$(basename(path)) is not a $(spec.name) file. Pick a $list file."
+end
+
+"""
+    with_extension(path, extension) -> String
+
+`path` ending in `extension` (case is ignored); blank stays blank.
+"""
+function with_extension(path::AbstractString, ext::AbstractString)::String
+    p = String(strip(path))
+    (isempty(p) || lowercase(splitext(p)[2]) == lowercase(ext)) && return p
+    return p * ext
 end
 
 const KIND_WORDS = Dict(Core.ITEM_DATABASE => "Database", Core.ITEM_GRID => "Grid", Core.ITEM_MAP => "Map")
@@ -203,6 +261,8 @@ Open the dialog of `owner` (a tool, importer or exporter). The worker reads the 
 first: a tool's `last_settings` in this project, or the defaults; then the dialog opens.
 `args` (the args of a job, for Run Again) give the values instead; `rerun_of` is that job.
 `values` go over them (such as the channel a menu was opened on).
+While the worker prepares a dialog, another open of the same owner does nothing, so a
+double click opens one dialog.
 Inputs default to `item` when it is of their kind, else to the current database or the
 selected grid. `path` is the file to import.
 """
@@ -219,13 +279,20 @@ function open_form(app, owner::FormOwner; item::Union{Nothing,AbstractString} = 
     remembered = owner isa Core.ToolSpec && args === nothing
     preset = Dict{String,Any}(String(k) => v for (k, v) in values)
     session = app.session
-    submit!(app, "Open " * owner_title(owner), s -> begin
+    owner.id in app.ui.opening && return nothing   # its dialog is on the way
+    push!(app.ui.opening, owner.id)
+    submit!(app, "Open " * owner_title(owner), s -> try
         defaults = Core.default_settings(owner)
         last = remembered ? Core.last_settings(s, owner.id) : nothing
         size = !isempty(file) && isfile(file) ? Int(filesize(file)) : -1
         (defaults, last, size)
+    catch e
+        e isa InterruptException && rethrow()
+        safe_user_message(e, catch_backtrace())
     end; done = (app, r) -> begin
         app.session === session || return nothing   # the project changed meanwhile
+        delete!(app.ui.opening, owner.id)
+        r isa String && (toast!(app, :error, r); return nothing)
         defaults, last, size = r
         f = build_form(app, owner, defaults, last; item, args, path = file, values = preset, rerun_of)
         push_dialog!(app, ToolDialog(app, f; file_size = size))
@@ -277,7 +344,7 @@ function build_form(app, owner::FormOwner, defaults::Dict{String,Any}, remembere
     end
     f = Form(owner, inputs, vals, Dict{String,String}(), Dict{String,String}(), source, file,
         false, rerun_of)
-    fix_channels!(f, app.snap)
+    fix_channels!(f, app.snap; selected = app.ui.selected)
     return set_texts!(f)
 end
 
@@ -336,19 +403,23 @@ function input_view(f::Form, snap, input::AbstractString)
 end
 
 """
-    fix_channels!(form, snap)
+    fix_channels!(form, snap; selected = nothing)
 
 Give each channel setting that needs an existing channel one of the input database: keep
-its channel when the database has it, else take the first one (a role match first).
+its channel when the database has it, else take the channel `selected` in the Data tree
+(`(:channel, database, name)`) when it is in that database, else the first one (a role
+match first).
 """
-function fix_channels!(f::Form, snap)
+function fix_channels!(f::Form, snap; selected = nothing)
     for st in form_settings(f)
         st isa Core.ChannelSetting && !st.allow_new || continue
         view = input_view(f, snap, st.input)
         view === nothing && continue
         names = first.(channel_options(st, view))
         get(f.values, st.key, "") in names && continue
-        f.values[st.key] = isempty(names) ? "" : first(names)
+        picked = selected isa Tuple && selected[1] === :channel && selected[2] == view.id &&
+            selected[3] in names ? selected[3] : nothing
+        f.values[st.key] = picked !== nothing ? picked : isempty(names) ? "" : first(names)
     end
     return f
 end
@@ -405,10 +476,11 @@ choice_style(st::Core.ChoiceSetting)::Symbol =
 
 The args of the run the form makes, as the history and jobs keep them: the settings, with
 the tool's inputs under `"inputs"`, the import file as `"path"`, or the export's `"item"`
-and `"path"`.
+and `"path"`. A setting hidden by its `when` has its default, as the core records it
+(`Core.deactivate_settings`).
 """
 function job_args(f::Form)::Dict{String,Any}
-    a = Dict{String,Any}(k => v for (k, v) in f.values)
+    a = Core.deactivate_settings(form_settings(f), f.values)
     o = f.owner
     if o isa Core.ToolSpec
         isempty(f.inputs) || (a["inputs"] = Dict{String,Any}(k => v for (k, v) in f.inputs))
@@ -457,7 +529,7 @@ function reset!(app, f::Form)
         f.values = Dict{String,Any}(st.key => get(defaults, st.key, nothing) for st in o.settings)
         empty!(f.errors)
         f.source = :defaults
-        fix_channels!(f, app.snap)
+        fix_channels!(f, app.snap; selected = app.ui.selected)
         set_texts!(f)
         form_changed!(app, f)
         toast!(app, :info, "Settings reset to their defaults."; ms = 1800)

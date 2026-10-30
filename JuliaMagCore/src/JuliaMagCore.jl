@@ -85,7 +85,7 @@ export SettingSpec, NumberSetting, TextSetting, ExprSetting, ChoiceSetting, Bool
 export Place, ToolSpec, ToolError, register_tool!, unregister_tool!, tools, tool, tabs
 export default_settings, validate, setting_problems, is_active, last_settings, reset_settings!, run_tool
 export valid_crs, crs_name, crs_from_wkt, crs_from_name, crs_wkt, guess_utm, reproject_xy
-public crs_axis_unit
+public crs_axis_unit, deactivate_settings
 export parse_channel_expr, ChannelStats, channel_stats, grid_stats
 export set_grid_crs!, set_grid_georef!, set_grid_style!
 

@@ -301,3 +301,14 @@ A quick test tool that sleeps `seconds` and then says so.
 sleep_tool(seconds::Real; id::AbstractString = "test.sleep") =
     Core.ToolSpec(id, "Sleep", "Sleeps.", "clock", Core.Place[], ["database" => Core.ITEM_DATABASE],
         Core.SettingSpec[], :quick, (s, ins, st, progress, report) -> (sleep(seconds); println(report, "Slept."); nothing))
+
+"""
+    small_xyz(name = "small.xyz") -> String
+
+A small Geosoft XYZ file in a new temp folder: 2 lines of 20 rows (T13-C1).
+"""
+function small_xyz(name::AbstractString = "small.xyz")
+    path = joinpath(mktempdir(), name)
+    write_synthetic_xyz(path; lines = 2, ties = 0, rows_per_line = 20)
+    return path
+end

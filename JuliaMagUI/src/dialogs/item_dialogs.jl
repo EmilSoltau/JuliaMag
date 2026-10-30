@@ -9,18 +9,20 @@ const FIELD_H = 24
 
 """
     text_field!(app, id, buffer, b; focus = false, flags = 0, role = FONT_REGULAR, size = 12.5,
-                placeholder = "", right = false, error = false) -> Bool
+                placeholder = "", prefix = "", right = false, error = false) -> Bool
 
 A prototype `.inp` in box `b`: 24 high, `input` fill, 1 px `input_border`, radius 5, text
 7 px in; an `accent` ring while it has the focus. `role` and `size` set the font (`.inp.mono`
 is `FONT_MONO` at 12). `placeholder` shows in `text_disabled` while the field is empty.
 `right` puts the text at the right end (a number field); a click anywhere in the field
-still edits it. With `error` the frame and ring are `red` (`.inp.err`).
+still edits it. `prefix` is a short dim label at the left that stays when the field is
+filled (the W, S, E, N of an area). With `error` the frame and ring are `red` (`.inp.err`).
 Returns true when the text changed.
 """
 function text_field!(app, id::AbstractString, buf::Vector{UInt8}, b::Box; focus::Bool = false,
         flags::Integer = 0, role::FontRole = FONT_REGULAR, size::Real = BODY_FONT_SIZE,
-        placeholder::AbstractString = "", right::Bool = false, error::Bool = false)
+        placeholder::AbstractString = "", prefix::AbstractString = "", right::Bool = false,
+        error::Bool = false)
     s = app.window.scale
     t = app.tokens
     hl = hairline(s)
@@ -28,6 +30,13 @@ function text_field!(app, id::AbstractString, buf::Vector{UInt8}, b::Box; focus:
     r = fpx(s, 5)
     ig.AddRectFilled(dl, (b.x0, b.y0), (b.x1, b.y1), u32(t.input), r)
     inner = Box(b.x0 + hl + fpx(s, 7), b.y0 + hl, b.x1 - hl - fpx(s, 7), b.y1 - hl)
+    if !isempty(prefix)
+        with_font(FONT_REGULAR, 11.5) do
+            ig.AddText(dl, (round(inner.x0), input_text_y(FONT_REGULAR, 11.5, centre_y(inner))),
+                u32(t.text_dim), String(prefix))
+        end
+        inner = Box(inner.x0 + text_width(FONT_REGULAR, 11.5, prefix) + fpx(s, 6), inner.y0, inner.x1, inner.y1)
+    end
     field = inner
     if right
         # ImGui has no right-aligned field: the field starts where the text starts, and a
