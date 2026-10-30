@@ -248,3 +248,48 @@ julia bench/ui_startup.jl
 
 - The optional argument is the number of runs (default 3).
 
+### After the icon atlas (Task 6)
+
+Run of 2026-10-30, same machine, median of five runs.
+
+| Step | Time |
+|---|---|
+| `using JuliaMagUI` | 1.87 s |
+| `main()` until its first frame is shown | 0.42 s |
+| Process start until the first frame | 2.43 s |
+
+The first frame now builds the icon atlas, which adds about 0.15 s.
+The total stays under the 4 s target.
+
+## Icon atlas
+
+`bench/ui_icons.jl` times how long the icon atlas takes to build.
+The atlas holds 119 icons in 4 styles at 8 sizes, drawn with Rsvg and Cairo.
+The window builds it at the start and again when the theme or the scale changes.
+The target is under 300 ms at scale 2.
+
+### Results
+
+Run of 2026-10-30 on the machine above, on WSLg (`DISPLAY=:0`), five runs after a warm-up.
+
+| Case | Best | Median | Atlas size |
+|---|---|---|---|
+| Build, scale 1 | 111 ms | 132 ms | 4096 x 621 |
+| Build, scale 1.5 | 152 ms | 168 ms | 4096 x 1379 |
+| Build, scale 2 | 190 ms | 198 ms | 4096 x 2394 |
+| Build and upload in a window, scale 2 | 198 ms | 231 ms | 4096 x 2394 |
+
+The rebuild at scale 2 takes 231 ms, under the 300 ms target.
+The window does not draw while the atlas builds, so a theme or scale change shows one slow frame.
+Almost all of the time is Rsvg drawing 3,808 small images.
+
+### How to re-run
+
+From the repo root:
+
+```
+julia -t auto,1 --project=JuliaMagUI bench/ui_icons.jl
+```
+
+- The optional argument is the number of runs (default 5).
+- The window part needs a display; without one, only the build is timed.

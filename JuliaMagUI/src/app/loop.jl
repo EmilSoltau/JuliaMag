@@ -70,6 +70,29 @@ function wake!(w::Window)
 end
 
 """
+    set_theme!(w, tokens)
+
+Draw with `tokens` from now on. The icons follow on the next frame.
+"""
+function set_theme!(w::Window, tokens::Tokens)
+    w.tokens = tokens
+    apply_style!(tokens, w.scale)
+    return nothing
+end
+
+"""
+    set_scale!(w, scale)
+
+Draw at content `scale` from now on, whatever the monitor's scale is.
+"""
+function set_scale!(w::Window, scale::Real)
+    w.scale = Float32(scale)
+    w.fixed_scale = true
+    apply_style!(w.tokens, w.scale)
+    return nothing
+end
+
+"""
     quit!(w)
 
 End the loop after this frame. It does not ask `on_close`.
@@ -177,6 +200,14 @@ end
 # so the call is made at run time.
 engine_call(f, args...) = Base.invokelatest(f, args...)
 
+"""
+    stop_test_engine(engine)
+
+Stop a test engine before its ImGui context is destroyed.
+CImGui has no hook for this, so the test harness (test/support/app.jl) adds the method.
+"""
+function stop_test_engine end
+
 # One frame. Returns false when the loop should end.
 function draw_frame!(w::Window, @nospecialize(ui), @nospecialize(on_close),
         @nospecialize(engine))::Bool
@@ -185,6 +216,7 @@ function draw_frame!(w::Window, @nospecialize(ui), @nospecialize(on_close),
         GLFW.SetWindowShouldClose(w.handle, false)
     end
     update_scale!(w)
+    update_icons!(w)
 
     lib.ImGui_ImplOpenGL3_NewFrame()
     lib.ImGui_ImplGlfw_NewFrame()
@@ -273,14 +305,17 @@ function open_and_run(@nospecialize(ui), title::String, size::NTuple{2,Int},
     ig.set_backend(:GlfwOpenGL3)
     handle = create_glfw_window(title, size, passive)
     ctx = Ptr{ig.lib.ImGuiContext}(C_NULL)
-    glfw_ready = gl_ready = false
+    glfw_ready = gl_ready = engine_started = false
     try
         GLFW.MakeContextCurrent(handle)
         GLFW.SwapInterval(1)
         ctx = ig.CreateContext()
         io = ig.GetIO()
         io.IniFilename = C_NULL   # the app keeps its own settings
-        engine !== nothing && engine_call(ig._start_test_engine, engine, ctx)
+        if engine !== nothing
+            engine_call(ig._start_test_engine, engine, ctx)
+            engine_started = true
+        end
         glfw_ready = lib.ImGui_ImplGlfw_InitForOpenGL(Ptr{lib.GLFWwindow}(handle.handle), true)
         gl_ready = lib.ImGui_ImplOpenGL3_Init("#version 330")
         (glfw_ready && gl_ready) || error("could not start the ImGui GLFW and OpenGL 3 backends")
@@ -302,6 +337,14 @@ function open_and_run(@nospecialize(ui), title::String, size::NTuple{2,Int},
                 @error "Error in a CImGui exit handler" exception = (e, catch_backtrace())
             end
         end
+        if engine_started
+            try
+                engine_call(stop_test_engine, engine)
+            catch e
+                @error "Could not stop the test engine" exception = (e, catch_backtrace())
+            end
+        end
+        ctx != C_NULL && forget_icons!(ctx)   # while the OpenGL context is still current
         gl_ready && lib.ImGui_ImplOpenGL3_Shutdown()
         glfw_ready && lib.ImGui_ImplGlfw_Shutdown()
         if ctx != C_NULL
@@ -317,7 +360,9 @@ function run_loop!(w::Window, @nospecialize(ui), @nospecialize(on_close),
         @nospecialize(engine))
     while true
         frame_start = time()
-        idle = !w.wake[] && frame_start >= w.animating_until && w.input_frames == 0
+        # A test engine drives the app frame by frame, so the loop never waits for it.
+        idle = !w.wake[] && frame_start >= w.animating_until && w.input_frames == 0 &&
+               engine === nothing
         wait_or_poll(w.handle, idle)
         w.wake[] = false
         w.input_frames = input_queued(w.ctx) ? INPUT_FRAMES : max(w.input_frames - 1, 0)
@@ -347,17 +392,26 @@ function draw_empty(w::Window)
 end
 
 """
-    main(; project = nothing, extra_ui = nothing)
+    main(; project = nothing, config_dir = config_dir(), extra_ui = nothing,
+         size = (1480, 920), scale = nothing, fonts = :system, engine = nothing,
+         passive = false)
 
 Start the app. Today it opens the empty window; later tasks fill it and open `project`.
-`extra_ui(w)` is drawn after the app in every frame; tests and the startup bench use it.
+The theme comes from the settings in `config_dir`.
+
+The other keywords are for tests, screenshots and benchmarks:
+`extra_ui(w)` is drawn after the app in every frame, and `size`, `scale`, `fonts`,
+`engine` and `passive` go to `run_window`.
 """
-function main(; project::Union{Nothing,AbstractString} = nothing, extra_ui = nothing)
+function main(; project::Union{Nothing,AbstractString} = nothing,
+        config_dir::AbstractString = JuliaMagUI.config_dir(), extra_ui = nothing,
+        size::Tuple{Integer,Integer} = (1480, 920), scale::Union{Nothing,Real} = nothing,
+        fonts::Symbol = :system, engine = nothing, passive::Bool = false)
     project === nothing || @debug "Opening a project is not built yet" project
-    config, _ = load_config()   # a broken settings file gives the defaults
+    config, _ = load_config(config_dir)   # a broken settings file gives the defaults
     dark = config.theme == THEME_SYSTEM ? system_dark() : false
     tokens = tokens_for(config.theme, dark)
-    run_window(AppFrame(extra_ui); tokens)
+    run_window(AppFrame(extra_ui); tokens, size, scale, fonts, engine, passive)
     return nothing
 end
 

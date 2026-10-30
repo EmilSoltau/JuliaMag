@@ -28,9 +28,12 @@
             load_config(dir)
         end
         find_system_fonts(String[])
+        build_icon_atlas(LIGHT, 1f0)   # Rsvg and Cairo; the upload needs a window
         # The window code itself needs a display to run, so it is only compiled.
         precompile(open_and_run, (Any, String, NTuple{2,Int}, NTuple{2,Int}, Float32, Symbol,
             Any, Any, Tokens, Bool))
         precompile(main, ())
+        precompile(update_icons!, (Window,))
+        precompile(draw_icon, (Ptr{lib.ImDrawList}, String, NTuple{2,Float32}, Int))
     end
 end

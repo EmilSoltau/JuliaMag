@@ -6,8 +6,7 @@ using JuliaMagUI: Window, run_window, quit!, px, apply_style!, LIGHT, DARK, capt
     wake!, request_frames!, with_font, FONT_REGULAR, FONT_SEMIBOLD, FONT_MONO,
     find_system_fonts, font_paths, BUNDLED_FONTS, min_size_limit, content_scale
 
-# Window tests need a display. Task 6 turns this into test/support/app.jl.
-const HAS_DISPLAY = Sys.iswindows() || haskey(ENV, "DISPLAY") || haskey(ENV, "WAYLAND_DISPLAY")
+# Window tests need a display; `window_testset` (test/support/app.jl) skips them without one.
 const SHOTS = joinpath(@__DIR__, "shots")
 
 style_ptr() = Ptr{ig.lib.ImGuiStyle}(ig.GetStyle())
@@ -91,12 +90,7 @@ rgb(p) = (Float32(p.r), Float32(p.g), Float32(p.b))
         end
     end
 
-    if !HAS_DISPLAY
-        @info "Window tests skipped: no display (DISPLAY and WAYLAND_DISPLAY are not set)."
-        @testset "window" begin
-            @test_skip "needs a display"
-        end
-    else
+    window_testset("window") do
         mkpath(SHOTS)
 
         # Draw a few widgets, keep the loop busy, capture at frame 30 and quit.
