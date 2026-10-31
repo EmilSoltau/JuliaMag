@@ -20,7 +20,7 @@ The app window.
 - `frame`: the number of frames drawn so far.
 - `wake`: set by `wake!` from any thread; the loop then draws a frame at once.
 - `animating_until`: the loop polls instead of waiting until this `time()`.
-- `input_frames`: frames still to draw without waiting, after input.
+- `input_frames`: frames still to draw without waiting, after input or `draw_frames!`.
 - `renderer`: the OpenGL `GL_RENDERER` text, such as `"llvmpipe (LLVM 17.0.6, 256 bits)"`.
 
 The other fields are for the loop itself.
@@ -58,6 +58,17 @@ Keep drawing for `seconds` more. Hover effects, tooltips, toasts and progress ba
 """
 function request_frames!(w::Window, seconds::Real = 0.25)
     w.animating_until = max(w.animating_until, time() + seconds)
+    return nothing
+end
+
+"""
+    draw_frames!(w, n)
+
+Draw at least `n` more frames without waiting for input. For drawing that settles over a
+known number of frames, such as a dialog that sizes itself.
+"""
+function draw_frames!(w::Window, n::Integer)
+    w.input_frames = max(w.input_frames, Int(n))
     return nothing
 end
 
@@ -404,7 +415,8 @@ function run_loop!(w::Window, @nospecialize(ui), @nospecialize(on_close),
                engine === nothing
         wait_or_poll(w.handle, idle)
         w.wake[] = false
-        w.input_frames = input_queued(w.ctx) ? INPUT_FRAMES : max(w.input_frames - 1, 0)
+        w.input_frames = input_queued(w.ctx) ? max(INPUT_FRAMES, w.input_frames - 1) :
+            max(w.input_frames - 1, 0)
         draw_frame!(w, ui, on_close, engine) || break
         # Without vsync a busy loop would spin; keep at most 120 frames per second.
         rest = BUSY_FRAME_TIME - (time() - frame_start)

@@ -729,20 +729,52 @@ toast_texts(app) = [t.text for t in app.toasts]
 end
 
 @testset "the command line: a project folder argument" begin
-    @test UI.project_argument(String[]) === nothing
-    @test UI.project_argument([""]) === nothing
-    @test UI.project_argument(["/data/Survey 2024"]) == abspath("/data/Survey 2024")
-    @test UI.project_argument(["Survey"]) == joinpath(pwd(), "Survey")
-    @test_throws "takes one argument" UI.project_argument(["a", "b"])
+    @test UI.command_line(String[]) == (nothing, nothing)
+    @test UI.command_line([""]) == (nothing, nothing)
+    @test UI.command_line(["/data/Survey 2024"]) == (abspath("/data/Survey 2024"), nothing)
+    @test UI.command_line(["Survey"]) == (joinpath(pwd(), "Survey"), nothing)
+    # An unquoted folder name with a space: no project, and a plain sentence.
+    project, problem = UI.command_line(["my", "project"])
+    @test project === nothing
+    @test problem == "JuliaMag takes one project folder, but it got 2 arguments. " *
+                     "Put quotes around a folder name with spaces."
 end
 
-@testset "one worker thread: a warning toast" begin
+@testset "opening a file instead of a folder says so" begin
+    file = joinpath(mktempdir(), "survey.xyz")
+    write(file, "/ X Y\n")
+    r = UI.open_on_worker(file, false, nothing)
+    @test r isa UI.OpenFailure && r.text == "$file is a file, not a project folder." && !r.missing
+end
+
+@testset "one worker thread: a warning toast and a log line" begin
     with_app(empty_app()) do app
         UI.warn_threads!(app, 2)
         @test isempty(app.toasts)
-        UI.warn_threads!(app, 1)
+        @test_logs (:warn, UI.ONE_THREAD_TEXT) UI.warn_threads!(app, 1)
         t = only(app.toasts)
         @test t.kind == :warn
         @test t.text == "JuliaMag runs with one worker thread. Start it with -t auto for faster jobs."
+    end
+end
+
+@testset "toasts made before the first frame start their time then" begin
+    t = UI.Toast(:warn, "early"; born = 100.0)
+    UI.restart_toast_clocks!([t], 103.5)
+    @test t.born == 103.5 && t.shown == 103.5
+    @test !UI.toast_expired(t, 103.5 + 4.1) && UI.toast_expired(t, 103.5 + 4.2)
+end
+
+@testset "Close on the backstage nav says why it cannot be used" begin
+    with_app(empty_app()) do app
+        @test UI.close_nav_reason(app) == "Open a project first."
+        app.switching = "Opening Survey..."
+        @test UI.close_nav_reason(app) == "Wait until the project has opened or closed."
+    end
+    with_app(test_app_state(session_with())) do app
+        @test UI.close_nav_reason(app) === nothing
+        app.switching = "Closing..."
+        @test UI.close_nav_reason(app) == "Wait until the project has opened or closed."
+        app.switching = nothing
     end
 end

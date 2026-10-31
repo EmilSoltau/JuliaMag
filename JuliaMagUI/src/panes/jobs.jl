@@ -402,20 +402,21 @@ function watch_jobs!(app)
     return nothing
 end
 
-# The toast of a job that left running.
+# The toast of a job that left running. It replaces the job's "started" toast.
 function job_ended_toast!(app, r::JobRow)
     title = job_title(r)
     session = app.session
     # An action from a toast of an old project does nothing.
     same(f) = a -> (a.session === session ? f(a) : nothing)
     if r.status == Core.JOB_DONE
-        toast!(app, :ok, "$title done."; sub = made_text(r))
+        toast!(app, :ok, "$title done."; sub = made_text(r), job = r.id)
     elseif r.status == Core.JOB_FAILED
         actions = Pair{String,Function}["Report" => same(a -> show_report!(a, r))]
         job_owner(r.command) === nothing || push!(actions, "Run Again..." => same(a -> run_again!(a, r)))
-        toast!(app, :error, "$title failed."; sub = first(r.error, 300), actions, ms = TOAST_JOB_FAILED_MS)
+        toast!(app, :error, "$title failed."; sub = first(r.error, 300), actions, ms = TOAST_JOB_FAILED_MS,
+            job = r.id)
     elseif r.status == Core.JOB_CANCELLED
-        toast!(app, :info, "$title cancelled."; sub = "Nothing was written.")
+        toast!(app, :info, "$title cancelled."; sub = "Nothing was written.", job = r.id)
     end
     return nothing
 end

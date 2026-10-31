@@ -145,7 +145,7 @@ window_testset("ribbon") do
             ctx.frames(1)
             m = app.ui.menu
             @test m isa UI.OpenMenu && [it.checked for it in m.items] == [true, false]
-            ctx.click("//###menu/$second")
+            ctx.click("//###menu/" * ref_part(second))
             ctx.frames(1)
             @test app.ui.current_db == second && app.ui.menu === nothing
             @test UI.chooser_note(app) == "1 line, 1 channel"

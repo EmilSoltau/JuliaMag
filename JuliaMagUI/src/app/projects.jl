@@ -65,6 +65,7 @@ function open_on_worker(folder::String, force::Bool, name::Union{Nothing,String}
     try
         project_file = joinpath(folder, Core.PROJECT_FILE)
         if name === nothing
+            isfile(folder) && return OpenFailure("$folder is a file, not a project folder.", false)
             isdir(folder) || return OpenFailure("The folder $folder was not found.", true)
             isfile(project_file) || return OpenFailure(NO_PROJECT_HERE, false)
             s = Core.open_session(folder; force)

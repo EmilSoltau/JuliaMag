@@ -89,8 +89,14 @@ end
 
 handle_request!(app, r::OpenBackstage) = (open_backstage!(app, r.page); true)
 
-# Close on the nav works while a project is open and no other open or close runs.
-can_close_from_nav(app)::Bool = app.session !== nothing && app.switching === nothing
+const WAIT_SWITCH = "Wait until the project has opened or closed."
+
+# Why Close on the nav cannot be used now, or `nothing`: it needs an open project, and no
+# other open or close may run.
+close_nav_reason(app)::Union{Nothing,String} =
+    app.switching !== nothing ? WAIT_SWITCH : app.session === nothing ? NEED_PROJECT : nothing
+
+can_close_from_nav(app)::Bool = close_nav_reason(app) === nothing
 
 """
     close_from_backstage!(app)
@@ -204,7 +210,7 @@ function draw_nav(app, dl, nav::Box)
             y + f(NAV_ROW_H) / 2, u32(white, alpha), label)
         if page === :close
             hovered && item_tip!(app, "Close Project"; help = "Close the project.",
-                reason = app.session === nothing ? NEED_PROJECT : nothing)
+                reason = close_nav_reason(app))
             clicked && usable && close_from_backstage!(app)
         else
             clicked && set_page!(app, page)

@@ -278,15 +278,15 @@ The total stays under the 4 s target.
 
 ## UI frame time with a big database
 
-This measures how long a frame takes with a database of 5,000 lines and 300 channels, with its Lines and Channels folders open in the Data tree.
-It runs the app in a window test (`with_project_app`), on WSLg, with the bundled fonts.
+`bench/ui_frame.jl` measures how long a frame takes with a database of 5,000 lines and 300 channels, with its Lines and Channels folders open in the Data tree.
+It runs the app with the window test harness (`with_project_app`), with the bundled fonts.
 Each case draws 200 frames, first with the tree still, then scrolled to a new place in every frame.
 "Draw" is `draw_app` alone, on the CPU.
 "Wall" is the time from frame to frame, with the test engine, the GPU and the buffer swap.
 
 ### Results
 
-Run of 2026-10-31 on the machine above.
+Run of 2026-10-31 on the machine above, on WSLg.
 
 | Case | Draw, median | Draw, 95th percentile | Wall per frame | Tree rows drawn |
 |---|---|---|---|---|
@@ -297,7 +297,19 @@ Run of 2026-10-31 on the machine above.
 
 The tree draws only the rows in view, so the draw time does not depend on the number of lines.
 The window test `5,000 lines: only the rows in view are drawn` in `JuliaMagUI/test/window/test_data.jl` checks that the median draw stays under 16 ms.
-The numbers above came from a one-off script on top of that test; that test is the lasting guard.
+A second run with `bench/ui_frame.jl` gave the same numbers within 0.1 ms of draw time.
+
+### How to re-run
+
+From the repo root, on a machine with a display:
+
+```
+julia --project=JuliaMagUI/tools -e 'using Pkg; Pkg.instantiate()'
+julia -t auto,1 --project=JuliaMagUI bench/ui_frame.jl
+```
+
+- The first command is needed once: the script uses the window test harness, which needs ImGuiTestEngine.
+- The optional argument is the number of frames per case (default 200).
 
 ## Icon atlas
 

@@ -440,7 +440,7 @@ function finish_ok!(app, d::ToolDialog, errors::Dict{String,String}, result)
     filter!(x -> x !== d, app.ui.dialogs)
     if result isa Core.Job
         toast!(app, :info, "$title started."; sub = "It runs in the background. Progress is in the Jobs pane.",
-            ms = 2600)
+            ms = 2600, job = result.id)
         if !app.ui.jobs_shown
             app.ui.jobs_shown = true
             app.ui.left_tab = :jobs

@@ -15,7 +15,7 @@ const D1 = "//###dialog1/"
 fill_text(ref, text) = (te.ItemClick(ref); te.KeyCharsReplace(text); nothing)
 
 # The test engine reference of a row of the open menu.
-menu_row(app, label) = "//" * app.ui.menu.ref * "/" * label
+menu_row(app, label) = "//" * app.ui.menu.ref * "/" * ref_part(label)
 
 # The pixel at device point (x, y) of a PNG, as 0-255 RGB.
 pixel(img, x, y) = rgb255(img[round(Int, y)+1, round(Int, x)+1])

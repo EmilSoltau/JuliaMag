@@ -50,8 +50,9 @@ The shell is the frame the tools live in.
 - Toasts tell what happened; a failed job keeps its toast longer.
 
 Every change goes through an undoable core call, so Ctrl+Z and Ctrl+Y work for all of them.
-The render loop never calls into the core directly.
-It draws from a snapshot of the project, and every core call runs on one worker queue.
+The render loop draws from a snapshot of the project.
+On the render thread, the app calls only core functions that are pure or read the global registries (tool, importer and exporter lookups), and reads a job's status and progress.
+Every core call that touches a session, a file or a database runs on one worker queue.
 So a slow tool, an undo of a big channel or a close that waits for jobs never freezes the window.
 Views and maps come in plan 4.
 

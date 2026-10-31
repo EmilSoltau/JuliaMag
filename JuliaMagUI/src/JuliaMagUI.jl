@@ -89,32 +89,50 @@ end
 
 Start the app from the command line, as `bin/juliamag.sh` and `bin/juliamag.cmd` do with
 `JuliaMagUI.main(ARGS)`. The one optional argument is a project folder to open.
+A command line the app cannot use (`command_line`) never stops it: the app starts with no
+project, and an error toast and the log say what was wrong.
 """
-function main(args::AbstractVector{<:AbstractString}; kwargs...)
-    return main(; project = project_argument(args), kwargs...)
+function main(args::AbstractVector{<:AbstractString}; on_app = nothing, kwargs...)
+    project, problem = command_line(args)
+    note = app -> begin
+        if problem !== nothing
+            @warn problem
+            toast!(app, :error, problem)
+        end
+        on_app === nothing || on_app(app)
+        return nothing
+    end
+    return main(; project, on_app = note, kwargs...)
 end
 
 """
-    project_argument(args) -> Union{Nothing,String}
+    command_line(args) -> (project, problem)
 
 The project folder of the command line `args` as a full path, or `nothing` when there is
-none. Throws an `ArgumentError` when there is more than one argument.
+none, and what is wrong with `args` as a plain sentence, or `nothing`. Only one argument
+is used: with more, there is no project and the problem says so (a folder name with
+spaces that was not quoted is the usual cause).
 """
-function project_argument(args::AbstractVector{<:AbstractString})::Union{Nothing,String}
-    length(args) > 1 && throw(ArgumentError(
-        "JuliaMag takes one argument, a project folder; it got $(length(args))."))
-    (isempty(args) || isempty(strip(args[1]))) && return nothing
-    return abspath(expanduser(args[1]))
+function command_line(args::AbstractVector{<:AbstractString})
+    n = length(args)
+    if n > 1
+        return nothing, "JuliaMag takes one project folder, but it got $n arguments. " *
+                        "Put quotes around a folder name with spaces."
+    end
+    (n == 0 || isempty(strip(args[1]))) && return nothing, nothing
+    return abspath(expanduser(args[1])), nothing
 end
 
 """
     warn_threads!(app, threads)
 
-Show a warning toast when Julia's default thread pool, where jobs run, has fewer than
-2 threads: the app was started without `-t auto`.
+Warn when Julia's default thread pool, where jobs run, has fewer than 2 threads: the app
+was started without `-t auto`. The warning is a toast and a line in the log.
 """
 function warn_threads!(app, threads::Integer)
-    threads < 2 && toast!(app, :warn, ONE_THREAD_TEXT)
+    threads < 2 || return nothing
+    @warn ONE_THREAD_TEXT threads
+    toast!(app, :warn, ONE_THREAD_TEXT)
     return nothing
 end
 
@@ -168,6 +186,7 @@ end
 function (a::AppFrame)(w::Window)
     app = a.app
     app.window = w
+    w.frame == 0 && restart_toast_clocks!(app.toasts)   # made before the window showed
     w.handle.handle == C_NULL || note_focus!(app, GLFW.GetWindowAttrib(w.handle, GLFW.FOCUSED) != 0)
     drain!(app)
     refresh!(app)

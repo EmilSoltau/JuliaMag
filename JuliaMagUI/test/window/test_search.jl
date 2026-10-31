@@ -9,7 +9,7 @@ using JuliaMagUI: LIGHT, DARK, THEME_LIGHT, THEME_DARK, ToolDialog, ShortcutsDia
 const SEARCH_SHOTS = joinpath(@__DIR__, "..", "shots")
 
 # The test engine reference of an item of the command search overlay.
-search_ref(name) = "//" * UI.SEARCH_WINDOW * "/" * name
+search_ref(name) = "//" * UI.SEARCH_WINDOW * "/" * ref_part(name)
 
 last_dialog(app) = isempty(app.ui.dialogs) ? nothing : last(app.ui.dialogs)
 
@@ -267,7 +267,7 @@ window_testset("command search") do
             for id in ids
                 ctx.type("JuliaMag/right/tools/##find", id)
                 ctx.frames(2)
-                @test te.ItemExists("JuliaMag/right/tools/" * id)
+                @test te.ItemExists("JuliaMag/right/tools/" * ref_part(id))
             end
             ctx.type("JuliaMag/right/tools/##find", "")
             ctx.frames(2)

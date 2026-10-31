@@ -623,6 +623,7 @@ function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     ui.bs.script = nothing
     ui.bs.script_of = nothing
     ui.bs.script_wrap = nothing
+    drop_job_toasts!(app)   # they are about the jobs of the project that went
     ui.bs.script_scroll = 0f0
     return nothing
 end

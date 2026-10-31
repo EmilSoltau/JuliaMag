@@ -110,7 +110,6 @@ These were out of scope for the UI shell.
   They are written in UTC with a "Z" and shown in local time.
 - Plan 3: check the overwrite question of the native save dialog on GTK and on Windows (T13-P2).
   JuliaMag asks itself when the dialog did not confirm the exact path.
-
 - Windows is the main platform, but no test has run there yet.
 - The memory-map release before undo, the file-cut order in undo, and readers during an append need a Windows CI job in the packaging plan.
 - Open a `.grd` written by JuliaMag in Oasis montaj.

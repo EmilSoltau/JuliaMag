@@ -13,7 +13,7 @@ const BACKSTAGE_SHOTS = joinpath(@__DIR__, "..", "shots")
 # Test engine references of the backstage: the nav and the page body.
 nav_ref(name) = "Backstage/nav/" * name
 body_ref(name) = "Backstage/body/" * name
-recent_ref(folder) = body_ref("recent/" * replace(folder, "/" => "\\/"))
+recent_ref(folder) = body_ref("recent/" * ref_part(folder))
 dialog_button(name) = "//###dialog1/" * name
 
 bs_dialog(app) = isempty(app.ui.dialogs) ? nothing : last(app.ui.dialogs)

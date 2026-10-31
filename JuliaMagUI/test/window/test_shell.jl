@@ -42,26 +42,60 @@ end
 window_testset("shell") do
     mkpath(SHELL_SHOTS)
 
-    @testset "main warns when Julia has one worker thread" begin
-        with_test_app(; threads = 1) do ctx
-            app = ctx.app_state()
-            ctx.frames(2)
-            @test count(t -> t.text == UI.ONE_THREAD_TEXT, app.toasts) == 1
-            ctx.shot(joinpath(SHELL_SHOTS, "one-thread-light.png"))
+    @testset "main warns when Julia has one worker thread: a toast and the log" begin
+        dir = mktempdir()
+        logger = Test.TestLogger(min_level = Base.CoreLogging.Warn)
+        Base.CoreLogging.with_logger(logger) do
+            with_test_app(; threads = 1, config_dir = dir) do ctx
+                app = ctx.app_state()
+                ctx.frames(2)
+                t = only(filter(t -> t.text == UI.ONE_THREAD_TEXT, app.toasts))
+                @test time() - t.born < 4   # its time started with the first frame
+                ctx.shot(joinpath(SHELL_SHOTS, "one-thread-light.png"))
+            end
         end
+        @test count(r -> r.message == UI.ONE_THREAD_TEXT, logger.logs) == 1
+        @test occursin(UI.ONE_THREAD_TEXT, read(joinpath(dir, UI.LOG_FILE), String))
         with_test_app(; threads = 4) do ctx
             ctx.frames(2)
             @test isempty(ctx.app_state().toasts)
         end
     end
 
+    @testset "the command line: two arguments or a file give a plain message, no project" begin
+        logger = Test.TestLogger(min_level = Base.CoreLogging.Warn)
+        Base.CoreLogging.with_logger(logger) do
+            with_test_app(; args = ["my", "project"]) do ctx
+                app = ctx.app_state()
+                ctx.frames(2)
+                @test app.session === nothing
+                t = only(app.toasts)
+                @test t.kind == :error && startswith(t.text, "JuliaMag takes one project folder, but it got 2")
+                ctx.shot(joinpath(SHELL_SHOTS, "command-line-error-light.png"))
+            end
+        end
+        @test count(r -> startswith(string(r.message), "JuliaMag takes one project folder"), logger.logs) == 1
+        file = joinpath(mktempdir(), "survey.xyz")
+        write(file, "/ X Y\n")
+        with_test_app(; args = [file]) do ctx
+            app = ctx.app_state()
+            ctx.wait_until(() -> !isempty(app.toasts) && app.switching === nothing; timeout = 10)
+            @test app.session === nothing
+            @test only(app.toasts).text == "$file is a file, not a project folder."
+        end
+    end
+
     @testset "a new dialog keeps the loop drawing until it has its size" begin
         with_project_app(kangaroo()) do ctx, app
-            ctx.frames(30)   # past the animations of the start
-            @test ctx.window.animating_until < time()
-            UI.push_dialog!(app, UI.ResultDialog("Statistics: MAG", "count   172,900\nmin     -173.31"))
-            ctx.frames(1)
-            @test ctx.window.animating_until > time()
+            # No input waits to be drawn; then a dialog opens, as a worker result opens one.
+            ctx.on_render(w -> begin
+                w.input_frames = 0
+                UI.push_dialog!(app, UI.ResultDialog("Statistics: MAG", "count   172,900\nmin     -173.31"))
+            end)
+            left = Ref(-1)
+            ctx.on_render(w -> (left[] = w.input_frames))
+            # The frames it needs to size itself are still to come, without input.
+            @test left[] >= UI.CENTRE_FRAMES - 1
         end
     end
 

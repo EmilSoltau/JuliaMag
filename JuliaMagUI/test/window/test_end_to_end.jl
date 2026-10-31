@@ -33,7 +33,7 @@ end
 function e2e_tree_menu(ctx, key, label)
     right_click(tree_ref(key))
     ctx.frames(2)
-    ctx.click("//###menu/" * label)
+    ctx.click("//###menu/" * ref_part(label))
     return nothing
 end
 
@@ -233,7 +233,7 @@ function first_day(; scale::Real, size, sfx::AbstractString)
         @test app.ui.backstage && app.ui.backstage_page === :start
         real = realpath(folder)
         @test first(app.config.recent) == real
-        ref = "Backstage/body/recent/" * replace(real, "/" => "\\/")
+        ref = "Backstage/body/recent/" * ref_part(real)
         ctx.wait_until(() -> te.ItemExists(ref); timeout = 10)
         shot(ctx, "09-closed-dark")
         ctx.click(ref)

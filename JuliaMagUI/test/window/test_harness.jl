@@ -34,6 +34,20 @@ end
     @test_throws ArgumentError key_chord("Ctrl+Nope")
 end
 
+@testset "ref_part: an id made from a path stays one id, backslashes and all" begin
+    # The id ImGui makes for `text` pushed under the id "recent", as the recent rows do.
+    imgui_id(text) = ig.lib.igImHashStr(text, 0, ig.lib.igImHashStr("recent", 0, 0))
+    ref_id(text) = te.ImHashDecoratedPath("recent/" * ref_part(text))
+    for path in ("C:\\Users\\me", "/tmp/a b/c", "\\\\server\\share/x", "Geosoft or Surfer grid...")
+        @test ref_id(path) == imgui_id(path)
+    end
+    # Without the escape, the engine drops the backslashes: two paths would be one.
+    @test ref_part("C:\\Users\\me") == "C:\\\\Users\\\\me"
+    @test te.ImHashDecoratedPath("recent/" * ref_part("C:\\Users\\me")) !=
+          te.ImHashDecoratedPath("recent/C:Usersme")
+    @test te.ImHashDecoratedPath("recent/C:\\Users\\me") == te.ImHashDecoratedPath("recent/C:Usersme")
+end
+
 window_testset("harness") do
     mkpath(HARNESS_SHOTS)
 

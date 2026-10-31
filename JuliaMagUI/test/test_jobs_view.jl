@@ -199,13 +199,14 @@ watch_now!(app) = (refresh_now!(app); UI.watch_jobs!(app); nothing)
                 watch_now!(app)
                 @test length(app.toasts) == n
 
-                # Another project: its finished jobs make no toasts.
+                # Another project: the toasts of the old project's jobs go, and its own
+                # finished jobs make none.
                 s2 = fresh_session()
                 done2 = Core.run_tool(s2, "test.fail")
                 Core.wait_job(done2)
                 UI.set_session!(app, s2)
                 watch_now!(app)
-                @test length(app.toasts) == n
+                @test isempty(app.toasts)
                 Core.close_session!(s2)
             end
         end
@@ -311,5 +312,20 @@ watch_now!(app) = (refresh_now!(app); UI.watch_jobs!(app); nothing)
                 @test UI.job_owner("export.csv") isa Core.ExporterSpec
             end
         end
+    end
+end
+
+@testset "a job's last toast replaces its started toast; a new project drops job toasts" begin
+    with_app(test_app_state(nothing)) do app
+        UI.toast!(app, :ok, "Grid set.")                                  # not about a job
+        UI.toast!(app, :info, "Gate started."; job = "job-1")
+        UI.toast!(app, :info, "Fail started."; job = "job-2")
+        UI.job_ended_toast!(app, fake_job_row(id = "job-1", title = "Gate"))
+        @test [t.text for t in app.toasts] == ["Grid set.", "Fail started.", "Gate done."]
+        UI.job_ended_toast!(app, fake_job_row(id = "job-2", status = Core.JOB_FAILED, error = "bad"))
+        @test [t.text for t in app.toasts] == ["Grid set.", "Gate done.", "Test Tool failed."]
+        @test [t.job for t in app.toasts] == ["", "job-1", "job-2"]
+        UI.set_session!(app, nothing)
+        @test [t.text for t in app.toasts] == ["Grid set."]
     end
 end

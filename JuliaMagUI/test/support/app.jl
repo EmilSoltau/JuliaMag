@@ -199,7 +199,7 @@ end
 """
     with_test_app(f; project = nothing, theme = THEME_LIGHT, size = (1480, 920), scale = 1f0,
                   config_dir = mktempdir(), extra_ui = nothing, timeout = 120,
-                  draw_errors_ok = false, threads = 2)
+                  draw_errors_ok = false, threads = 2, args = nothing)
 
 Start the real app (`JuliaMagUI.main`) with the bundled fonts and an ImGuiTestEngine
 context, run `f(ctx::TestContext)` as one registered test, then close the app.
@@ -212,6 +212,8 @@ An error while drawing a frame does not end the app (the frame guard turns it in
 toast). So a test cannot miss one, the run fails when the app recorded any draw error
 (`app.draw_errors`), unless `draw_errors_ok` says the test expects them.
 
+With `args`, the app starts as from the command line, `main(args)`, and `project` is not used.
+
 `threads` goes to `main`: the size of the default thread pool the app sees. It is 2, so
 the one-thread warning shows only in the test that asks for it.
 
@@ -222,7 +224,8 @@ action that hangs; the app then closes and the error reaches the caller.
 function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGHT,
         size::Tuple{Integer,Integer} = (1480, 920), scale::Real = 1f0,
         config_dir::AbstractString = mktempdir(), extra_ui = nothing, timeout::Real = 120,
-        draw_errors_ok::Bool = false, threads::Integer = 2)
+        draw_errors_ok::Bool = false, threads::Integer = 2,
+        args::Union{Nothing,AbstractVector{<:AbstractString}} = nothing)
     deadline = time() + timeout
     TEST_TIMEOUT[] = timeout
     config, _ = UI.load_config(config_dir)
@@ -268,8 +271,9 @@ function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGH
         end
         # Tests never open a native file dialog: a test that needs a file sets its own picker.
         on_app = a -> (a.pick_file = (; kw...) -> ""; app[] = a)
-        UI.main(; project, config_dir, extra_ui = hook, on_app, size, scale,
-            fonts = :bundled, engine, passive = true, threads)
+        options = (; config_dir, extra_ui = hook, on_app, size, scale, fonts = :bundled, engine,
+            passive = true, threads)
+        args === nothing ? UI.main(; project, options...) : UI.main(args; options...)
         summary = te.GetResultSummary(engine)
         failure[] === nothing && time() > deadline && throw(TestTimeout(timeout))
         if failure[] === nothing && (summary.CountTested != 1 || summary.CountSuccess != 1)
@@ -288,12 +292,22 @@ function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGH
 end
 
 """
+    ref_part(text) -> String
+
+`text` as one part of a test engine reference, for an ImGui id made from any text, such
+as a folder path or a label. The engine reads `\\` as an escape and `/` as the line
+between ids, so both are escaped: a Windows path such as `C:\\Users\\me` keeps its
+backslashes, and `a/b` stays one id.
+"""
+ref_part(text::AbstractString)::String = replace(String(text), "\\" => "\\\\", "/" => "\\/")
+
+"""
     tree_ref(key, part = "row") -> String
 
 The test engine reference of a part of a Data tree row: `"row"`, `"check"` or `"chevron"`.
-A `/` in the key is escaped, since the reference uses `/` between ids.
+The key is one id (`ref_part`).
 """
 tree_ref(key::AbstractString, part::AbstractString = "row") =
-    "JuliaMag/left/tree/" * replace(key, "/" => "\\/") * "/" * part
+    "JuliaMag/left/tree/" * ref_part(key) * "/" * part
 
 right_click(ref) = te.ItemClick(ref, 1)

@@ -7,7 +7,7 @@ const TOAST_JOB_FAILED_MS = 12000 # the toast of a failed job
 const MAX_TOASTS = 3              # at most this many are shown; the oldest goes first
 
 """
-    Toast(kind, text; sub = "", actions = Pair{String,Function}[], ms, born = time())
+    Toast(kind, text; sub = "", actions = Pair{String,Function}[], ms, born = time(), job = "")
 
 A short message.
 
@@ -19,6 +19,8 @@ A short message.
   over the toast, its clock stops: `born` moves forward by the time the mouse stays.
 - `shown`: the `time()` it was made; it never moves, and drives the slide-in.
 - `id`: a serial number, unique in the process; it names the toast's ImGui window.
+- `job`: the id of the job the toast is about, or `""`. A job's last toast replaces its
+  earlier one ("started" by "done"), and the job toasts go when the project changes.
 """
 mutable struct Toast
     kind::Symbol
@@ -29,15 +31,16 @@ mutable struct Toast
     born::Float64
     shown::Float64
     id::Int
+    job::String
     function Toast(kind::Symbol, text::AbstractString; sub::AbstractString = "",
             actions::AbstractVector = Pair{String,Function}[],
-            ms::Union{Nothing,Integer} = nothing, born::Real = time())
+            ms::Union{Nothing,Integer} = nothing, born::Real = time(), job::AbstractString = "")
         kind in TOAST_KINDS ||
             throw(ArgumentError("a toast kind is one of $(join(TOAST_KINDS, ", ")), not :$kind"))
         acts = Pair{String,Function}[String(first(a)) => last(a) for a in actions]
         t = ms === nothing ? (isempty(acts) ? TOAST_MS : TOAST_ACTIONS_MS) : Int(ms)
         return new(kind, String(text), String(sub), acts, t, Float64(born), Float64(born),
-            Threads.atomic_add!(TOAST_SERIAL, 1) + 1)
+            Threads.atomic_add!(TOAST_SERIAL, 1) + 1, String(job))
     end
 end
 
@@ -68,17 +71,40 @@ function add_toast!(toasts::Vector{Toast}, t::Toast)
 end
 
 """
-    toast!(app, kind, text; sub = "", actions = Pair{String,Function}[], ms = nothing)
+    toast!(app, kind, text; sub = "", actions = Pair{String,Function}[], ms = nothing, job = "")
 
 Show a toast. Call it on the render thread. `app` is an `AppState`.
 See `Toast` for the arguments and the default times.
+A toast about a `job` replaces the toasts of that job shown so far.
 """
 function toast!(app, kind::Symbol, text::AbstractString; sub::AbstractString = "",
-        actions::AbstractVector = Pair{String,Function}[], ms::Union{Nothing,Integer} = nothing)
-    t = add_toast!(app.toasts, Toast(kind, text; sub, actions, ms))
+        actions::AbstractVector = Pair{String,Function}[], ms::Union{Nothing,Integer} = nothing,
+        job::AbstractString = "")
+    isempty(job) || filter!(x -> x.job != job, app.toasts)
+    t = add_toast!(app.toasts, Toast(kind, text; sub, actions, ms, job))
     w = app.window
     w === nothing || request_frames!(w, 0.25)
     return t
+end
+
+"""
+    drop_job_toasts!(app)
+
+Take away the toasts about jobs. The project changed, so those jobs are gone.
+"""
+drop_job_toasts!(app) = (filter!(t -> isempty(t.job), app.toasts); nothing)
+
+"""
+    restart_toast_clocks!(toasts, now = time())
+
+Start the time of each toast again at `now`. The app calls it at its first frame, so a
+toast made while the window opened (the one-thread warning) stays its full time.
+"""
+function restart_toast_clocks!(toasts::Vector{Toast}, now::Real = time())
+    for t in toasts
+        t.born = t.shown = Float64(now)
+    end
+    return nothing
 end
 
 """
