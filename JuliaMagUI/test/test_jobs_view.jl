@@ -61,6 +61,29 @@ watch_now!(app) = (refresh_now!(app); UI.watch_jobs!(app); nothing)
         @test UI.clock_text("", 0) == "" && UI.clock_text("yesterday", 0) == ""
         o = UI.local_offset(1_761_902_102.0)
         @test o % 900 == 0 && abs(o) <= 14 * 3600
+        # The offset from the C library's local time, here a fixed one, so no test depends on
+        # the machine's zone. Sydney ends summer time at 2026-04-05 03:00 local (16:00 UTC).
+        sydney(t) = t < UI.job_time("2026-04-04T16:00:00Z").seconds ? 11 * 3600 : 10 * 3600
+        fake(off) = t -> begin   # what TmStruct holds: years from 1900, months from 0
+            m = match(r"(\d+)-(\d+)-(\d+)T(\d+):(\d+):(\d+)", UI.utc_text(t + off(t)))
+            v = parse.(Int, m.captures)
+            (year = v[1] - 1900, month = v[2] - 1, mday = v[3], hour = v[4], min = v[5], sec = v[6])
+        end
+        before, after = UI.job_time("2026-04-04T15:59:59Z").seconds, UI.job_time("2026-04-04T16:00:00Z").seconds
+        @test UI.local_offset(before, fake(sydney)) == 11 * 3600
+        @test UI.local_offset(after, fake(sydney)) == 10 * 3600
+        @test UI.clock_text("2026-04-04T15:59:59Z", UI.local_offset(before, fake(sydney))) == "02:59"
+        @test UI.clock_text("2026-04-04T16:00:00Z", UI.local_offset(after, fake(sydney))) == "02:00"
+        newyork(t) = -4 * 3600
+        @test UI.local_offset(after, fake(newyork)) == -4 * 3600
+        @test UI.local_offset(after, fake(t -> 5 * 3600 + 45 * 60)) == 5 * 3600 + 45 * 60   # Nepal
+        # Before 1970, not a number, or a local time that makes no sense: UTC.
+        @test UI.local_offset(-86400.0, fake(sydney)) == 0
+        @test UI.local_offset(NaN) == 0 && UI.local_offset(Inf) == 0
+        @test UI.local_offset(after, t -> (year = 0, month = 0, mday = 0, hour = 0, min = 0, sec = 0)) == 0
+        @test UI.local_offset(after, t -> error("no local time")) == 0
+        @test UI.clock_text("1969-12-31T23:30:00Z") == "23:30"
+        @test UI.utc_text(0.0) == "1970-01-01T00:00:00" && UI.utc_text(1_761_902_102.9) == "2025-10-31T09:15:02"
         @test UI.clock_text("2026-10-31T09:15:02.123Z") == UI.clock_text("2026-10-31T09:15:02.123Z",
             UI.local_offset(UI.job_time("2026-10-31T09:15:02.123Z").seconds))
         @test UI.duration_text(0.43) == "0.4 s" && UI.duration_text(59.94) == "59.9 s"

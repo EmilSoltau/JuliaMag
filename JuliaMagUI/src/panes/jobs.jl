@@ -172,17 +172,37 @@ function elapsed(started::AbstractString, finished::AbstractString)::Float64
 end
 
 """
-    local_offset(t) -> Int
+    local_offset(t, localtime = Libc.TmStruct) -> Int
 
 The machine's offset from UTC at time `t` (seconds since 1970), in seconds, summer time
-included. It uses the C library's local time, which works on every platform.
+included. `localtime(whole_seconds)` gives the local clock as a `TmStruct` does (years from
+1900, months from 0); the C library's local time works on every platform. A time before
+1970, not a number, or a local time that is not within 14 hours of UTC gives 0 (UTC):
+some C libraries return nothing useful for those.
 """
-function local_offset(t::Real)::Int
+function local_offset(t::Real, localtime = Libc.TmStruct)::Int
+    (isfinite(t) && t >= 0) || return 0
     whole = floor(Int, t)
-    tm = Libc.TmStruct(whole)
-    wall = days_from_civil(Int(tm.year) + 1900, Int(tm.month) + 1, Int(tm.mday)) * 86400 +
-        Int(tm.hour) * 3600 + Int(tm.min) * 60 + Int(tm.sec)
-    return round(Int, (wall - whole) / 60) * 60
+    offset = try
+        tm = localtime(whole)
+        wall = days_from_civil(Int(tm.year) + 1900, Int(tm.month) + 1, Int(tm.mday)) * 86400 +
+            Int(tm.hour) * 3600 + Int(tm.min) * 60 + Int(tm.sec)
+        round(Int, (wall - whole) / 60) * 60
+    catch e
+        e isa InterruptException && rethrow()
+        0
+    end
+    return abs(offset) <= 14 * 3600 ? offset : 0
+end
+
+"`t` (seconds since 1970) as UTC `yyyy-mm-ddTHH:MM:SS`, whole seconds."
+function utc_text(t::Real)::String
+    whole = floor(Int, t)
+    days, secs = fldmod(whole, 86400)
+    y, m, d = civil_from_days(days)
+    pad(x, n = 2) = lpad(x, n, '0')
+    return string(pad(y, 4), "-", pad(m), "-", pad(d), "T", pad(secs ÷ 3600), ":", pad(secs % 3600 ÷ 60), ":",
+        pad(secs % 60))
 end
 
 """
@@ -198,6 +218,19 @@ function clock_text(text::AbstractString, offset::Union{Nothing,Integer} = nothi
     t.zoned && (wall += offset === nothing ? local_offset(t.seconds) : offset)
     minutes = mod(floor(Int, wall), 86400) ÷ 60
     return string(lpad(minutes ÷ 60, 2, '0'), ":", lpad(minutes % 60, 2, '0'))
+end
+
+# The date of a day number from 1970-01-01 (the inverse of `days_from_civil`).
+function civil_from_days(z::Int)::NTuple{3,Int}
+    z += 719468
+    era = fld(z, 146097)
+    doe = z - era * 146097
+    yoe = div(doe - div(doe, 1460) + div(doe, 36524) - div(doe, 146096), 365)
+    doy = doe - (365 * yoe + div(yoe, 4) - div(yoe, 100))
+    mp = div(5 * doy + 2, 153)
+    d = doy - div(153 * mp + 2, 5) + 1
+    m = mp < 10 ? mp + 3 : mp - 9
+    return (yoe + era * 400 + (m <= 2), m, d)
 end
 
 # Days from 1970-01-01 to a date of the proleptic Gregorian calendar (H. Hinnant's method).
@@ -435,8 +468,12 @@ end
 
 The layout of the Jobs tab's cards:
 
-- `snap`, `width`, `height`, `scale`: the snapshot and the list's box it was built for.
-- `bar`: the scrollbar shows; `card_w`: the cards' width (10 px less with the bar).
+- `snap`, `width`, `height`, `scale`: the snapshot and the list's box it was built for;
+  `x0`, `y0`: where that box was drawn last (tests read them).
+- `bar`: the scrollbar shows; `card_w`: the cards' width (10 px less with the bar). It is
+  the one answer to "does the list overflow": `bar == (total > height)` whenever a frame
+  draws, and `scroll_area!` gets the same `total` (see `draw_job_cards`).
+- `keys`: the `card_key` of each row of `snap`, worked out once per build.
 - `entries`: the card of each job, by id. They outlive snapshots: a job whose card did
   not change is not measured again.
 - `tops`: each card's top, from the list's top; `total`: the list's height (device px).
@@ -448,8 +485,11 @@ mutable struct JobsView
     width::Float32
     height::Float32
     scale::Float32
+    x0::Float32
+    y0::Float32
     bar::Bool
     card_w::Float32
+    keys::Vector{UInt64}
     entries::Dict{String,CardEntry}
     tops::Vector{Float32}
     total::Float32
@@ -457,7 +497,8 @@ mutable struct JobsView
     drawn::Int
 end
 
-JobsView() = JobsView(nothing, 0f0, 0f0, 0f0, false, 0f0, Dict{String,CardEntry}(), Float32[], 0f0, 0, 0)
+JobsView() = JobsView(nothing, 0f0, 0f0, 0f0, 0f0, 0f0, false, 0f0, UInt64[], Dict{String,CardEntry}(),
+    Float32[], 0f0, 0, 0)
 
 # A hash of what a card shows. A running card's percent and bar are read live, so they
 # are not in it.
@@ -529,9 +570,9 @@ function card_text(r::JobRow, width::Real, scale::Real, measure, wrap)::CardText
     return CardText(title, target, time, summary, warnings, job_owner(r.command) !== nothing)
 end
 
-# The card of `r` at `width`: the cached one when nothing changed, else a new estimate.
-function fit_card!(v::JobsView, r::JobRow, width::Float32, scale::Float32)::CardEntry
-    key = card_key(r)
+# The card of `r` (whose `card_key` is `key`) at `width`: the cached one when nothing
+# changed, else a new estimate.
+function fit_card!(v::JobsView, r::JobRow, key::UInt64, width::Float32, scale::Float32)::CardEntry
     e = get(v.entries, r.id, nothing)
     (e !== nothing && e.key == key && e.width == width && e.scale == scale) && return e
     e = estimated_entry(r, key, width, scale)
@@ -555,32 +596,61 @@ end
     jobs_view!(app, snap, view) -> JobsView
 
 The cards' layout for `snap` in the list box `view`, built again only when the snapshot,
-the box size or the scale changed. The scrollbar is decided once per build: the cards
-are laid out at the narrow width when they overflow it, so the choice cannot flip.
-No text is measured here.
+the box size or the scale changed. No text is measured here. The scrollbar choice of the
+last build is kept when the box size did not change, so a new snapshot of the same jobs
+cannot flip it; a first build guesses from the estimated heights at the narrow width.
+`draw_job_cards` then checks the choice against the measured cards (`settle_bar!`).
 """
 function jobs_view!(app, snap::Snapshot, view::Box)::JobsView
     s = Float32(app.window.scale)
     v = app.ui.jobs_cache
     v isa JobsView || (v = app.ui.jobs_cache = JobsView())
+    v.x0, v.y0 = view.x0, view.y0
     w, h = width(view), height(view)
     v.snap === snap && v.width == w && v.height == h && v.scale == s && return v
     rows = snap.jobs
+    v.keys = UInt64[card_key(r) for r in rows]
     ids = Set(r.id for r in rows)
     filter!(kv -> first(kv) in ids, v.entries)
     narrow = w - fpx(s, SCROLLBAR_W)
-    total = 0f0
-    for r in rows
-        e = get(v.entries, r.id, nothing)
-        fits = e !== nothing && e.key == card_key(r) && e.width == narrow && e.scale == s
-        total += fits ? something(e).height : estimated_entry(r, UInt64(0), narrow, s).height
+    if !(v.snap !== nothing && v.width == w && v.height == h && v.scale == s)
+        total = 0f0
+        for (r, key) in zip(rows, v.keys)
+            e = get(v.entries, r.id, nothing)
+            fits = e !== nothing && e.key == key && e.width == narrow && e.scale == s
+            total += fits ? something(e).height : estimated_entry(r, key, narrow, s).height
+        end
+        v.bar = total > h
     end
-    v.bar = total > h
-    v.card_w = v.bar ? narrow : w
-    foreach(r -> fit_card!(v, r, v.card_w, s), rows)
-    place_cards!(v, rows)
     v.snap, v.width, v.height, v.scale = snap, w, h, s
+    lay_out!(v, rows)
     return v
+end
+
+# Fit every card at the width the scrollbar choice gives, and place them.
+function lay_out!(v::JobsView, rows::Vector{JobRow})
+    v.card_w = v.bar ? v.width - fpx(v.scale, SCROLLBAR_W) : v.width
+    for (r, key) in zip(rows, v.keys)
+        fit_card!(v, r, key, v.card_w, v.scale)
+    end
+    place_cards!(v, rows)
+    return nothing
+end
+
+"""
+    settle_bar!(app, v, rows, scroll) -> scroll
+
+Make the scrollbar choice agree with the cards' height, as `scroll_area!` will see it:
+when the list overflows without the bar, or fits with it, lay the cards out once at the
+other width and measure the ones in view. One switch is enough: wider cards are never
+taller. Returns the scroll.
+"""
+function settle_bar!(app, v::JobsView, rows::Vector{JobRow}, scroll::Float32)::Float32
+    (v.total > v.height) == v.bar && return scroll
+    v.bar = !v.bar
+    lay_out!(v, rows)
+    scroll = clamp(scroll, 0f0, max(v.total - v.height, 0f0))
+    return measure_cards!(app, v, rows, scroll, v.height)
 end
 
 # The cards that overlap the band `scroll .. scroll + h` of the list.
@@ -681,6 +751,7 @@ function draw_job_cards(app, dl, view::Box, snap::Snapshot)
     h = height(view)
     scroll = clamp(ui.jobs_scroll, 0f0, max(v.total - h, 0f0))
     scroll = measure_cards!(app, v, rows, scroll, h)
+    scroll = settle_bar!(app, v, rows, scroll)   # now `v.bar == (v.total > h)`, as scroll_area! sees it
     ui.jobs_scroll, _ = scroll_area!(app, "scrollbar", view, v.total, scroll)
     right = view.x0 + v.card_w
     ig.PushClipRect((view.x0, view.y0), (right, view.y1), true)

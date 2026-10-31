@@ -192,6 +192,139 @@ window_testset("jobs tab") do
         end
     end
 
+    # Add jobs one at a time until the cards' estimated height and their measured height fall
+    # on two sides of the list's height. Returns (estimate, measured, height). Each job has
+    # warnings of `word`; with `fill`, only the first does and the rest are plain done jobs
+    # (their estimate is exact), for words whose card alone misses the band.
+    function add_until_straddle!(ctx, app, word; fill = false)
+        for n in 1:40
+            fill && n > 1 ? add_finished_jobs!(app.session, 1) : add_warning_jobs!(app.session, 1, word)
+            ctx.wait_until(() -> length(app.snap.jobs) == n; timeout = 10)
+            ctx.frames(2)
+            v = app.ui.jobs_cache
+            est, real = Ref(0f0), Ref(0f0)
+            ctx.on_render(w -> begin
+                measure = (role, size, text) -> UI.text_width(role, size, text)
+                for r in app.snap.jobs
+                    e = UI.estimated_entry(r, UInt64(0), v.width, Float32(w.scale))
+                    est[] += e.height
+                    t = UI.card_text(r, v.width, w.scale, measure, UI.wrap_lines)
+                    real[] += UI.card_height(r, e.has_target, length(t.summary), length(t.warnings), w.scale)
+                end
+            end)
+            (est[] > v.height) != (real[] > v.height) && return (est[], real[], v.height)
+        end
+        error("the estimate and the measured height never fell on two sides of the list's height")
+    end
+
+    # The pixel at the right end of the line under the first card, `dx` px in from the list's right.
+    function first_line_pixel(app, img, dx)
+        v = app.ui.jobs_cache
+        hl = UI.hairline(1f0)
+        y = UI.rnd(v.y0 + v.entries[app.snap.jobs[1].id].height - hl)
+        return job_pixel(img, v.x0 + v.width - dx, y)
+    end
+
+    # How many pixels of the scrollbar's column are the thumb.
+    thumb_pixels(app, img, tokens) = (v = app.ui.jobs_cache;
+        count(y -> near(job_pixel(img, v.x0 + v.width - 5, y), rgb255(tokens.border_strong); tol = 6),
+            floor(Int, v.y0):floor(Int, v.y0 + v.height) - 1))
+
+    @testset "the estimate says it overflows, the cards fit: no scrollbar, no gutter" begin
+        with_project_app(kangaroo()) do ctx, app
+            app.ui.left_tab = :jobs
+            est, real, h = add_until_straddle!(ctx, app, "ii")
+            @test est > h >= real
+            ctx.frames(3)
+            v = app.ui.jobs_cache
+            @test !v.bar && v.card_w == v.width && v.total <= v.height
+            @test !te.ItemExists("JuliaMag/left/jobs/scrollbar")
+            img = PNGFiles.load(ctx.shot(joinpath(JOB_SHOTS, "jobs-fit-light.png")))
+            @test near(first_line_pixel(app, img, 3), rgb255(LIGHT.border); tol = 6)   # the line runs to the edge
+            @test thumb_pixels(app, img, LIGHT) == 0
+            # New snapshots of the same jobs keep the choice.
+            for _ in 1:3
+                Core.bump!(app.session)
+                ctx.frames(3)
+                @test !app.ui.jobs_cache.bar
+            end
+        end
+    end
+
+    @testset "the estimate says it fits, the cards overflow: a scrollbar beside narrow cards" begin
+        with_project_app(kangaroo()) do ctx, app
+            app.ui.left_tab = :jobs
+            est, real, h = add_until_straddle!(ctx, app, "WWWW"; fill = true)
+            @test est <= h < real
+            ctx.frames(3)
+            v = app.ui.jobs_cache
+            @test v.bar && v.card_w == v.width - UI.SCROLLBAR_W && v.total > v.height
+            @test te.ItemExists("JuliaMag/left/jobs/scrollbar")
+            img = PNGFiles.load(ctx.shot(joinpath(JOB_SHOTS, "jobs-overflow-light.png")))
+            @test near(first_line_pixel(app, img, 9), rgb255(LIGHT.pane); tol = 6)    # cards end before the bar
+            @test near(first_line_pixel(app, img, 12), rgb255(LIGHT.border); tol = 6)
+            @test thumb_pixels(app, img, LIGHT) > 20
+            for _ in 1:3
+                Core.bump!(app.session)
+                ctx.frames(3)
+                @test app.ui.jobs_cache.bar
+            end
+        end
+    end
+
+    @testset "an edited row is measured again; cards of jobs that left are dropped" begin
+        gate = Channel{Int}(10)
+        with_tools([gate_tool(gate)]) do
+            with_project_app(kangaroo()) do ctx, app
+                app.ui.left_tab = :jobs
+                job = Core.run_tool(app.session, "test.gate")
+                put!(gate, 10)
+                wait_row(ctx, app, job, Core.JOB_DONE)
+                v = app.ui.jobs_cache
+                key, m = v.entries[job.id].key, v.measured
+                @test endswith(only(v.entries[job.id].text.summary), "Made Gate output.")
+                @test Core.undo!(app.session)                       # done becomes undone
+                wait_row(ctx, app, job, Core.JOB_UNDONE)
+                e = app.ui.jobs_cache.entries[job.id]
+                @test e.key != key && app.ui.jobs_cache.measured == m + 1
+                @test e.text.summary == ["Undone."]
+
+                add_finished_jobs!(app.session, 30)
+                ctx.wait_until(() -> length(app.snap.jobs) == 31; timeout = 10)
+                ctx.frames(3)
+                @test length(app.ui.jobs_cache.entries) == 31
+                drop_jobs!(app.session, Set(r.id for r in app.snap.jobs[1:20]))
+                ctx.wait_until(() -> length(app.snap.jobs) == 11; timeout = 10)
+                ctx.frames(3)
+                @test length(app.ui.jobs_cache.entries) == 11
+                @test Set(keys(app.ui.jobs_cache.entries)) == Set(r.id for r in app.snap.jobs)
+            end
+        end
+    end
+
+    @testset "Cancelling... goes when the job finishes first" begin
+        gate = Channel{Int}(10)
+        with_tools([gate_tool(gate; cancellable = false)]) do
+            with_project_app(kangaroo()) do ctx, app
+                app.ui.left_tab = :jobs
+                job = Core.run_tool(app.session, "test.gate")
+                r = wait_row(ctx, app, job, Core.JOB_RUNNING)
+                ctx.click(job_ref(job.id, "Cancel"))
+                ctx.wait_until(() -> job.cancel[]; timeout = 5)
+                ctx.frames(2)
+                @test UI.cancel_label(r) == "Cancelling..." && te.ItemExists(job_ref(job.id, "Cancel"))
+                ctx.click(job_ref(job.id, "Cancel"))       # a second click does nothing
+                ctx.frames(2)
+                @test app.queue.pending == 0
+                put!(gate, 10)                             # the job does not see the cancel and ends
+                wait_row(ctx, app, job, Core.JOB_DONE)
+                ctx.frames(2)
+                @test !te.ItemExists(job_ref(job.id, "Cancel")) && te.ItemExists(job_ref(job.id, "Run Again..."))
+                @test any(t -> t.text == "Gate done.", app.toasts)
+            end
+        end
+    end
+
     # Shots for the pixel review: every card state, light and dark, at scale 1 and 1.5.
     for (theme, tokens, name) in ((THEME_LIGHT, LIGHT, "light"), (THEME_DARK, DARK, "dark")),
             (scale, sfx) in ((1f0, ""), (1.5f0, "-1.5x"))

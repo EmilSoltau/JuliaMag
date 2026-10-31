@@ -324,19 +324,20 @@ as the database "<name> output" and returns it, so the job makes one item.
 - With a `Channel{Int}` gate the job waits for the test: `put!(gate, k)` lets it run up
   to step `k`. So a test sets the progress itself and never depends on timing.
 
-It checks for cancel between steps and while it waits.
+It checks for cancel between steps and while it waits, unless `cancellable` is false: then
+a cancel asked for is never seen, and the job ends as done.
 """
 function gate_tool(gate::Union{Nothing,Channel{Int}} = nothing; id::AbstractString = "test.gate",
-        name::AbstractString = "Gate")
+        name::AbstractString = "Gate", cancellable::Bool = true)
     xyz = small_xyz("gate.xyz")
     run = (s, ins, st, progress, report) -> begin
         n = Int(st["steps"])
         k = 0
         while k < n
-            target = gate === nothing ? k + 1 : min(next_gate(gate, progress), n)
+            target = gate === nothing ? k + 1 : min(next_gate(gate, progress; cancellable), n)
             for j in k+1:target
                 gate === nothing && sleep(0.3)
-                Core.is_cancelled(progress) && throw(Core.JobCancelled())
+                cancellable && Core.is_cancelled(progress) && throw(Core.JobCancelled())
                 println(report, "Step $j of $n")   # before the progress, which tests wait on
                 Core.report(progress, j / n)
             end
@@ -351,10 +352,10 @@ function gate_tool(gate::Union{Nothing,Channel{Int}} = nothing; id::AbstractStri
 end
 
 # The next step a gated job may run to. Waits for the test; stops on cancel.
-function next_gate(gate::Channel{Int}, progress)
+function next_gate(gate::Channel{Int}, progress; cancellable::Bool = true)
     deadline = time() + 30
     while !isready(gate)
-        Core.is_cancelled(progress) && throw(Core.JobCancelled())
+        cancellable && Core.is_cancelled(progress) && throw(Core.JobCancelled())
         time() > deadline && error("gate_tool: the test gave no step within 30 s")
         sleep(0.005)
     end
@@ -419,6 +420,35 @@ function add_finished_jobs!(s::Core.Session, n::Integer)
                 Core.JobReport(), failed ? ["line 3 is short", "no CRS"] : String[], String[], error, nothing))
         end
     end
+    Core.bump!(s)
+    return nothing
+end
+
+"""
+    add_warning_jobs!(s, n, word)
+
+Put `n` done jobs into session `s`, each with three warnings of `word` 40 times. Narrow
+letters ("ii") wrap to fewer lines than a card's estimate, wide ones ("WW") to more.
+"""
+function add_warning_jobs!(s::Core.Session, n::Integer, word::AbstractString)
+    warning = join(fill(word, 40), " ")
+    lock(s.jobs_lock) do
+        for _ in 1:n
+            id = "job-$(s.next_job)"
+            s.next_job += 1
+            push!(s.jobs, Core.Job(id, "import.geosoft_xyz", Dict{String,Any}("path" => "/data/$id.xyz"),
+                Threads.Atomic{Int}(Int(Core.JOB_DONE)), Threads.Atomic{Float64}(1.0), Threads.Atomic{Bool}(false),
+                "2026-10-31T09:15:02.100Z", "2026-10-31T09:15:04.200Z", Core.JobReport(),
+                [warning, warning, warning], String[], "", nothing))
+        end
+    end
+    Core.bump!(s)
+    return nothing
+end
+
+"Take the jobs whose ids are in `ids` out of session `s`, as clearing finished jobs would."
+function drop_jobs!(s::Core.Session, ids)
+    lock(() -> filter!(j -> !(j.id in ids), s.jobs), s.jobs_lock)
     Core.bump!(s)
     return nothing
 end
