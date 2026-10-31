@@ -10,17 +10,28 @@ const BAD_PROJECT_NAME = "A folder name cannot have any of these characters: < >
 const NO_PROJECT_HERE = "This folder has no JuliaMag project."
 const PROJECT_THERE = "There is a project in this folder already. Open it from the Open page."
 const CLOSE_WARNINGS_TITLE = "Closing the project gave these warnings"
+const RESERVED_NAME = "Windows keeps this name for itself. Pick another name."
+const BAD_NAME_END = "A folder name cannot end with a dot or a space."
+const SCRIPT_RUNNING = "A script is still running. Quit anyway?"
+
+# Names Windows keeps for devices, also with an extension (`NUL.txt`), in any case.
+const RESERVED_NAMES = Set(["CON", "PRN", "AUX", "NUL",
+    ("COM" * string(k) for k in 1:9)..., ("LPT" * string(k) for k in 1:9)...])
 
 """
     project_name_problem(name) -> Union{Nothing,String}
 
 Why `name` cannot be the name of a new project, whose folder takes the same name, or
-`nothing`: it is blank, `.` or `..`, or has a character a folder name cannot have.
+`nothing`: it is blank, `.` or `..`, has a character a folder name cannot have, ends with
+a dot or a space, or is a name Windows keeps for devices (`CON`, `NUL`, `COM1`, ... also
+with an extension). Windows is the main platform, so these are refused everywhere.
 """
 function project_name_problem(name::AbstractString)::Union{Nothing,String}
     t = strip(name)
     (isempty(t) || t in (".", "..")) && return "Type a name."
     any(c -> c in PROJECT_NAME_CHARS || iscntrl(c), t) && return BAD_PROJECT_NAME
+    (endswith(name, ' ') || endswith(t, '.')) && return BAD_NAME_END
+    uppercase(first(split(t, '.'))) in RESERVED_NAMES && return RESERVED_NAME
     return nothing
 end
 
@@ -61,6 +72,8 @@ function open_on_worker(folder::String, force::Bool, name::Union{Nothing,String}
             parent = dirname(folder)
             isdir(parent) || return OpenFailure("The folder $parent was not found.", false)
             isfile(project_file) && return OpenFailure(PROJECT_THERE, false)
+            isdir(folder) && !isempty(readdir(folder)) && return OpenFailure(
+                "The folder $folder is not empty. Pick another name, or an empty folder.", false)
             s = Core.new_session(folder, name; force)
         end
         return OpenedProject(s, realpath(folder), s.project.name)
@@ -84,9 +97,22 @@ folder that is not there stays in the recent list, marked as not found.
 """
 function open_project!(app, folder::AbstractString; force::Bool = false, stay::Bool = false)
     path = String(folder)
+    if is_open_project(app, path)   # it is open already: just show it
+        close_backstage!(app)
+        return nothing
+    end
     start = a -> start_open!(a, path, nothing; force, stay)
     app.session === nothing ? start(app) : close_project!(app; then = start)
     return nothing
+end
+
+# Is `folder` the folder of the open project? Compares paths only (no file access).
+function is_open_project(app, folder::String)::Bool
+    app.session === nothing && return false
+    f = normpath(rstrip(folder, ('/', '\\')))
+    f == app.ui.bs.open_path && return true
+    snap = app.snap
+    return snap !== nothing && f == normpath(rstrip(snap.folder, ('/', '\\')))
 end
 
 """
@@ -128,10 +154,8 @@ function opened!(app, folder::String, name::Union{Nothing,String}, @nospecialize
         stay || (app.ui.backstage = false)
         bs.scroll = 0f0
     elseif r isa Core.ProjectLockedError
-        who = isempty(r.user) ? "Another user" : r.user
         retry = a -> start_open!(a, folder, name; force = true, stay)
-        confirm!(app, "This project is open somewhere else",
-            "$who on $(r.host) opened it at $(lock_time_text(r.started)).";
+        confirm!(app, "This project is open somewhere else", lock_text(r);
             action = "Open Anyway", danger = true, on_yes = retry)
     elseif r isa OpenFailure
         toast!(app, :error, r.text)
@@ -140,6 +164,22 @@ function opened!(app, folder::String, name::Union{Nothing,String}, @nospecialize
         toast!(app, :error, safe_user_message(r))
     end
     return nothing
+end
+
+"""
+    lock_text(e::ProjectLockedError) -> String
+
+Who holds the project, as a sentence: "<user> on <host> opened it at <time>.", with the
+core's note after it when there is one (a take-over of the lock that went wrong).
+A login name keeps its case ("ems"); a phrase the core writes when it cannot read the
+lock ("another program") starts with a capital, so the sentence does.
+"""
+function lock_text(e::Core.ProjectLockedError)::String
+    who = isempty(e.user) ? "another user" : e.user
+    occursin(' ', who) && (who = uppercasefirst(who))
+    text = who * " on $(e.host) opened it at $(lock_time_text(e.started))."
+    isempty(strip(e.note)) || (text *= " " * sentence(e.note))
+    return text
 end
 
 const MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July",
@@ -291,12 +331,17 @@ end
 function closed!(app, s::Core.Session, seen::Int, r::CloseResult, then::Function)
     app.switching = nothing
     app.session === s && set_session!(app, nothing)
-    r.error === nothing || toast!(app, :error, safe_user_message(r.error))
+    if r.error !== nothing   # logged too: during a quit the toast is gone at once
+        @error "The project did not close cleanly" exception = r.error
+        toast!(app, :error, safe_user_message(r.error))
+    end
+    # A quit cancels what waited for the close: no other project opens, no script runs.
+    next = a -> (a.quit_pending || then(a); nothing)
     fresh = r.warnings[min(seen, length(r.warnings))+1:end]
     if isempty(fresh)
-        then(app)
+        next(app)
     else
-        push_dialog!(app, WarningsDialog(CLOSE_WARNINGS_TITLE, sentence.(fresh), then))
+        push_dialog!(app, WarningsDialog(CLOSE_WARNINGS_TITLE, sentence.(fresh), next))
     end
     return nothing
 end
@@ -341,6 +386,11 @@ function request_quit!(app)::Bool
     empty!(app.ui.dialogs)
     close_menu!(app)
     close_search!(app)
+    if app.ui.bs.running   # a script may never end: ask, and quit without waiting for it
+        confirm!(app, "Quit JuliaMag?", SCRIPT_RUNNING; action = "Quit", danger = true,
+            on_yes = a -> (a.quit_pending = false; a.quit_hook(a); nothing),
+            on_no = a -> (a.quit_pending = false; nothing))
+    end
     return false
 end
 
@@ -366,6 +416,10 @@ end
 
 # --- Running scripts ---
 
+const OUTPUT_MAX_LINES = 10_000
+const OUTPUT_CUT = "Earlier output was cut."
+const OUTPUT_LINE_MAX = 2_000   # characters; a longer line is cut, so no line holds the memory
+
 "What a script run gave: everything it printed, and its error or `nothing`."
 struct ScriptRun
     output::String
@@ -378,7 +432,8 @@ end
 Run the Julia script at `path` with `include` in a new module, and catch what it prints:
 `stdout`, `stderr` and its log messages go to a temp file while it runs, and are put back
 afterwards, also when the script throws. A file, not a pipe: a script that prints a lot
-never waits for a reader. Runs on the worker.
+never waits for a reader. Only the last $(OUTPUT_MAX_LINES) lines are kept (`last_lines`),
+so a chatty script cannot fill the memory. Runs on the worker.
 
 The redirect is for the whole process, so anything another thread prints to the console
 while the script runs lands in the output too. The app's own log messages do not: they go
@@ -404,9 +459,37 @@ function run_script_file(path::AbstractString)::ScriptRun
     finally
         close(io)
     end
-    out = read(tmp, String)
-    rm(tmp; force = true)
+    out = try
+        last_lines(tmp, OUTPUT_MAX_LINES)
+    finally
+        rm(tmp; force = true)
+    end
     return ScriptRun(out, failure)
+end
+
+
+"""
+    last_lines(path, n) -> String
+
+The last `n` lines of the file at `path`, read one line at a time, so a script that
+printed millions of lines takes no more memory than `n` lines. When lines were dropped,
+the text starts with the line "$(OUTPUT_CUT)". Lines longer than $(OUTPUT_LINE_MAX)
+characters are cut.
+"""
+function last_lines(path::AbstractString, n::Integer)::String
+    ring = Vector{String}(undef, n)
+    count = 0
+    for line in eachline(path)
+        length(line) > OUTPUT_LINE_MAX && (line = first(line, OUTPUT_LINE_MAX) * "...")
+        count += 1
+        ring[mod1(count, n)] = line
+    end
+    io = IOBuffer()
+    count > n && println(io, OUTPUT_CUT)
+    for k in max(1, count - n + 1):count
+        println(io, ring[mod1(k, n)])
+    end
+    return String(take!(io))
 end
 
 # The error of a script as one plain line, with the line of the script it came from.
@@ -440,7 +523,9 @@ function start_script!(app, path::String, folder::Union{Nothing,String})
     bs = app.ui.bs
     bs.output = nothing
     bs.output_failed = false
-    bs.output_error = ""
+    bs.output_lines = String[]
+    bs.output_errors = 0
+    bs.running = true
     bs.output_scroll = 0f0
     label = "Running $(basename(path))..."
     app.switching = label
@@ -451,14 +536,17 @@ end
 function script_done!(app, r::ScriptRun, folder::Union{Nothing,String})
     app.switching = nothing
     bs = app.ui.bs
+    bs.running = false
     out = r.output
     if r.error !== nothing
         out = isempty(out) || endswith(out, '\n') ? out * r.error : out * "\n" * r.error
     end
     bs.output = isempty(out) ? "The script printed nothing." : out
     bs.output_failed = r.error !== nothing
-    bs.output_error = something(r.error, "")
-    folder === nothing || open_project!(app, folder; stay = true)
+    # Split once here, not in every frame; the error lines are the last ones.
+    bs.output_lines = String.(split(rstrip(bs.output, '\n'), '\n'))
+    bs.output_errors = r.error === nothing ? 0 : length(split(rstrip(r.error, '\n'), '\n'))
+    folder === nothing || app.quit_pending || open_project!(app, folder; stay = true)
     return nothing
 end
 
@@ -479,7 +567,9 @@ function trim_log!(path::AbstractString, max_bytes::Integer = LOG_MAX_BYTES)
     n <= max_bytes && return nothing
     data = open(io -> (seek(io, n - max_bytes); read(io)), path)
     k = findfirst(==(UInt8('\n')), data)
-    keep = k === nothing ? data : data[k+1:end]
+    # No line start in the last part: at least start on a whole character.
+    k === nothing && (k = something(findfirst(b -> b & 0xc0 != 0x80, data), length(data) + 1) - 1)
+    keep = data[k+1:end]
     tmp, io = mktemp(dirname(abspath(path)))
     try
         write(io, keep)

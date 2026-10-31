@@ -42,6 +42,7 @@ const NEW_LEAD = "A project is a folder. It holds a small text file listing the 
 const OPEN_LEAD = "Open a project folder. Items whose files are missing show greyed out, and the project still opens."
 const SCRIPT_LEAD = "Every change is a command. This is the history of the project as a plain Julia script you can save and run again."
 const SCRIPT_REPL = "The same script runs from the Julia REPL, without the app: include(\"script.jl\")."
+const SCRIPT_NOTE = "While a script runs, anything else the app prints also shows in the output. Closing the window then quits without waiting for the script."
 const RUN_SCRIPT_TEXT = "Running a script closes this project, runs the script, then opens the project again."
 const ABOUT_TEXT = "JuliaMag processes airborne magnetic survey data. It is written in Julia. Its tools follow Oasis montaj, and its structure follows RustGIS: a ribbon in the order of the work, side panes, light and dark themes, command search, undo for every change, and background jobs."
 const ABOUT_NOTE = "This version builds the foundation: projects, import and export, the tool system and background jobs. Views and maps come in a later version."
@@ -112,6 +113,9 @@ function draw_backstage(app)
     s = w.scale
     t = app.tokens
     ui = app.ui
+    # What is open at the start of the frame: one Esc closes only the top layer. A dialog
+    # or the search that this Esc closes below must not let the backstage close too.
+    covered = !isempty(ui.dialogs) || ui.search !== nothing || ui.menu !== nothing
     vp = unsafe_load(ig.GetMainViewport())
     ig.SetNextWindowPos(vp.Pos)
     ig.SetNextWindowSize(vp.Size)
@@ -136,7 +140,7 @@ function draw_backstage(app)
     draw_dialogs(app)
     isempty(ui.dialogs) && draw_search(app, 0)
     typing = unsafe_load(ig.GetIO()).WantTextInput
-    if isempty(ui.dialogs) && ui.search === nothing && ui.menu === nothing && !typing &&
+    if !covered && isempty(ui.dialogs) && ui.search === nothing && ui.menu === nothing && !typing &&
             ig.IsKeyPressed(lib.ImGuiKey_Escape, false)
         close_backstage!(app)
     end
@@ -325,7 +329,7 @@ function draw_recent(app, dl, x::Float32, y::Float32, w::Real)::Float32
         name = elide(text_width, info.name, right - tx; role = FONT_SEMIBOLD)
         draw_text_mid(dl, FONT_SEMIBOLD, BODY_FONT_SIZE, tx, lines_top + f(12.5 * 1.25) / 2,
             u32(info.found ? t.text : t.text_disabled), name)
-        path = info.found ? folder : folder * "  (folder not found)"
+        path = info.found ? folder : folder * " (folder not found)"
         draw_text_mid(dl, FONT_REGULAR, 11.5, tx, lines_top + f(12.5 * 1.25 + 2) + f(11.5 * 1.25) / 2,
             u32(t.text_dim), elide(text_width, path, right - tx; size = 11.5))
         if clicked
@@ -564,7 +568,8 @@ function draw_script_page(app, dl, x::Float32, y::Float32, w::Float32)::Float32
     if bs.output !== nothing
         y = draw_output(app, dl, x, y + f(12), bw)
     end
-    return draw_lines(app, dl, x, y + f(14), min(w, f(HELP_MAX_W)), SCRIPT_REPL; pitch = 1.4)
+    y = draw_lines(app, dl, x, y + f(14), min(w, f(HELP_MAX_W)), SCRIPT_REPL; pitch = 1.4)
+    return draw_lines(app, dl, x, y + f(6), min(w, f(HELP_MAX_W)), SCRIPT_NOTE; pitch = 1.4)
 end
 
 # The script's lines cut to the box, cached for the text and the width.
@@ -587,9 +592,8 @@ function draw_output(app, dl, x::Float32, y::Float32, w::Float32)::Float32
     bs = app.ui.bs
     f(v) = fpx(s, v)
     hl = hairline(s)
-    text = something(bs.output, "")
-    lines = split(rstrip(text, '\n'), '\n')
-    errors = isempty(bs.output_error) ? 0 : length(split(rstrip(bs.output_error, '\n'), '\n'))
+    lines = bs.output_lines
+    errors = bs.output_errors
     lh = f(11.5 * 1.45)
     pad_y = f(8)
     content = 2 * pad_y + length(lines) * lh

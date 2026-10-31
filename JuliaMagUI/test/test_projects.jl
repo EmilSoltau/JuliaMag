@@ -544,4 +544,186 @@ toast_texts(app) = [t.text for t in app.toasts]
             "Gridding", "Filters", "Reduction to pole"]
         @test count(s -> s.now, GETTING_STARTED) == 3
     end
+
+    # --- Fix round 1 (task-15-review.md, ruling T15-R1) ---
+
+    @testset "a quit cancels a pending `then`: the next project never opens" begin
+        with_app(empty_app()) do app
+            quits = Ref(0)
+            app.quit_hook = a -> (quits[] += 1; nothing)
+            set_session!(app, session_with(project = "One"))
+            other = project_folder("Two")
+            open_project!(app, other)          # closes One, then would open Two
+            @test app.switching == "Closing..."
+            request_quit!(app)
+            pump!(app, () -> quits[] == 1)
+            @test app.session === nothing && isempty(app.config.recent)
+            s2 = Core.open_session(other)      # Two was never opened: its lock is free
+            Core.close_session!(s2)
+        end
+    end
+
+    @testset "closing the window while a script runs asks, and Quit ends the app" begin
+        with_app(empty_app()) do app
+            quits = Ref(0)
+            app.quit_hook = a -> (quits[] += 1; nothing)
+            flag = joinpath(mktempdir(), "go")
+            script = joinpath(mktempdir(), "wait.jl")
+            write(script, "while !isfile($(repr(flag))); sleep(0.02); end\nprintln(\"done\")\n")
+            UI.run_script!(app, script)
+            @test app.switching == "Running wait.jl..."
+            request_quit!(app)
+            advance_quit!(app)
+            d = only(app.ui.dialogs)
+            @test d isa ConfirmDialog && d.text == "A script is still running. Quit anyway?"
+            @test d.action == "Quit" && quits[] == 0
+            press_ok!(app)
+            @test quits[] == 1 && !app.quit_pending
+            touch(flag)                         # let the script end, so the worker can stop
+            pump!(app, () -> app.switching === nothing)
+            advance_quit!(app)
+            @test quits[] == 1                  # not a second time
+        end
+        with_app(empty_app()) do app            # Cancel: the script goes on, no quit
+            quits = Ref(0)
+            app.quit_hook = a -> (quits[] += 1; nothing)
+            flag = joinpath(mktempdir(), "go")
+            script = joinpath(mktempdir(), "wait.jl")
+            write(script, "while !isfile($(repr(flag))); sleep(0.02); end\n")
+            UI.run_script!(app, script)
+            request_quit!(app)
+            d = only(app.ui.dialogs)
+            filter!(x -> x !== d, app.ui.dialogs)
+            d.on_no(app)
+            @test !app.quit_pending
+            touch(flag)
+            pump!(app, () -> app.switching === nothing)
+            advance_quit!(app)
+            @test quits[] == 0
+        end
+    end
+
+    @testset "lock text when the core cannot read the lock" begin
+        with_app(empty_app()) do app
+            e = Core.ProjectLockedError("/p", "a computer not known yet", "another program",
+                "2026-10-31T09:15:02+0000", "The lock file was kept as project.lock.old.")
+            UI.opened!(app, "/p", nothing, e; stay = false)
+            d = only(app.ui.dialogs)
+            @test startswith(d.text, "Another program on a computer not known yet opened it at ")
+            @test endswith(d.text, ". The lock file was kept as project.lock.old.")
+        end
+    end
+
+    @testset "New Project refuses a folder that is not empty" begin
+        with_app(empty_app()) do app
+            parent = mktempdir()
+            mkpath(joinpath(parent, "Busy"))
+            write(joinpath(parent, "Busy", "notes.txt"), "mine")
+            @test new_project!(app, parent, "Busy") === nothing
+            pump!(app, () -> app.switching === nothing && app.queue.pending == 0)
+            @test app.session === nothing
+            @test toast_texts(app) == ["The folder $(joinpath(parent, "Busy")) is not empty. Pick another name, or an empty folder."]
+            @test readdir(joinpath(parent, "Busy")) == ["notes.txt"]
+            mkpath(joinpath(parent, "Empty"))   # an empty folder is fine
+            @test new_project!(app, parent, "Empty") === nothing
+            pump!(app, () -> app.session !== nothing)
+            @test app.session.project.name == "Empty"
+        end
+    end
+
+    @testset "New Project refuses Windows reserved names and a dot or space at the end" begin
+        reserved = "Windows keeps this name for itself. Pick another name."
+        for bad in ("CON", "con", "Nul", "PRN.txt", "aux.survey", "COM1", "com9", "LPT1", "lpt9.x")
+            @test project_name_problem(bad) == reserved
+        end
+        for ok in ("CONSOLE", "COM10", "LPT", "Nulla", "con-2024")
+            @test project_name_problem(ok) === nothing
+        end
+        ends = "A folder name cannot end with a dot or a space."
+        @test project_name_problem("Survey.") == ends
+        @test project_name_problem("Survey ") == ends
+        @test project_name_problem(" Survey") === nothing
+    end
+
+    @testset "log trim never starts inside a UTF-8 character" begin
+        dir = mktempdir()
+        path = joinpath(dir, "juliamag.log")
+        write(path, repeat("é✓", 300_000))     # 1.5 MB of 2 and 3 byte characters, no newline
+        trim_log!(path)
+        text = read(path, String)
+        @test filesize(path) <= LOG_MAX_BYTES && isvalid(text) && !isempty(text)
+        @test startswith(text, "é") || startswith(text, "✓")
+    end
+
+    @testset "a script that prints 200,000 lines keeps the last 10,000" begin
+        path = joinpath(mktempdir(), "chatty.jl")
+        write(path, "for k in 1:200_000; println(\"line \", k); end\n")
+        r = run_script_file(path)
+        lines = split(rstrip(r.output, '\n'), '\n')
+        @test length(lines) == UI.OUTPUT_MAX_LINES + 1
+        @test first(lines) == "Earlier output was cut."
+        @test lines[2] == "line 190001" && last(lines) == "line 200000"
+        @test sizeof(r.output) < 200_000
+        # The page splits the output once, not in every frame.
+        with_app(empty_app()) do app
+            UI.script_done!(app, r, nothing)
+            bs = app.ui.bs
+            @test length(bs.output_lines) == UI.OUTPUT_MAX_LINES + 1 && bs.output_errors == 0
+            UI.script_done!(app, UI.ScriptRun("a\nb\n", "Error in x.jl, line 2: boom"), nothing)
+            @test bs.output_lines == ["a", "b", "Error in x.jl, line 2: boom"] && bs.output_errors == 1
+        end
+    end
+
+    @testset "Browse to the project that is open only leaves the backstage" begin
+        with_app(empty_app()) do app
+            folder = project_folder("Here")
+            open_project!(app, folder)
+            pump!(app, () -> app.session !== nothing)
+            s = app.session
+            app.ui.backstage = true
+            open_project!(app, folder)
+            @test app.switching === nothing && app.session === s && isopen(s)
+            @test !app.ui.backstage
+        end
+    end
+
+    @testset "the System theme is read again when the window gets the focus" begin
+        with_app(empty_app()) do app
+            app.config.theme = UI.THEME_SYSTEM
+            UI.note_focus!(app, false)
+            @test app.queue.pending == 0
+            UI.note_focus!(app, true)
+            @test app.queue.pending == 1        # the OS theme is read on the worker
+            UI.note_focus!(app, true)
+            @test app.queue.pending == 1        # only when the focus comes back
+            wait_drained(app)
+            app.config.theme = UI.THEME_LIGHT
+            UI.note_focus!(app, false); UI.note_focus!(app, true)
+            @test app.queue.pending == 0        # not for a fixed theme
+        end
+    end
+
+    @testset "temp_folder_report: a folder that cannot be written" begin
+        dir = mktempdir()
+        chmod(dir, 0o555)
+        try
+            writable = try
+                p, io = mktemp(dir); close(io); rm(p); true
+            catch
+                false
+            end
+            if writable   # root, or a system without these permissions
+                @test_skip "this user can write in a read-only folder"
+            else
+                err = try
+                    temp_folder_report(dir); nothing
+                catch e
+                    e
+                end
+                @test err isa ArgumentError && err.msg == "JuliaMag cannot write in the folder $dir."
+            end
+        finally
+            chmod(dir, 0o755)
+        end
+    end
 end

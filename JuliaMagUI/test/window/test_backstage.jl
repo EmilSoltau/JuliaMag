@@ -359,4 +359,50 @@ window_testset("backstage") do
             @test app.ui.backstage && app.ui.backstage_page === :about
         end
     end
+
+    @testset "one Esc closes only the top layer: a dialog over the backstage" begin
+        with_project_app(kangaroo()) do ctx, app
+            UI.request!(app, UI.OpenBackstage(:start))
+            ctx.frames(2)
+            UI.request!(app, UI.OpenDialog(:getting_started))
+            ctx.wait_until(() -> bs_dialog(app) isa GettingStartedDialog)
+            ctx.frames(2)
+            ctx.key("Escape")
+            ctx.frames(2)
+            @test isempty(app.ui.dialogs) && app.ui.backstage
+            ctx.key("Ctrl+K")                  # the search too
+            ctx.frames(2)
+            @test app.ui.search !== nothing
+            ctx.key("Escape")
+            ctx.frames(2)
+            @test app.ui.search === nothing && app.ui.backstage
+            ctx.key("Escape")                  # now the backstage
+            ctx.frames(2)
+            @test !app.ui.backstage
+        end
+    end
+
+    @testset "a script that prints 200,000 lines: the output is cut and frames stay fast" begin
+        script = joinpath(mktempdir(), "chatty.jl")
+        write(script, "for k in 1:200_000; println(\"line \", k); end\n")
+        with_test_app() do ctx
+            app = ctx.app_state()
+            app.pick_file = (; kw...) -> script
+            UI.request!(app, UI.OpenBackstage(:script))
+            ctx.frames(2)
+            ctx.click(body_ref("Run Script..."))   # no project: it runs at once
+            ctx.wait_until(() -> app.ui.bs.output !== nothing; timeout = 60)
+            ctx.frames(5)
+            bs = app.ui.bs
+            @test length(bs.output_lines) == UI.OUTPUT_MAX_LINES + 1
+            @test first(bs.output_lines) == "Earlier output was cut."
+            times = Int[]
+            for _ in 1:10
+                ctx.frames(1)
+                push!(times, app.draw_ns)
+            end
+            @test minimum(times) < 20_000_000   # 20 ms
+            ctx.shot(joinpath(BACKSTAGE_SHOTS, "backstage-script-chatty-light.png"))
+        end
+    end
 end

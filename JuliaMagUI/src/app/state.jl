@@ -352,9 +352,11 @@ What the backstage pages keep while the app runs. Changed on the render thread o
 - `script`: the project's script (`Core.script_text`), or `nothing` until it is read;
   `script_of`: the session and revision it was read at; `script_wrap`: its lines cut to the
   box, for the width they were cut at (a cache); `script_scroll`: how far its box is scrolled.
-- `output`: what the last script run printed with its error at the end, or `nothing`
-  before any run; `output_failed`: the run threw, and `output_error` is its error (the
-  last lines of `output`); `output_scroll`: how far its box is scrolled.
+- `output`: what the last script run printed (its last 10,000 lines) with its error at the
+  end, or `nothing` before any run; `output_lines`: the same split into lines, once, of
+  which the last `output_errors` are the error; `output_failed`: the run threw;
+  `output_scroll`: how far its box is scrolled.
+- `running`: a script runs now (a quit then asks first).
 """
 Base.@kwdef mutable struct BackstageState
     scroll::Float32 = 0f0
@@ -372,8 +374,10 @@ Base.@kwdef mutable struct BackstageState
     script_scroll::Float32 = 0f0
     output::Union{Nothing,String} = nothing
     output_failed::Bool = false
-    output_error::String = ""
+    output_lines::Vector{String} = String[]
+    output_errors::Int = 0
     output_scroll::Float32 = 0f0
+    running::Bool = false
 end
 
 """
@@ -410,6 +414,7 @@ What the UI shows and where, apart from the project data. Changed on the render 
   stack means "a modal is open" (see `handle_shortcuts!`). Change it with `push_dialog!`
   and `pop_dialog!`. `drawn_dialogs`: each dialog drawn in the last frame with its ImGui
   popup id, so a dialog that left the stack also leaves ImGui's popup stack.
+- `focused`: the window had the keyboard focus in the last frame (see `note_focus!`).
 - `tooltip_since`, `tooltip_id`: when the mouse came onto the item with that id.
   `tip`: the tooltip to draw at the end of this frame, or `nothing`; `tip_hovered`: an
   item with a tooltip is hovered in this frame.
@@ -468,6 +473,7 @@ Base.@kwdef mutable struct UiState
     tools_cache::Any = nothing
     dialogs::Vector{Any} = Any[]
     drawn_dialogs::Vector{Tuple{Any,UInt32}} = Tuple{Any,UInt32}[]
+    focused::Bool = true
     tooltip_since::Float64 = 0.0
     tooltip_id::UInt32 = 0
     tip::Any = nothing

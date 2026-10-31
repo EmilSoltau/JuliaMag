@@ -236,7 +236,9 @@ function draw_toast(app, dl, toast::Toast, l::ToastLayout, b::Box, alpha::Float3
     if !isempty(toast.actions)
         y = round(y + p(6))
         for (k, (label, f)) in enumerate(toast.actions)
-            button(app, "$label##action$k", label, x, y; small = true, alpha, dl) && (act = f)
+            # Not while a project opens or closes: the action would act on the old one.
+            button(app, "$label##action$k", label, x, y; small = true, alpha, dl,
+                enabled = app.switching === nothing) && (act = f)
             x += l.action_widths[k] + p(4)
         end
     end

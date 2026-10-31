@@ -329,13 +329,33 @@ worker (it can take a moment), then applies the answer.
 function set_theme_mode!(app, mode::ThemeMode)
     app.config.theme = mode
     if mode == THEME_SYSTEM
-        submit!(app, "Read system theme", _ -> system_dark();
-            done = (app, dark) -> app.config.theme == THEME_SYSTEM &&
-                                  apply_tokens!(app, tokens_for(THEME_SYSTEM, dark)))
+        read_system_theme!(app)
     else
         apply_tokens!(app, tokens_for(mode, false))
     end
     save_settings!(app)
+    return nothing
+end
+
+# Ask the system for its theme on the worker, then use it while the System theme is on.
+function read_system_theme!(app)
+    submit!(app, "Read system theme", _ -> system_dark();
+        done = (app, dark) -> (app.config.theme == THEME_SYSTEM &&
+                               apply_tokens!(app, tokens_for(THEME_SYSTEM, dark)); nothing))
+    return nothing
+end
+
+"""
+    note_focus!(app, focused)
+
+Call once per frame with whether the window has the keyboard focus. When it comes back
+and the System theme is on, the system theme is read again, so a change made in the
+system settings meanwhile shows.
+"""
+function note_focus!(app, focused::Bool)
+    gained = focused && !app.ui.focused
+    app.ui.focused = focused
+    gained && app.config.theme == THEME_SYSTEM && read_system_theme!(app)
     return nothing
 end
 

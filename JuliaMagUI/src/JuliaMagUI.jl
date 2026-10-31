@@ -127,6 +127,7 @@ end
 function (a::AppFrame)(w::Window)
     app = a.app
     app.window = w
+    w.handle.handle == C_NULL || note_focus!(app, GLFW.GetWindowAttrib(w.handle, GLFW.FOCUSED) != 0)
     drain!(app)
     refresh!(app)
     settle_draw_errors!(app)

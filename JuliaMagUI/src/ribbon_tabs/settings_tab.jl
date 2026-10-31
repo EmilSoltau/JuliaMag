@@ -349,7 +349,7 @@ function draw_modal(app, d::GettingStartedDialog)
                 f(4), hl)
             draw_text_mid(dl, FONT_REGULAR, 10, tag_box.x0 + hl + f(4), centre_y(tag_box), u32(tag_col), tag;
                 line = 1.4)
-            tx = badge.x1 + f(12)
+            tx = bx + badge_width(s, string(n)) + f(12)   # one column for every name
             lines_top = mid - f(12.5 * 1.25 + 2 + 11.5 * 1.25) / 2
             draw_text_mid(dl, FONT_SEMIBOLD, BODY_FONT_SIZE, tx, lines_top + f(12.5 * 1.25) / 2, u32(t.text), step.name)
             draw_text_mid(dl, FONT_REGULAR, 11.5, tx, lines_top + f(12.5 * 1.25 + 2) + f(11.5 * 1.25) / 2,
