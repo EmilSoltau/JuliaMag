@@ -618,7 +618,7 @@ end
 # ---- registration ----------------------------------------------------------
 
 const LINE_EXPORT_SETTINGS = SettingSpec[
-    LinesSetting("lines", "Lines"; help = "all, selected or current (the line of the cursor)."),
+    LinesSetting("lines", "Lines"; help = "All lines, the selected lines, or the current line (the line of the cursor)."),
     ChannelListSetting("channels", "Channels"; help = "The channels to export. Leave empty to export all channels."),
 ]
 

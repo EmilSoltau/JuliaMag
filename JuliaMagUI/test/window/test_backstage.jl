@@ -126,6 +126,33 @@ window_testset("backstage") do
         end
     end
 
+    @testset "Close on the nav: does nothing with no project; asks while a job runs" begin
+        with_test_app() do ctx
+            app = ctx.app_state()
+            UI.request!(app, UI.OpenBackstage(:open))
+            ctx.frames(2)
+            ctx.click(nav_ref("Close"))
+            ctx.frames(2)
+            @test app.ui.backstage && app.ui.backstage_page === :open && app.switching === nothing
+        end
+        with_tools([gate_tool()]) do
+            s = kangaroo()
+            with_project_app(s) do ctx, app
+                job = Core.run_tool(s, "test.gate")
+                ctx.wait_until(() -> UI.running_jobs(app.snap) == 1; timeout = 10)
+                UI.request!(app, UI.OpenBackstage(:about))
+                ctx.frames(2)
+                ctx.click(nav_ref("Close"))
+                ctx.wait_until(() -> bs_dialog(app) isa ConfirmDialog; timeout = 5)
+                @test app.ui.backstage_page === :start && isopen(s)
+                ctx.click(dialog_button("Close Project"))
+                ctx.wait_until(() -> app.session === nothing && app.switching === nothing; timeout = 20)
+                @test !isopen(s) && Core.status(job) == Core.JOB_CANCELLED
+                @test app.ui.backstage && app.ui.backstage_page === :start
+            end
+        end
+    end
+
     @testset "Open: a folder with no project gives the plain message; the page stays usable" begin
         with_test_app() do ctx
             app = ctx.app_state()

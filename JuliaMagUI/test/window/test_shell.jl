@@ -42,6 +42,29 @@ end
 window_testset("shell") do
     mkpath(SHELL_SHOTS)
 
+    @testset "main warns when Julia has one worker thread" begin
+        with_test_app(; threads = 1) do ctx
+            app = ctx.app_state()
+            ctx.frames(2)
+            @test count(t -> t.text == UI.ONE_THREAD_TEXT, app.toasts) == 1
+            ctx.shot(joinpath(SHELL_SHOTS, "one-thread-light.png"))
+        end
+        with_test_app(; threads = 4) do ctx
+            ctx.frames(2)
+            @test isempty(ctx.app_state().toasts)
+        end
+    end
+
+    @testset "a new dialog keeps the loop drawing until it has its size" begin
+        with_project_app(kangaroo()) do ctx, app
+            ctx.frames(30)   # past the animations of the start
+            @test ctx.window.animating_until < time()
+            UI.push_dialog!(app, UI.ResultDialog("Statistics: MAG", "count   172,900\nmin     -173.31"))
+            ctx.frames(1)
+            @test ctx.window.animating_until > time()
+        end
+    end
+
     @testset "header, tabs, peek, status bar and shortcuts" begin
         with_project_app(kangaroo()) do ctx, app
             # The search pill opens the command search.

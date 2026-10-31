@@ -727,3 +727,22 @@ toast_texts(app) = [t.text for t in app.toasts]
         end
     end
 end
+
+@testset "the command line: a project folder argument" begin
+    @test UI.project_argument(String[]) === nothing
+    @test UI.project_argument([""]) === nothing
+    @test UI.project_argument(["/data/Survey 2024"]) == abspath("/data/Survey 2024")
+    @test UI.project_argument(["Survey"]) == joinpath(pwd(), "Survey")
+    @test_throws "takes one argument" UI.project_argument(["a", "b"])
+end
+
+@testset "one worker thread: a warning toast" begin
+    with_app(empty_app()) do app
+        UI.warn_threads!(app, 2)
+        @test isempty(app.toasts)
+        UI.warn_threads!(app, 1)
+        t = only(app.toasts)
+        @test t.kind == :warn
+        @test t.text == "JuliaMag runs with one worker thread. Start it with -t auto for faster jobs."
+    end
+end

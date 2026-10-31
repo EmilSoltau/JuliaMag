@@ -283,6 +283,9 @@ function keep_on_screen!(app, d, level::Integer, vp, scale::Real)
     frame = app.window.frame
     pl = places[level]
     pl.dialog === d || (places[level] = pl = DialogPlace(d, -1f0, frame + CENTRE_FRAMES))
+    # Draw the frames in which the dialog sizes itself, also when the loop would idle:
+    # else its footer can stay cut off until the next input (a result from the worker).
+    frame <= pl.centre_until && request_frames!(app.window, 0.05)
     h = Float32(ig.GetWindowSize().y)
     pl.height == h && return nothing
     pl.height = h

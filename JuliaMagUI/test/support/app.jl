@@ -199,7 +199,7 @@ end
 """
     with_test_app(f; project = nothing, theme = THEME_LIGHT, size = (1480, 920), scale = 1f0,
                   config_dir = mktempdir(), extra_ui = nothing, timeout = 120,
-                  draw_errors_ok = false)
+                  draw_errors_ok = false, threads = 2)
 
 Start the real app (`JuliaMagUI.main`) with the bundled fonts and an ImGuiTestEngine
 context, run `f(ctx::TestContext)` as one registered test, then close the app.
@@ -212,6 +212,9 @@ An error while drawing a frame does not end the app (the frame guard turns it in
 toast). So a test cannot miss one, the run fails when the app recorded any draw error
 (`app.draw_errors`), unless `draw_errors_ok` says the test expects them.
 
+`threads` goes to `main`: the size of the default thread pool the app sees. It is 2, so
+the one-thread warning shows only in the test that asks for it.
+
 The whole test, start and close included, has `timeout` seconds.
 After that, the next action throws `TestTimeout`, and the test engine's watchdog stops an
 action that hangs; the app then closes and the error reaches the caller.
@@ -219,7 +222,7 @@ action that hangs; the app then closes and the error reaches the caller.
 function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGHT,
         size::Tuple{Integer,Integer} = (1480, 920), scale::Real = 1f0,
         config_dir::AbstractString = mktempdir(), extra_ui = nothing, timeout::Real = 120,
-        draw_errors_ok::Bool = false)
+        draw_errors_ok::Bool = false, threads::Integer = 2)
     deadline = time() + timeout
     TEST_TIMEOUT[] = timeout
     config, _ = UI.load_config(config_dir)
@@ -266,7 +269,7 @@ function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGH
         # Tests never open a native file dialog: a test that needs a file sets its own picker.
         on_app = a -> (a.pick_file = (; kw...) -> ""; app[] = a)
         UI.main(; project, config_dir, extra_ui = hook, on_app, size, scale,
-            fonts = :bundled, engine, passive = true)
+            fonts = :bundled, engine, passive = true, threads)
         summary = te.GetResultSummary(engine)
         failure[] === nothing && time() > deadline && throw(TestTimeout(timeout))
         if failure[] === nothing && (summary.CountTested != 1 || summary.CountSuccess != 1)

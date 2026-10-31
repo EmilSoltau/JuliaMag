@@ -261,6 +261,44 @@ Run of 2026-10-30, same machine, median of five runs.
 The first frame now builds and uploads the icon atlas, which adds about 0.2 s.
 The total stays under the 4 s target.
 
+### With the whole shell (plan 3, Task 16)
+
+Run of 2026-10-31, same machine, median of five runs.
+
+| Step | Time |
+|---|---|
+| Process start until Julia runs the script | 0.12 s |
+| `using JuliaMagUI` | 1.92 s |
+| `main()` until its first frame is shown | 0.52 s |
+| Process start until the first frame | 2.55 s |
+
+The five totals were 2.49, 2.46, 2.55, 3.03 and 3.03 s.
+The first frame took 0.45 to 0.93 s; as before, the last runs of the series were the slow ones.
+The total stays under the 4 s target.
+
+## UI frame time with a big database
+
+This measures how long a frame takes with a database of 5,000 lines and 300 channels, with its Lines and Channels folders open in the Data tree.
+It runs the app in a window test (`with_project_app`), on WSLg, with the bundled fonts.
+Each case draws 200 frames, first with the tree still, then scrolled to a new place in every frame.
+"Draw" is `draw_app` alone, on the CPU.
+"Wall" is the time from frame to frame, with the test engine, the GPU and the buffer swap.
+
+### Results
+
+Run of 2026-10-31 on the machine above.
+
+| Case | Draw, median | Draw, 95th percentile | Wall per frame | Tree rows drawn |
+|---|---|---|---|---|
+| Scale 1, still | 0.24 ms | 0.29 ms | 10.0 ms | 25 |
+| Scale 1, scrolling | 0.25 ms | 0.28 ms | 10.1 ms | 26 |
+| Scale 1.5, still | 0.27 ms | 0.32 ms | 12.0 ms | 25 |
+| Scale 1.5, scrolling | 0.27 ms | 0.32 ms | 12.3 ms | 26 |
+
+The tree draws only the rows in view, so the draw time does not depend on the number of lines.
+The window test `5,000 lines: only the rows in view are drawn` in `JuliaMagUI/test/window/test_data.jl` checks that the median draw stays under 16 ms.
+The numbers above came from a one-off script on top of that test; that test is the lasting guard.
+
 ## Icon atlas
 
 `bench/ui_icons.jl` times how long the icon atlas takes to build.

@@ -33,9 +33,11 @@ const SCRIPT_LINE = 18          # mono 12, line height 1.5
 const OUTPUT_MAX_H = 260
 const HELP_MAX_W = 480          # `.help`: max-width 60ch
 
-# The pages of the nav, in order; `:sep` is a separator line.
-const NAV_PAGES = Any[(:start, "Start", "folder"), (:new, "New", "new"), (:open, "Open", "open"), :sep,
-    (:script, "Run Script", "script"), :sep, (:about, "About", "about")]
+# The rows of the nav, in order; `:sep` is a separator line. Each row is a page, except
+# `:close`, which closes the project and stays on the Start page.
+const NAV_PAGES = Any[(:start, "Start", "folder"), (:new, "New", "new"), (:open, "Open", "open"),
+    (:close, "Close", "close"), :sep, (:script, "Run Script", "script"), :sep, (:about, "About", "about")]
+const NAV_OFF = 0.5f0          # the opacity of a nav row that cannot be used (Close with no project)
 
 const START_LEAD = "Process airborne magnetic line data: import, correct, level, grid and map."
 const NEW_LEAD = "A project is a folder. It holds a small text file listing the items, and one folder of data files per item."
@@ -86,6 +88,23 @@ function set_page!(app, page::Symbol)
 end
 
 handle_request!(app, r::OpenBackstage) = (open_backstage!(app, r.page); true)
+
+# Close on the nav works while a project is open and no other open or close runs.
+can_close_from_nav(app)::Bool = app.session !== nothing && app.switching === nothing
+
+"""
+    close_from_backstage!(app)
+
+Close on the backstage nav: show the Start page and close the project (`close_project!`,
+which asks when jobs run). The backstage stays, so the closed project is the first of the
+Recent Projects, ready to open again.
+"""
+function close_from_backstage!(app)
+    can_close_from_nav(app) || return nothing
+    set_page!(app, :start)
+    close_project!(app; then = refresh_recent!)
+    return nothing
+end
 
 # The New page starts with the name "New Survey" in the folder of the last project.
 function fill_new_form!(app)
@@ -175,13 +194,21 @@ function draw_nav(app, dl, nav::Box)
         page, label, icon = entry
         row = snap(Box(nav.x0, y, nav.x1, y + f(NAV_ROW_H)))
         on = ui.backstage_page === page
+        usable = page !== :close || can_close_from_nav(app)
+        alpha = usable ? 1f0 : NAV_OFF
         clicked, hovered, _ = hit(label, row)
-        (on || hovered) && ig.AddRectFilled(dl, (row.x0, row.y0), (row.x1, row.y1),
-            u32(white, on ? NAV_ON : NAV_HOVER))
-        draw_icon(dl, icon, (rnd(nav.x0 + f(NAV_ICON_X)), rnd(y + f(11))), 18; style = :nav)
+        lit = on || (hovered && usable)
+        lit && ig.AddRectFilled(dl, (row.x0, row.y0), (row.x1, row.y1), u32(white, on ? NAV_ON : NAV_HOVER))
+        draw_icon(dl, icon, (rnd(nav.x0 + f(NAV_ICON_X)), rnd(y + f(11))), 18; style = :nav, alpha)
         draw_text_mid(dl, on ? FONT_SEMIBOLD : FONT_REGULAR, NAV_TEXT_SIZE, nav.x0 + f(NAV_TEXT_X),
-            y + f(NAV_ROW_H) / 2, u32(white), label)
-        clicked && set_page!(app, page)
+            y + f(NAV_ROW_H) / 2, u32(white, alpha), label)
+        if page === :close
+            hovered && item_tip!(app, "Close Project"; help = "Close the project.",
+                reason = app.session === nothing ? NEED_PROJECT : nothing)
+            clicked && usable && close_from_backstage!(app)
+        else
+            clicked && set_page!(app, page)
+        end
         y += f(NAV_ROW_H)
     end
     line = f(11 * 1.25)

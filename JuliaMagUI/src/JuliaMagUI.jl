@@ -47,16 +47,20 @@ include("panes/tools.jl")
 include("backstage/backstage.jl")
 include("ribbon_tabs/settings_tab.jl")
 
+const ONE_THREAD_TEXT = "JuliaMag runs with one worker thread. Start it with -t auto for faster jobs."
+
 """
     main(; project = nothing, config_dir = config_dir(), extra_ui = nothing, on_app = nothing,
          size = (1480, 920), scale = nothing, fonts = :system, engine = nothing,
-         passive = false)
+         passive = false, threads = Threads.nthreads(:default))
 
 Start the app: the window with the shell (`draw_app`). It opens `project` when one is
 given, else the last project when the setting "Open Last Project" is on (`open_last!`).
 The theme and the other settings come from `config_dir`, and so does the log file:
 warnings and errors also go to `juliamag.log` there (`with_app_log`).
 The Software Rendering setting is applied before the window opens (`rendering_env`).
+With fewer than 2 `threads` in Julia's default pool, where jobs run, a toast says to start
+with `-t auto` (`warn_threads!`).
 It makes the `AppState` and its worker, and stops the worker when the window closes.
 
 Closing the window closes the project first (`request_quit!`): it asks when jobs run and
@@ -66,20 +70,56 @@ still open when the loop ends another way (a test, an error) is closed here.
 The other keywords are for tests, screenshots and benchmarks:
 `extra_ui(w)` is drawn after the app in every frame, `on_app(app)` gets the `AppState`
 before the window opens, and `size`, `scale`, `fonts`, `engine` and `passive` go to
-`run_window`.
+`run_window`. `threads` is there so a test can see the warning.
 """
 function main(; project::Union{Nothing,AbstractString} = nothing,
         config_dir::AbstractString = JuliaMagUI.config_dir(), extra_ui = nothing,
         on_app = nothing, size::Tuple{Integer,Integer} = (1480, 920),
         scale::Union{Nothing,Real} = nothing, fonts::Symbol = :system, engine = nothing,
-        passive::Bool = false)
+        passive::Bool = false, threads::Integer = Threads.nthreads(:default))
     with_app_log(config_dir) do
-        run_app(project, String(config_dir), extra_ui, on_app, size, scale, fonts, engine, passive)
+        run_app(project, String(config_dir), extra_ui, on_app, size, scale, fonts, engine,
+            passive, threads)
     end
     return nothing
 end
 
-function run_app(project, config_dir::String, extra_ui, on_app, size, scale, fonts, engine, passive)
+"""
+    main(args::AbstractVector{<:AbstractString}; kwargs...)
+
+Start the app from the command line, as `bin/juliamag.sh` and `bin/juliamag.cmd` do with
+`JuliaMagUI.main(ARGS)`. The one optional argument is a project folder to open.
+"""
+function main(args::AbstractVector{<:AbstractString}; kwargs...)
+    return main(; project = project_argument(args), kwargs...)
+end
+
+"""
+    project_argument(args) -> Union{Nothing,String}
+
+The project folder of the command line `args` as a full path, or `nothing` when there is
+none. Throws an `ArgumentError` when there is more than one argument.
+"""
+function project_argument(args::AbstractVector{<:AbstractString})::Union{Nothing,String}
+    length(args) > 1 && throw(ArgumentError(
+        "JuliaMag takes one argument, a project folder; it got $(length(args))."))
+    (isempty(args) || isempty(strip(args[1]))) && return nothing
+    return abspath(expanduser(args[1]))
+end
+
+"""
+    warn_threads!(app, threads)
+
+Show a warning toast when Julia's default thread pool, where jobs run, has fewer than
+2 threads: the app was started without `-t auto`.
+"""
+function warn_threads!(app, threads::Integer)
+    threads < 2 && toast!(app, :warn, ONE_THREAD_TEXT)
+    return nothing
+end
+
+function run_app(project, config_dir::String, extra_ui, on_app, size, scale, fonts, engine,
+        passive, threads)
     config, problem = load_config(config_dir)   # a broken settings file gives the defaults
     problem === nothing || @warn problem
     for (key, value) in rendering_env(config)
@@ -88,6 +128,7 @@ function run_app(project, config_dir::String, extra_ui, on_app, size, scale, fon
     dark = config.theme == THEME_SYSTEM ? system_dark() : false
     tokens = tokens_for(config.theme, dark)
     app = AppState(config, tokens; config_dir)
+    warn_threads!(app, threads)
     try
         on_app === nothing || on_app(app)
         project === nothing ? open_last!(app) : open_project!(app, project)
