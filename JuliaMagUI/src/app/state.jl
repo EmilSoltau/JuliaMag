@@ -357,7 +357,8 @@ What the UI shows and where, apart from the project data. Changed on the render 
   scrolled, in device pixels; `search_focus`: give its text field the focus in the next frame;
   `search_cache`: its last results (a `SearchCache`, see search.jl).
 - `tools_query`, `tools_buffer`, `tools_scroll`: the Tools pane's search text, the bytes its
-  field edits, and how far its list is scrolled.
+  field edits, and how far its list is scrolled; `tools_cache`: its rows (a `ToolsCache`,
+  see tools.jl).
 - `dialogs`: the modal stack, bottom first. Only modal dialogs go here: a dialog in the
   stack means "a modal is open" (see `handle_shortcuts!`). Change it with `push_dialog!`
   and `pop_dialog!`. `drawn_dialogs`: each dialog drawn in the last frame with its ImGui
@@ -416,6 +417,7 @@ Base.@kwdef mutable struct UiState
     tools_query::String = ""
     tools_buffer::Vector{UInt8} = zeros(UInt8, FIELD_BYTES)
     tools_scroll::Float32 = 0f0
+    tools_cache::Any = nothing
     dialogs::Vector{Any} = Any[]
     drawn_dialogs::Vector{Tuple{Any,UInt32}} = Tuple{Any,UInt32}[]
     tooltip_since::Float64 = 0.0

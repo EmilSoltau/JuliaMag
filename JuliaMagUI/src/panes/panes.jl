@@ -46,22 +46,27 @@ struct SplitterDrag
 end
 
 """
-    splitter!(app, side, edge, y0, y1) -> Bool
+    splitter!(app, side, edge, y0, y1; shown = nothing) -> Bool
 
 The splitter on the inner edge of the `side` pane (`:left` or `:right`) at device x
 `edge`, from `y0` to `y1`: 6 px wide over the edge, as the prototype's `.splitter`.
 A drag changes the pane width in the settings at once; the release saves the settings.
+It starts from the width the pane is `shown` at, in logical pixels (in a narrow window
+that can be less than the setting), so the edge follows the mouse.
 Returns true while the mouse is on it or drags it; then `paint_splitter` draws its line.
 Submit it before the items it overlaps, so it takes the mouse there.
 """
-function splitter!(app, side::Symbol, edge::Real, y0::Real, y1::Real)::Bool
+function splitter!(app, side::Symbol, edge::Real, y0::Real, y1::Real;
+        shown::Union{Nothing,Real} = nothing)::Bool
     s = app.window.scale
     half = fpx(s, SPLITTER_W / 2)
     _, hovered, held = hit("splitter", Box(edge - half, y0, edge + half, y1))
     field, range, default = pane_setting(side)
     mouse = unsafe_load(ig.GetIO().MousePos)
     if ig.IsItemActivated()
-        app.ui.drag = SplitterDrag(side, pane_width(getfield(app.config, field), range, default), mouse.x)
+        start = shown === nothing ? pane_width(getfield(app.config, field), range, default) :
+            Float32(clamp(shown, range[1], range[2]))
+        app.ui.drag = SplitterDrag(side, start, mouse.x)
     end
     d = app.ui.drag
     if held && d isa SplitterDrag && d.side === side
@@ -164,7 +169,7 @@ function draw_left_pane(app, dl, b::Box)::Bool
     p(v) = px(s, v)
     hl = hairline(s)
     ig.PushID("left")
-    hot = splitter!(app, :left, b.x1, b.y0, b.y1)
+    hot = splitter!(app, :left, b.x1, b.y0, b.y1; shown = width(b) / s)
     ig.AddRectFilled(dl, (b.x0, b.y0), (b.x1, b.y1), u32(t.pane))
     ig.AddRectFilled(dl, (b.x1 - hl, b.y0), (b.x1, b.y1), u32(t.border))
     head = Box(b.x0, b.y0, b.x1 - hl, b.y0 + p(PANE_HEAD_H))
@@ -273,7 +278,7 @@ function draw_right_pane(app, dl, b::Box)::Bool
     f(v) = fpx(s, v)
     hl = hairline(s)
     ig.PushID("right")
-    hot = splitter!(app, :right, b.x0, b.y0, b.y1)
+    hot = splitter!(app, :right, b.x0, b.y0, b.y1; shown = width(b) / s)
     ig.AddRectFilled(dl, (b.x0, b.y0), (b.x1, b.y1), u32(t.pane))
     ig.AddRectFilled(dl, (b.x0, b.y0), (b.x0 + hl, b.y1), u32(t.border))
     head = Box(b.x0 + hl, b.y0, b.x1, b.y0 + p(PANE_HEAD_H))

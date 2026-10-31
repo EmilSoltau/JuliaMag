@@ -34,7 +34,11 @@ end
 Lay out the shell in the window rectangle (device pixels) at content `scale`.
 `left_width` is the left pane width in logical pixels, clamped to $(LEFT_RANGE).
 `right_width` is the right pane width, clamped to $(RIGHT_RANGE), or `nothing` when the
-right pane is hidden. The right pane takes at most what the left pane leaves.
+right pane is hidden.
+
+In a narrow window the panes give way so the centre keeps `CENTER_MIN` px: the right pane
+first, down to its least, then the left. When even that does not fit (900 px at scale 2),
+the panes stay at their least and the centre gets what is left, at least a splitter's width.
 """
 function shell_layout(x::Real, y::Real, w::Real, h::Real, scale::Real, left_width,
         collapsed::Bool; right_width = nothing)::ShellLayout
@@ -45,15 +49,31 @@ function shell_layout(x::Real, y::Real, w::Real, h::Real, scale::Real, left_widt
     ribbon = Box(x0, tabs.y1, x1, tabs.y1 + p(RIBBON_H))
     main_top = collapsed ? tabs.y1 : ribbon.y1
     status = Box(x0, max(main_top, y1 - p(STATUS_H)), x1, y1)
-    lw = min(p(pane_width(left_width, LEFT_RANGE, LEFT_DEFAULT)), Float32(w))
-    left = Box(x0, main_top, x0 + lw, status.y0)
-    right = nothing
-    if right_width !== nothing
-        rw = min(p(pane_width(right_width, RIGHT_RANGE, RIGHT_DEFAULT)), max(x1 - left.x1, 0f0))
-        right = Box(x1 - rw, main_top, x1, status.y0)
-    end
+    lw, rw = pane_widths(Float32(w) / Float32(scale), left_width, right_width)
+    left = Box(x0, main_top, x0 + p(lw), status.y0)
+    right = right_width === nothing ? nothing : Box(x1 - p(rw), main_top, x1, status.y0)
     center = Box(left.x1, main_top, right === nothing ? x1 : right.x0, status.y0)
     return ShellLayout(header, tabs, ribbon, !collapsed, left, center, right, status)
+end
+
+const CENTER_MIN = 160   # the least width the centre keeps between the panes
+
+"""
+    pane_widths(window_width, left_width, right_width) -> (left, right)
+
+The shown widths of the side panes in logical pixels, in a window `window_width` logical
+pixels wide (see `shell_layout`). `right_width` is `nothing` for a hidden right pane (its
+width is then 0).
+"""
+function pane_widths(ww::Real, left_width, right_width)::Tuple{Float32,Float32}
+    lw = pane_width(left_width, LEFT_RANGE, LEFT_DEFAULT)
+    right_width === nothing && return min(lw, max(Float32(LEFT_RANGE[1]), ww - CENTER_MIN), ww), 0f0
+    rw = pane_width(right_width, RIGHT_RANGE, RIGHT_DEFAULT)
+    room = Float32(ww) - CENTER_MIN
+    rw = min(rw, max(Float32(RIGHT_RANGE[1]), room - lw))
+    lw = min(lw, max(Float32(LEFT_RANGE[1]), room - rw))
+    rw = min(rw, max(Float32(ww) - lw - SPLITTER_W, 0f0))   # a tiny window: keep the splitters apart
+    return lw, rw
 end
 
 const HOST_FLAGS = ig.ImGuiWindowFlags_NoDecoration | ig.ImGuiWindowFlags_NoMove |
@@ -117,7 +137,10 @@ function draw_app(app)
     draw_header(app, dl, layout.header)
     draw_tab_strip(app, dl, layout.tabs)
     draw_dialogs(app)
-    isempty(ui.dialogs) && draw_search(app, 0)   # over a dialog, the top dialog draws it
+    # Over a dialog, the top dialog draws the search. A search of level 0 that closed as a
+    # dialog opened needs no cleanup here: the dialog's popup opens at the same level of
+    # ImGui's popup stack, and ImGui closes what was there.
+    isempty(ui.dialogs) && draw_search(app, 0)
     ig.End()
 
     collapsed && ui.ribbon_peek && draw_ribbon_peek(app, layout.ribbon)

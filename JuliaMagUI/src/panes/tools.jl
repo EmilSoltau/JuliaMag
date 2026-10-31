@@ -1,6 +1,7 @@
-# The Tools pane (All Tools): every tool of the core's registry, grouped by ribbon tab, with
-# a search box. A click opens the tool's dialog through its command (an `OpenToolDialog`
-# request).
+# The Tools pane (All Tools): every tool, importer and exporter of the core's registries,
+# grouped by ribbon tab, with a search box. A click runs the row's command: a tool opens its
+# dialog (an `OpenToolDialog` request), an importer asks for a file and then opens its
+# dialog, an exporter opens its dialog.
 
 const TOOLS_HINT = "Find a tool by name or id"
 const TOOLS_NOTE = "Each tool is one Julia function and a description."
@@ -18,21 +19,75 @@ const TOOL_NOTE_SIZE = 11.5f0
 const TOOL_NOTE_PITCH = 1.4f0
 
 """
-    tool_groups(tools, query) -> Vector{Pair{String,Vector{ToolSpec}}}
+    ToolEntry
 
-The tools whose name or id holds `query` (trimmed, any case), grouped by the ribbon tab of
-their first place: the tabs in ribbon order (`FIRST_TABS` first), tools without a place
-last under "$(OTHER_TOOLS)". Each group keeps the registry order. Groups with no tool are left out.
+A row of the Tools pane: the command of a tool, importer or exporter, and whether it runs
+as a background `job` (every import and export does; a tool when its registry mode says so).
 """
-function tool_groups(tools::AbstractVector{Core.ToolSpec}, query::AbstractString)
+struct ToolEntry
+    cmd::Command
+    job::Bool
+end
+
+"""
+    tool_entries(cmds; tools, importers, exporters) -> Vector{ToolEntry}
+
+The rows of the Tools pane from the command list: the importers, the exporters and the
+tools, each in registry order, as the prototype lists a tab (imports, exports, tools).
+The registries default to the core's.
+"""
+function tool_entries(cmds::AbstractVector{Command}; tools = Core.tools(),
+        importers = Core.importers(), exporters = Core.exporters())::Vector{ToolEntry}
+    by_id = Dict(c.id => c for c in cmds)
+    out = ToolEntry[]
+    add(id, job) = (c = get(by_id, id, nothing); c === nothing || push!(out, ToolEntry(c, job)))
+    foreach(i -> add(i.id, true), importers)
+    foreach(e -> add(e.id, true), exporters)
+    foreach(t -> add(t.id, t.mode === :job), tools)
+    return out
+end
+
+"""
+    tool_groups(entries, query) -> Vector{Pair{String,Vector{ToolEntry}}}
+
+The entries whose name or id holds `query` (plain text, trimmed, any case), grouped by the
+ribbon tab of their command's first place: the tabs in ribbon order (`FIRST_TABS` first),
+entries without a place last under "$(OTHER_TOOLS)". Each group keeps the entries' order.
+Groups with no entry are left out.
+"""
+function tool_groups(entries::AbstractVector{ToolEntry}, query::AbstractString)
     q = lowercase(strip(query))
-    tab_of(t) = isempty(t.places) ? OTHER_TOOLS : first(t.places).tab
-    hits = [t for t in tools if isempty(q) || occursin(q, lowercase(t.name)) || occursin(q, lowercase(t.id))]
+    tab_of(e) = isempty(e.cmd.places) ? OTHER_TOOLS : first(e.cmd.places).tab
+    hits = [e for e in entries if isempty(q) || occursin(q, lowercase(plain_name(e.cmd))) ||
+                                  occursin(q, lowercase(e.cmd.id))]
     seen = unique(tab_of.(hits))
     tabs = [x for x in FIRST_TABS if x in seen]
     append!(tabs, x for x in seen if !(x in FIRST_TABS) && x != OTHER_TOOLS)
     OTHER_TOOLS in seen && push!(tabs, OTHER_TOOLS)
-    return [tab => [t for t in hits if tab_of(t) == tab] for tab in tabs]
+    return [tab => [e for e in hits if tab_of(e) == tab] for tab in tabs]
+end
+
+"What `tools_rows!` built, and for what."
+struct ToolsCache
+    commands::Vector{Command}
+    query::String
+    groups::Vector{Pair{String,Vector{ToolEntry}}}
+end
+
+"""
+    tools_rows!(app) -> Vector{Pair{String,Vector{ToolEntry}}}
+
+The Tools pane's groups for its filter. They are kept and built again only when the
+command list (a registry changed, a project opened) or the filter changes.
+"""
+function tools_rows!(app)
+    ui = app.ui
+    cmds = commands(app)
+    c = ui.tools_cache
+    c isa ToolsCache && c.commands === cmds && c.query == ui.tools_query && return c.groups
+    groups = tool_groups(tool_entries(cmds), ui.tools_query)
+    ui.tools_cache = ToolsCache(cmds, ui.tools_query, groups)
+    return groups
 end
 
 """
@@ -41,7 +96,7 @@ end
 The Tools pane in the pane body `body`, as the prototype's `renderToolsPane`: a search box
 (8 px around it, a line under it), the tools under their tab's name, and the note at the
 bottom. A row is 42 high: the 20 px icon, the name in semibold `accent_text` over the mono
-id, and a `job` tag for a tool that runs as a background job.
+id, and a `job` tag for what runs as a background job.
 """
 function draw_tools_pane(app, dl, body::Box)
     ui = app.ui
@@ -73,8 +128,7 @@ function draw_tools_pane(app, dl, body::Box)
     end
     # The list.
     view = Box(body.x0, top.y1, body.x1, max(foot.y0, top.y1))
-    groups = tool_groups(Core.tools(), ui.tools_query)
-    draw_tool_list(app, dl, view, groups)
+    draw_tool_list(app, dl, view, tools_rows!(app))
     ig.PopID()
     return nothing
 end
@@ -96,7 +150,7 @@ function draw_tool_list(app, dl, view::Box, groups)
     right = view.x1 - (bar ? f(SCROLLBAR_W) : 0f0)
     ig.PushClipRect((view.x0, view.y0), (right, view.y1), true)
     y = view.y0 - ui.tools_scroll
-    for (tab, tools) in groups
+    for (tab, entries) in groups
         y += f(TOOL_SECT_GAP)
         sect = Box(view.x0, y, right, y + f(TOOL_SECT_H))
         y = sect.y1
@@ -104,28 +158,27 @@ function draw_tool_list(app, dl, view::Box, groups)
             draw_spaced_text(dl, FONT_SEMIBOLD, 11, sect.x0 + f(10), centre_y(sect), u32(t.text_dim),
                 uppercase(tab), f(11 * 0.02))
         end
-        for tool in tools
+        for e in entries
             row = Box(view.x0, y, right, y + f(TOOL_ROW_H))
             y = row.y1
             (row.y1 <= view.y0 || row.y0 >= view.y1) && continue
-            draw_tool_row(app, dl, row, tool)
+            draw_tool_row(app, dl, row, e)
         end
     end
     ig.PopClipRect()
     return nothing
 end
 
-# One tool row, as the prototype's `.toolrow`. A click runs the tool's command; when it
-# cannot run now, a toast says why.
-function draw_tool_row(app, dl, row::Box, tool::Core.ToolSpec)
+# One row, as the prototype's `.toolrow`. A click runs the command; when it cannot run now,
+# a toast says why.
+function draw_tool_row(app, dl, row::Box, e::ToolEntry)
     s = app.window.scale
     t = app.tokens
     f(v) = fpx(s, v)
     hl = hairline(s)
-    cmd = find_command(app, tool.id)
-    cmd === nothing && return nothing
+    cmd = e.cmd
     reason = cmd.enabled(app)
-    clicked, hovered, held = hit(tool.id, row)
+    clicked, hovered, held = hit(cmd.id, row)
     hovered && ig.AddRectFilled(dl, (row.x0 + f(4), row.y0 + f(1)), (row.x1 - f(4), row.y1 - f(1)),
         u32(held ? t.pressed : t.hover), f(5))
     mid = centre_y(row)
@@ -133,7 +186,7 @@ function draw_tool_row(app, dl, row::Box, tool::Core.ToolSpec)
     draw_icon(dl, cmd.icon, (rnd(x), rnd(mid - f(10))), 20; style = reason === nothing ? :normal : :disabled)
     x += f(20 + 10)
     right = row.x1 - f(12)
-    if tool.mode === :job   # the `.later` tag, in `accent_text`
+    if e.job   # the `.later` tag, in `accent_text`
         tag = "job"
         tw = text_width(FONT_REGULAR, 10, tag)
         tb = snap(Box(right - tw - f(8) - 2 * hl, mid - f(8), right, mid + f(8)))
@@ -148,7 +201,7 @@ function draw_tool_row(app, dl, row::Box, tool::Core.ToolSpec)
     name = elide(text_width, plain_name(cmd), right - x; role = FONT_SEMIBOLD)
     draw_text_mid(dl, FONT_SEMIBOLD, BODY_FONT_SIZE, x, top + name_h / 2,
         u32(reason === nothing ? t.accent_text : t.text_disabled), name)
-    id = elide(text_width, tool.id, right - x; role = FONT_MONO, size = 11)
+    id = elide(text_width, cmd.id, right - x; role = FONT_MONO, size = 11)
     draw_text_mid(dl, FONT_MONO, 11, x, top + name_h + f(1) + id_h / 2, u32(t.text_dim), id)
     hovered && command_tip!(app, cmd)
     if clicked

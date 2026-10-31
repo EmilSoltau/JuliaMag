@@ -117,6 +117,8 @@ read this list.
 - `run(app)`: acts at once or pushes a request. `checked(app)`: the state of a toggle.
 - `searchable`: shown in the command search; `menu`: ids of the commands in the menu of a split button.
 - `menu_label`: the text in such a menu, such as `"Geosoft XYZ..."` for `"Import Geosoft XYZ..."`.
+- `changes_project`: it changes the project at once (Undo, line selection), or switches or
+  closes it. Such a command waits while a dialog is open (see `search_reason`).
 """
 struct Command
     id::String
@@ -132,6 +134,7 @@ struct Command
     searchable::Bool
     menu::Vector{String}
     menu_label::String
+    changes_project::Bool
 end
 
 function Command(id::AbstractString, name::AbstractString, run::Function;
@@ -139,10 +142,11 @@ function Command(id::AbstractString, name::AbstractString, run::Function;
         help::AbstractString = "", places::AbstractVector{Core.Place} = Core.Place[],
         shortcut::AbstractString = "", enabled::Function = app -> nothing,
         checked::Function = app -> false, searchable::Bool = true,
-        menu::AbstractVector{<:AbstractString} = String[], menu_label::AbstractString = name)
+        menu::AbstractVector{<:AbstractString} = String[], menu_label::AbstractString = name,
+        changes_project::Bool = false)
     return Command(String(id), String(name), String(label), String(icon), String(help),
         Vector{Core.Place}(places), String(shortcut), enabled, run, checked, searchable,
-        Vector{String}(menu), String(menu_label))
+        Vector{String}(menu), String(menu_label), changes_project)
 end
 
 const SMALL_WORDS = ("and", "of", "to", "the", "a", "in", "on", "or", "for")
@@ -370,20 +374,26 @@ theme_command(id, name, mode, icon, help) =
 function shell_commands()::Vector{Command}
     c = Command[]
     push!(c, Command("project.backstage", "Project", app -> request!(app, OpenBackstage(:start));
-        icon = "folder", help = "Open the Project page."))
+        icon = "folder", help = "Open the Project page.",
+        changes_project = true))
     push!(c, Command("project.new", "New Project...", app -> request!(app, OpenBackstage(:new));
-        icon = "new", help = "Make a new project.", shortcut = "Ctrl+N"))
+        icon = "new", help = "Make a new project.", shortcut = "Ctrl+N",
+        changes_project = true))
     push!(c, Command("project.open", "Open Project...", app -> request!(app, OpenBackstage(:open));
-        icon = "open", help = "Open a project folder.", shortcut = "Ctrl+O"))
+        icon = "open", help = "Open a project folder.", shortcut = "Ctrl+O",
+        changes_project = true))
     push!(c, Command("project.close", "Close Project", app -> request!(app, CloseProject());
-        icon = "close", help = "Close the project.", enabled = app -> has_session(app) ? nothing : NEED_PROJECT))
+        icon = "close", help = "Close the project.", enabled = app -> has_session(app) ? nothing : NEED_PROJECT,
+        changes_project = true))
     push!(c, Command("session.undo", "Undo", app -> run_undo(app, false);
         icon = "undo", help = "Undo the last change.", shortcut = "Ctrl+Z",
-        enabled = app -> undo_enabled(app, false)))
+        enabled = app -> undo_enabled(app, false),
+        changes_project = true))
     push!(c, Command("session.redo", "Redo", app -> run_undo(app, true);
         icon = "redo", help = "Redo the change that was undone.", shortcut = "Ctrl+Y",
-        enabled = app -> undo_enabled(app, true)))
-    push!(c, Command("ui.command_search", "Command Search", open_search!;
+        enabled = app -> undo_enabled(app, true),
+        changes_project = true))
+    push!(c, Command("ui.command_search", "Command Search", app -> open_search!(app);
         icon = "search", help = "Find a command by name.", shortcut = "Ctrl+K",
         places = [Core.Place("Help", "Help")]))
     push!(c, Command("ui.ribbon", "Collapse Ribbon", toggle_ribbon!;
@@ -410,15 +420,21 @@ function shell_commands()::Vector{Command}
         places = [Core.Place("Help", "About")]))
     push!(c, Command("database.select_all_lines", "Select All Lines", app -> select_lines(app, true);
         label = "Select All", icon = "selAll", help = "Select every line of the current database.",
-        places = [Core.Place("Database", "Lines"; size = :small, order = 10)], enabled = lines_enabled))
+        places = [Core.Place("Database", "Lines"; size = :small, order = 10)], enabled = lines_enabled,
+        changes_project = true))
     push!(c, Command("database.select_no_lines", "Select No Lines", app -> select_lines(app, false);
         label = "Select None", icon = "selNone", help = "Deselect every line of the current database.",
-        places = [Core.Place("Database", "Lines"; size = :small, order = 11)], enabled = lines_enabled))
+        places = [Core.Place("Database", "Lines"; size = :small, order = 11)], enabled = lines_enabled,
+        changes_project = true))
     push!(c, Command("database.choose", "Choose Database", app -> nothing;
         label = "Acts on", icon = "database", help = "The database the Database tab acts on.",
         places = [Core.Place("Database", "Database"; order = -100)], searchable = false))
     return c
 end
+
+# The ids of the shell's own commands, in the prototype's order: the command search lists
+# them first.
+const SHELL_COMMAND_IDS = Set(c.id for c in shell_commands())
 
 # --- The list ---
 

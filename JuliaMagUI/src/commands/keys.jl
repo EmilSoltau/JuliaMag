@@ -197,6 +197,6 @@ function draw_shortcut_rows(app, rows::Vector{ShortcutRow})
             y + f(BODY_FONT_SIZE * 1.25f0) / 2, u32(t.text), r.text)
     end
     h = length(rows) * f(SHORTCUT_ROW_H) + (length(rows) - 1) * f(SHORTCUT_GAP[1])
-    ig.Dummy((Float32(ig.CalcItemWidth()), h))
+    ig.Dummy((0f0, h))   # only its height counts: the dialog sets the width
     return nothing
 end

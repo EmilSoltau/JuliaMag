@@ -45,21 +45,25 @@ end
     search_commands(cmds, query; limit = $SEARCH_LIMIT, enabled = c -> true) -> Vector{Command}
 
 The searchable commands that match `query`, best first (see `search_score`). The query is
-trimmed and case does not matter; an empty one lists every searchable command. Commands of
-the same score keep their order in `cmds`, except that those for which `enabled(c)` is false
-come after the others. At most `limit` commands.
+trimmed, it is plain text (not a pattern) and case does not matter, also outside ASCII; an
+empty one lists every searchable command.
+
+Commands of the same score keep this order: those for which `enabled(c)` is true first,
+then the shell's own commands (`SHELL_COMMAND_IDS`, in the prototype's order: Project, New
+Project, Open Project, Undo, ...), then the others, each in their order in `cmds`.
+At most `limit` commands; a negative limit gives none.
 """
 function search_commands(cmds::AbstractVector{Command}, query::AbstractString;
         limit::Integer = SEARCH_LIMIT, enabled = c -> true)::Vector{Command}
     q = lowercase(strip(query))
-    found = Tuple{Int,Bool,Int}[]
+    found = Tuple{Int,Bool,Bool,Int}[]
     for (i, c) in enumerate(cmds)
         c.searchable || continue
         score = search_score(c, q)
-        score > 0 && push!(found, (-score, !enabled(c), i))
+        score > 0 && push!(found, (-score, !enabled(c), !(c.id in SHELL_COMMAND_IDS), i))
     end
     sort!(found)
-    return Command[cmds[i] for (_, _, i) in first(found, limit)]
+    return Command[cmds[i] for (_, _, _, i) in first(found, max(Int(limit), 0))]
 end
 
 # --- State ---
@@ -102,6 +106,21 @@ end
 "Does an open dialog or the command search hold the keys, so most shortcuts wait?"
 blocks_shortcuts(app) = !isempty(app.ui.dialogs) || app.ui.search !== nothing
 
+const WAIT_FOR_DIALOG = "Close the dialog first."
+
+"""
+    search_reason(app, c) -> Union{Nothing,String}
+
+Why command `c` cannot run from the search now, or `nothing`. While a dialog is open, a
+command that changes the project at once, or switches or closes it (`changes_project`),
+waits: "$(WAIT_FOR_DIALOG)". The dialog must not act on a project that changed under it.
+Commands that open a dialog on top or change only the view still run.
+"""
+function search_reason(app, c::Command)::Union{Nothing,String}
+    c.changes_project && !isempty(app.ui.dialogs) && return WAIT_FOR_DIALOG
+    return c.enabled(app)
+end
+
 "What `search_hits!` found last, and for what."
 struct SearchCache
     query::String
@@ -114,17 +133,24 @@ end
     search_hits!(app) -> Vector{Command}
 
 The results of the open search. They are kept and found again only when the query, the
-command list or a command's enabled state changes.
+command list or whether a command can run (`search_reason`) changes. When the order changes
+for the same query, the highlight stays on the same command.
 """
 function search_hits!(app)::Vector{Command}
     ui = app.ui
     q = something(ui.search, "")
     cmds = commands(app)
-    on = BitVector(c.enabled(app) === nothing for c in cmds)
+    on = BitVector(search_reason(app, c) === nothing for c in cmds)
     c = ui.search_cache
     c isa SearchCache && c.query == q && c.commands === cmds && c.enabled == on && return c.hits
     index = Dict(cmd.id => k for (k, cmd) in enumerate(cmds))
     hits = search_commands(cmds, q; enabled = cmd -> on[index[cmd.id]])
+    if c isa SearchCache && c.query == q && 1 <= ui.search_index <= length(c.hits)
+        lit = c.hits[ui.search_index].id
+        k = findfirst(h -> h.id == lit, hits)
+        k === nothing || (ui.search_index = k)
+    end
+    ui.search_index = clamp(ui.search_index, 1, max(length(hits), 1))
     ui.search_cache = SearchCache(q, cmds, on, hits)
     return hits
 end
@@ -132,11 +158,12 @@ end
 """
     run_search_hit!(app, c)
 
-Close the search and run command `c`, or, when it cannot run now, show why as a toast.
+Close the search and run command `c`, or, when it cannot run now (`search_reason`), show
+why as a toast.
 """
 function run_search_hit!(app, c::Command)
+    reason = search_reason(app, c)
     close_search!(app)
-    reason = c.enabled(app)
     reason === nothing ? guarded(app, c.run) : toast!(app, :info, reason)
     return nothing
 end
@@ -297,9 +324,8 @@ function draw_search_body(app, l::SearchLayout, hits::Vector{Command}, view::Box
         reveal_search_row!(app, l.list, n)
     end
     enter = ig.IsKeyPressed(lib.ImGuiKey_Enter, false) || ig.IsKeyPressed(lib.ImGuiKey_KeypadEnter, false)
-    if chosen === nothing && enter
-        n > 0 ? (chosen = hits[ui.search_index]) : close_search!(app)
-    end
+    # With no match, Enter does nothing: the search stays open to fix a typo.
+    chosen === nothing && enter && n > 0 && (chosen = hits[ui.search_index])
     mouse = unsafe_load(ig.GetIO().MousePos)
     if chosen === nothing && (ig.IsKeyPressed(lib.ImGuiKey_Escape, false) ||
             (ig.IsMouseClicked(0) && !inside(b, mouse.x, mouse.y)))
@@ -367,7 +393,7 @@ function draw_search_row(app, dl, row::Box, c::Command)
     s = app.window.scale
     t = app.tokens
     f(v) = fpx(s, v)
-    enabled = c.enabled(app) === nothing
+    enabled = search_reason(app, c) === nothing
     mid = centre_y(row)
     x = row.x0 + f(8)
     draw_icon(dl, c.icon, (rnd(x), rnd(mid - f(8))), 16; style = enabled ? :normal : :disabled)

@@ -69,6 +69,8 @@ window_testset("command search") do
             ctx.key("Down")
             @test app.ui.search_index == k - 1
             # A click runs the row's command and closes the search.
+            ctx.type("ribbon")
+            ctx.frames(2)
             ctx.click(search_ref("ui.ribbon"))
             ctx.frames(2)
             @test app.ui.search === nothing && app.config.ribbon_collapsed
@@ -83,14 +85,47 @@ window_testset("command search") do
             te.MouseMoveToPos((200, 700)); te.MouseClick(0)
             ctx.frames(2)
             @test app.ui.search === nothing && !app.config.ribbon_collapsed
-            # Typing with no match shows the empty text; Enter then does nothing.
+            # Typing with no match shows the empty text; Enter keeps the search open, so a
+            # typo can be fixed.
             ctx.key("Ctrl+K"); ctx.frames(2)
             ctx.type("zzzz")
             ctx.frames(2)
             @test isempty(UI.search_hits!(app))
             ctx.key("Enter")
             ctx.frames(2)
-            @test app.ui.search === nothing && isempty(app.ui.dialogs)
+            @test app.ui.search == "zzzz" && isempty(app.ui.dialogs)
+            # Ctrl+Z in the search field undoes its typing, never the project.
+            ctx.key("Ctrl+Z")
+            ctx.frames(2)
+            @test app.ui.search == "zzz" && app.queue.pending == 0 && app.snap.undo_label === nothing
+            ctx.key("Escape")
+            ctx.frames(2)
+            @test app.ui.search === nothing
+        end
+    end
+
+    @testset "Ctrl+K from a text field of a tool dialog" begin
+        with_project_app(kangaroo()) do ctx, app
+            ctx.click("JuliaMag/tabs/Database Tools")
+            ctx.click("JuliaMag/ribbon/Channel Math")
+            ctx.wait_until(() -> last_dialog(app) isa ToolDialog; timeout = 5)
+            ctx.frames(2)
+            ref = "//" * UI.dialog_ref(1) * "/##expr"
+            te.ItemClick(ref); te.KeyCharsReplace("C3 = C1")
+            ctx.frames(1)
+            expr() = UI.field_text(last_dialog(app).buffers["expr"])
+            @test expr() == "C3 = C1"
+            ctx.key("Ctrl+K")
+            ctx.frames(2)
+            @test app.ui.search == "" && app.ui.search_level == 1
+            ctx.type("theme")   # the keys go to the search, not to the dialog's field
+            ctx.frames(2)
+            @test app.ui.search == "theme" && expr() == "C3 = C1"
+            ctx.key("Escape")
+            ctx.frames(2)
+            @test app.ui.search === nothing && last_dialog(app) isa ToolDialog && expr() == "C3 = C1"
+            ctx.key("Escape")
+            ctx.wait_until(() -> isempty(app.ui.dialogs))
         end
     end
 
@@ -139,6 +174,16 @@ window_testset("command search") do
             @test te.ItemExists("//" * UI.dialog_ref(2) * "/Close")
             ctx.key("Escape")
             ctx.wait_until(() -> length(app.ui.dialogs) == 1)
+            # Over a dialog, a command that changes the project only says why it waits.
+            UI.submit!(app, "Rename", s -> Core.rename_item!(s, app.ui.current_db, "Survey C"))
+            ctx.wait_until(() -> app.snap.undo_label !== nothing)
+            ctx.key("Ctrl+K"); ctx.frames(2)
+            ctx.type("undo"); ctx.frames(2)
+            @test first(UI.search_hits!(app)).id == "session.undo"
+            ctx.key("Enter")
+            ctx.frames(3)
+            @test last(app.toasts).text == "Close the dialog first."
+            @test UI.item_name(app.snap, app.ui.current_db) == "Survey C" && length(app.ui.dialogs) == 1
             ctx.key("Escape")
             ctx.wait_until(() -> isempty(app.ui.dialogs))
         end
@@ -182,16 +227,36 @@ window_testset("command search") do
         end
     end
 
-    @testset "the Tools pane lists every tool; a click opens its dialog" begin
+    @testset "the Tools pane lists every tool, import and export; a click opens it" begin
         with_project_app(kangaroo()) do ctx, app
             @test !te.ItemExists("JuliaMag/right/Close all panes")
             ctx.click("JuliaMag/tabs/Database Tools")
             ctx.click("JuliaMag/ribbon/All Tools")
             ctx.frames(2)
             @test app.ui.right_tabs == [:tools]
-            for t in Core.tools()
-                @test te.ItemExists("JuliaMag/right/tools/" * t.id)
+            # Every row, found by its id in the pane's search (the list need not fit in view).
+            ids = [[t.id for t in Core.tools()]; [i.id for i in Core.importers()]; [e.id for e in Core.exporters()]]
+            for id in ids
+                ctx.type("JuliaMag/right/tools/##find", id)
+                ctx.frames(2)
+                @test te.ItemExists("JuliaMag/right/tools/" * id)
             end
+            ctx.type("JuliaMag/right/tools/##find", "")
+            ctx.frames(2)
+            # An importer asks for a file, then opens its import dialog.
+            path = small_xyz()
+            app.pick_file = (; kw...) -> path
+            ctx.click("JuliaMag/right/tools/import.geosoft_xyz")
+            ctx.wait_until(() -> last_dialog(app) isa ToolDialog; timeout = 5)
+            @test last_dialog(app).form.owner.id == "import.geosoft_xyz" && last_dialog(app).form.path == path
+            ctx.key("Escape")
+            ctx.wait_until(() -> isempty(app.ui.dialogs))
+            # An exporter opens its export dialog for the current database.
+            ctx.click("JuliaMag/right/tools/export.csv")
+            ctx.wait_until(() -> last_dialog(app) isa ToolDialog; timeout = 5)
+            @test last_dialog(app).form.owner.id == "export.csv"
+            ctx.key("Escape")
+            ctx.wait_until(() -> isempty(app.ui.dialogs))
             ctx.click("JuliaMag/right/tools/database.statistics")
             ctx.wait_until(() -> last_dialog(app) isa ToolDialog; timeout = 5)
             @test last_dialog(app).form.owner.id == "database.statistics"
@@ -226,6 +291,32 @@ window_testset("command search") do
             ctx.click("JuliaMag/right/Close all panes")
             ctx.frames(3)
             @test isempty(app.ui.right_tabs)
+        end
+    end
+
+    @testset "the smallest window: both panes at 480 keep the centre and their splitters" begin
+        dir = mktempdir()
+        config, _ = UI.load_config(dir)
+        config.left_width = 480; config.right_width = 480
+        UI.save_config(config, dir)
+        with_test_app(; size = (900, 560), config_dir = dir) do ctx
+            app = ctx.app_state()
+            UI.run_command!(app, "ui.tools_pane")
+            ctx.frames(3)
+            @test app.ui.right_tabs == [:tools]
+            # The right pane gave way to 260 px, so the centre keeps its 160.
+            @test te.ItemInfo("JuliaMag/right/Close all panes").RectFull.Max.x == 900 - 6
+            @test round(Int, te.ItemInfo("JuliaMag/right/splitter").RectFull.Min.x) == 640 - 3
+            # The left splitter drags from where it is shown.
+            te.MouseMove("JuliaMag/left/splitter")
+            te.MouseDragWithDelta((-50, 0))
+            ctx.frames(2)
+            @test app.config.left_width == 430f0
+            # The right one too: it is not under the left one.
+            te.MouseMove("JuliaMag/right/splitter")
+            te.MouseDragWithDelta((20, 0))
+            ctx.frames(2)
+            @test app.config.right_width == 290f0   # shown 310 (900 - 430 - 160), less 20
         end
     end
 
