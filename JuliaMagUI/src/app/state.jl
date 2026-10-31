@@ -337,7 +337,8 @@ What the UI shows and where, apart from the project data. Changed on the render 
 
 - `tab`: the ribbon tab; `backstage`, `backstage_page`: the Project page and its page;
   `ribbon_peek`: a collapsed ribbon shown for a moment.
-- `left_tab`: `:data` or `:jobs`; `right_tabs`, `right_active`: the open right panes.
+- `left_tab`: `:data` or `:jobs`; `right_tabs`, `right_active`: the open right panes (such
+  as `:tools`) in the order they opened, and the one shown (`:none` when none is open).
 - `current_db`: the database item the Database tab acts on, or `""`.
 - `selected`: `(kind, item id, sub key)` of the selection in the Data tree, where the sub
   key is a line or channel name or `""`; or `nothing`.
@@ -351,7 +352,12 @@ What the UI shows and where, apart from the project data. Changed on the render 
 - `tree_drawn`: how many tree rows the last frame drew (tests read it).
 - `drag`: the splitter being dragged (a `SplitterDrag`, see panes.jl), or `nothing`.
 - `search`: the command search text while it is open, else `nothing`; `search_index`: its
-  highlighted row.
+  highlighted row (1 is the first). `search_buffer`: the bytes its text field edits;
+  `search_level`: the number of dialogs open under it; `search_scroll`: how far its list is
+  scrolled, in device pixels; `search_focus`: give its text field the focus in the next frame;
+  `search_cache`: its last results (a `SearchCache`, see search.jl).
+- `tools_query`, `tools_buffer`, `tools_scroll`: the Tools pane's search text, the bytes its
+  field edits, and how far its list is scrolled.
 - `dialogs`: the modal stack, bottom first. Only modal dialogs go here: a dialog in the
   stack means "a modal is open" (see `handle_shortcuts!`). Change it with `push_dialog!`
   and `pop_dialog!`. `drawn_dialogs`: each dialog drawn in the last frame with its ImGui
@@ -401,7 +407,15 @@ Base.@kwdef mutable struct UiState
     tree_drawn::Int = 0
     drag::Any = nothing
     search::Union{Nothing,String} = nothing
-    search_index::Int = 0
+    search_index::Int = 1
+    search_buffer::Vector{UInt8} = zeros(UInt8, FIELD_BYTES)
+    search_level::Int = 0
+    search_scroll::Float32 = 0f0
+    search_focus::Bool = false
+    search_cache::Any = nothing
+    tools_query::String = ""
+    tools_buffer::Vector{UInt8} = zeros(UInt8, FIELD_BYTES)
+    tools_scroll::Float32 = 0f0
     dialogs::Vector{Any} = Any[]
     drawn_dialogs::Vector{Tuple{Any,UInt32}} = Tuple{Any,UInt32}[]
     tooltip_since::Float64 = 0.0

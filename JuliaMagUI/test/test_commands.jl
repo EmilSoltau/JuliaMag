@@ -117,7 +117,7 @@ UI.handle_request!(app, ::SwitchProjectRequest) = (UI.set_session!(app, nothing)
 
     @testset "handle_requests! drops what nobody handles" begin
         with_app(test_app_state(nothing)) do app
-            push!(app.ui.requests, UnknownRequest(), UI.OpenPane(:jobs))
+            push!(app.ui.requests, UnknownRequest(), UI.OpenPane(:nothing_here))
             @test_logs (:debug, "No handler for this request, dropped") (:debug, "No handler for this request, dropped") min_level = Base.CoreLogging.Debug UI.handle_requests!(app)
             @test isempty(app.ui.requests)
             UI.handle_requests!(app)   # empty list: nothing happens

@@ -1,7 +1,7 @@
 # The app frame: one full-window ImGui window that holds the header, the tab strip, the
-# ribbon band, the main row (left pane, central area) and the status bar. The panes are in
-# panes/. Dialogs, the ribbon peek, the open menu, toasts and the tooltip come after it,
-# in that order.
+# ribbon band, the main row (left pane, central area, right pane) and the status bar. The
+# panes are in panes/. Dialogs, the command search, the ribbon peek, the open menu, toasts
+# and the tooltip come after it, in that order.
 
 # Heights and widths of the shell, in logical pixels (prototype CSS).
 const HEADER_H = 34
@@ -15,7 +15,7 @@ const TOOLTIP_DELAY = 0.48   # s
 
 Where the parts of the shell go, in device pixels. `ribbon` is the ribbon band; it is
 `docked` under the tab strip, or else floats over the main row (the peek of a collapsed
-ribbon).
+ribbon). `right` is the right pane, or `nothing` when it is hidden.
 """
 struct ShellLayout
     header::Box
@@ -24,17 +24,20 @@ struct ShellLayout
     docked::Bool
     left::Box
     center::Box
+    right::Union{Nothing,Box}
     status::Box
 end
 
 """
-    shell_layout(x, y, width, height, scale, left_width, collapsed) -> ShellLayout
+    shell_layout(x, y, width, height, scale, left_width, collapsed; right_width = nothing) -> ShellLayout
 
 Lay out the shell in the window rectangle (device pixels) at content `scale`.
 `left_width` is the left pane width in logical pixels, clamped to $(LEFT_RANGE).
+`right_width` is the right pane width, clamped to $(RIGHT_RANGE), or `nothing` when the
+right pane is hidden. The right pane takes at most what the left pane leaves.
 """
 function shell_layout(x::Real, y::Real, w::Real, h::Real, scale::Real, left_width,
-        collapsed::Bool)::ShellLayout
+        collapsed::Bool; right_width = nothing)::ShellLayout
     p(v) = px(scale, v)
     x0, y0, x1, y1 = Float32(x), Float32(y), Float32(x + w), Float32(y + h)
     header = Box(x0, y0, x1, y0 + p(HEADER_H))
@@ -44,8 +47,13 @@ function shell_layout(x::Real, y::Real, w::Real, h::Real, scale::Real, left_widt
     status = Box(x0, max(main_top, y1 - p(STATUS_H)), x1, y1)
     lw = min(p(pane_width(left_width, LEFT_RANGE, LEFT_DEFAULT)), Float32(w))
     left = Box(x0, main_top, x0 + lw, status.y0)
-    center = Box(left.x1, main_top, x1, status.y0)
-    return ShellLayout(header, tabs, ribbon, !collapsed, left, center, status)
+    right = nothing
+    if right_width !== nothing
+        rw = min(p(pane_width(right_width, RIGHT_RANGE, RIGHT_DEFAULT)), max(x1 - left.x1, 0f0))
+        right = Box(x1 - rw, main_top, x1, status.y0)
+    end
+    center = Box(left.x1, main_top, right === nothing ? x1 : right.x0, status.y0)
+    return ShellLayout(header, tabs, ribbon, !collapsed, left, center, right, status)
 end
 
 const HOST_FLAGS = ig.ImGuiWindowFlags_NoDecoration | ig.ImGuiWindowFlags_NoMove |
@@ -60,8 +68,8 @@ const PEEK_FLAGS = ig.ImGuiWindowFlags_NoDecoration | ig.ImGuiWindowFlags_NoMove
 """
     draw_app(app)
 
-Draw one frame of the app: the shell, then the dialogs, the ribbon peek, the open menu,
-the toasts and the tooltip. It handles the requests of the last frame first, then makes
+Draw one frame of the app: the shell, then the dialogs, the command search, the ribbon
+peek, the open menu, the toasts and the tooltip. It handles the requests of the last frame first, then makes
 the toasts of jobs that ended (`watch_jobs!`), and the shortcuts last.
 Call it on the render thread once per frame, after `drain!` and `refresh!`.
 """
@@ -75,13 +83,16 @@ function draw_app(app)
     begin_menu_frame!(app)
     ui.tip = nothing
     ui.tip_hovered = false
+    sync_search!(app)
     modal = !isempty(ui.dialogs)
+    searching = ui.search !== nothing
     collapsed = app.config.ribbon_collapsed
     collapsed || (ui.ribbon_peek = false)
 
     vp = unsafe_load(ig.GetMainViewport())
     layout = shell_layout(vp.Pos.x, vp.Pos.y, vp.Size.x, vp.Size.y, w.scale,
-        app.config.left_width, collapsed)
+        app.config.left_width, collapsed;
+        right_width = isempty(ui.right_tabs) ? nothing : app.config.right_width)
     ig.SetNextWindowPos(vp.Pos)
     ig.SetNextWindowSize(vp.Size)
     ig.PushStyleVar(ig.ImGuiStyleVar_WindowPadding, (0, 0))
@@ -91,13 +102,22 @@ function draw_app(app)
     ig.PopStyleVar(3)
     dl = ig.GetWindowDrawList()
     hot = draw_left_pane(app, dl, layout.left)
-    draw_central(app, dl, layout.center)
+    # The right pane before the central area, so its items and its splitter take the mouse
+    # where the central area's would spill under them in a narrow window.
+    r = layout.right
+    hot_right = r !== nothing && draw_right_pane(app, dl, r)
+    c = layout.center
+    ig.PushClipRect((c.x0, c.y0), (c.x1, c.y1), true)   # its drawing and its mouse
+    draw_central(app, dl, c)
+    ig.PopClipRect()
     hot && paint_splitter(app, dl, layout.left.x1, layout.left.y0, layout.left.y1)
+    hot_right && paint_splitter(app, dl, r.x0, r.y0, r.y1)
     draw_status_bar(app, dl, layout.status)
     layout.docked && draw_ribbon_band(app, dl, layout.ribbon)
     draw_header(app, dl, layout.header)
     draw_tab_strip(app, dl, layout.tabs)
     draw_dialogs(app)
+    isempty(ui.dialogs) && draw_search(app, 0)   # over a dialog, the top dialog draws it
     ig.End()
 
     collapsed && ui.ribbon_peek && draw_ribbon_peek(app, layout.ribbon)
@@ -111,7 +131,8 @@ function draw_app(app)
                 !inside(layout.ribbon, mouse.x, mouse.y)
             ui.ribbon_peek = false
         end
-        !modal && !had_menu && ig.IsKeyPressed(lib.ImGuiKey_Escape, false) && (ui.ribbon_peek = false)
+        !modal && !searching && !had_menu && ig.IsKeyPressed(lib.ImGuiKey_Escape, false) &&
+            (ui.ribbon_peek = false)
     end
     draw_toasts(app)
     handle_shortcuts!(app)

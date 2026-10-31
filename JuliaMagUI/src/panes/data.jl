@@ -712,7 +712,8 @@ end
 # The arrow keys, Enter and the menu key, while the tree has the focus.
 function tree_keys!(app, rows::Vector{TreeRow}, sel::Union{Nothing,Int}, view::Box)
     ui = app.ui
-    (ui.tree_focused && isempty(ui.dialogs) && ui.menu === nothing) || return nothing
+    (ui.tree_focused && isempty(ui.dialogs) && ui.menu === nothing && ui.search === nothing) ||
+        return nothing
     unsafe_load(ig.GetIO()).WantTextInput && return nothing
     io = unsafe_load(ig.GetIO())
     pressed(k) = ig.IsKeyPressed(k, true)
@@ -910,9 +911,8 @@ end
     draw_filter(app, dl, foot)
 
 The filter box at the bottom of the Data tab, as the prototype's `.foot .search`: a 1 px
-line on top, then 8 px padding around a 28 px box (`input`, 1 px `border`, radius 6) with
-the search icon and the text field "Filter items, lines and channels". Typing filters the
-tree; Esc clears it. While the field has the focus its border is a 2 px `accent` ring.
+line on top, then 8 px padding around a 28 px `search_box!` with the text field "Filter
+items, lines and channels". Typing filters the tree; Esc clears it.
 """
 function draw_filter(app, dl, foot::Box)
     s = app.window.scale
@@ -923,25 +923,11 @@ function draw_filter(app, dl, foot::Box)
     ig.AddRectFilled(dl, (foot.x0, foot.y0), (foot.x1, foot.y1), u32(t.pane))
     ig.AddRectFilled(dl, (foot.x0, foot.y0), (foot.x1, foot.y0 + hl), u32(t.border))
     box = snap(Box(foot.x0 + f(8), foot.y0 + hl + f(8), foot.x1 - f(8), foot.y0 + hl + f(8 + 28)))
-    ig.AddRectFilled(dl, (box.x0, box.y0), (box.x1, box.y1), u32(t.input), f(6))
-    icon_x = box.x0 + hl + f(7)
-    draw_icon(dl, "search", (rnd(icon_x), rnd(centre_y(box) - f(7.5))), 15; style = :dim)
-    field = Box(icon_x + f(15 + 6), box.y0 + hl, box.x1 - hl - f(8), box.y1 - hl)
-    changed, active = text_input!(app, "##Filter", ui.filter_buffer, field;
+    text, _ = search_box!(app, dl, box, "##Filter", ui.filter_buffer, FILTER_HINT;
         flags = Int(lib.ImGuiInputTextFlags_EscapeClearsAll))
-    text = field_text(ui.filter_buffer)
     if text != ui.filter
         ui.filter = text
         ui.tree_scroll = 0f0
     end
-    isempty(text) && draw_text_mid(dl, FONT_REGULAR, BODY_FONT_SIZE, field.x0, centre_y(field),
-        u32(t.text_dim), elide(text_width, FILTER_HINT, width(field)))
-    if active
-        ig.AddRect(dl, (box.x0 - hl / 2, box.y0 - hl / 2), (box.x1 + hl / 2, box.y1 + hl / 2),
-            u32(t.accent), f(6) + hl / 2, 2 * hl)
-    else
-        ig.AddRect(dl, (box.x0, box.y0), (box.x1, box.y1), u32(t.border), f(6), hl)
-    end
-    changed && request_frames!(app.window::Window)
     return nothing
 end

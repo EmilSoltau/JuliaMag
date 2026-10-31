@@ -397,3 +397,32 @@ function icon_button(app, id::AbstractString, icon::AbstractString, b::Box; size
         style = enabled ? style : :disabled, alpha)
     return clicked && enabled, hovered
 end
+
+"""
+    kbd_width(app, key) -> Float32
+
+The width of `draw_kbd` for `key`, in device pixels.
+"""
+kbd_width(app, key::AbstractString) =
+    text_width(FONT_MONO, 11, key) + fpx(app.window.scale, 10) + 2 * hairline(app.window.scale)
+
+"""
+    draw_kbd(app, dl, x, mid, key) -> Float32
+
+A key cap, as the prototype's `.kbd`, from `x` and centred on `mid`: mono 11 `text_dim` on
+`pane`, padding 5, a 1 px `border_strong` frame that is 2 px at the bottom, radius 4, 19 high.
+Returns its width.
+"""
+function draw_kbd(app, dl, x::Real, mid::Real, key::AbstractString)::Float32
+    s = app.window.scale
+    t = app.tokens
+    f(v) = fpx(s, v)
+    hl = hairline(s)
+    w = kbd_width(app, key)
+    b = snap(Box(x, mid - f(19) / 2, x + w, mid + f(19) / 2))
+    ig.AddRectFilled(dl, (b.x0, b.y0), (b.x1, b.y1), u32(t.border_strong), f(4))
+    ig.AddRectFilled(dl, (b.x0 + hl, b.y0 + hl), (b.x1 - hl, b.y1 - 2 * hl), u32(t.pane), f(4) - hl)
+    # The text sits in the 16 px line inside the frame.
+    draw_text_mid(dl, FONT_MONO, 11, b.x0 + hl + f(5), b.y0 + hl + f(8), u32(t.text_dim), key; line = 16 / 11)
+    return w
+end

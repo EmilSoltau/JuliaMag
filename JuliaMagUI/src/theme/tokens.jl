@@ -64,6 +64,7 @@ struct Tokens
     brand_dark::NTuple{4,Float32}
     brand_tint::NTuple{4,Float32}
     text_selection::NTuple{4,Float32}
+    placeholder::NTuple{4,Float32}
 end
 
 """
@@ -71,9 +72,11 @@ end
 
 Tokens the prototype's CSS does not name, measured from its render in Chromium:
 `text_selection` is the fill of selected text in a text field (Chromium's own highlight,
-drawn with white text), from proto-data-rename-{light,dark}.png.
+drawn with white text), from proto-data-rename-{light,dark}.png. `placeholder` is the hint
+text of an empty search field (Chromium's own placeholder grey, the same in both themes),
+from proto-search-empty-{light,dark}.png.
 """
-const RENDERED_TOKENS = (:text_selection,)
+const RENDERED_TOKENS = (:text_selection, :placeholder)
 
 const LIGHT = Tokens(
     hex_rgba("#EEF1F5"), hex_rgba("#FFFFFF"), hex_rgba("#EEF1F5"), hex_rgba("#E4E8EE"),
@@ -87,7 +90,7 @@ const LIGHT = Tokens(
     hex_rgba("#0E9384"), hex_rgba("#E3F5F2"),
     hex_rgba("#DDE3EA"), hex_rgba("#F6F8FA"), rgba(20, 26, 34, 0.28),
     hex_rgba("#7D4A9B"), hex_rgba("#693D83"), hex_rgba("#FFD36E"),
-    hex_rgba("#3367D1"),
+    hex_rgba("#3367D1"), hex_rgba("#757575"),
 )
 
 # The dark block does not set brand, brand_dark and brand_tint. They keep the light value.
@@ -103,7 +106,7 @@ const DARK = Tokens(
     hex_rgba("#2CC2AE"), hex_rgba("#1B3331"),
     hex_rgba("#3A424D"), hex_rgba("#21262D"), rgba(0, 0, 0, 0.45),
     LIGHT.brand, LIGHT.brand_dark, LIGHT.brand_tint,
-    hex_rgba("#0439A4"),
+    hex_rgba("#0439A4"), hex_rgba("#757575"),
 )
 
 @enum ThemeMode THEME_LIGHT THEME_DARK THEME_SYSTEM

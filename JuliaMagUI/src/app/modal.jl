@@ -97,7 +97,8 @@ draws on the left, then Cancel and the primary button (`ok_label`, greyed when
 
 Esc, Cancel and the close x call `on_cancel()`; the primary button calls `on_ok()`, and so
 does Enter while a one-line text field of the dialog is active (Enter in a multi-line field
-makes a new line). While a menu of the dialog is open, Esc and Enter belong to the menu.
+makes a new line). While a menu of the dialog or the command search is open over it, Esc
+and Enter belong to that.
 `on_ok` decides whether the dialog closes (`pop_dialog!`). Errors in the callbacks become
 error toasts. Returns the box of the primary button, or `nothing` when nothing was drawn.
 """
@@ -142,6 +143,7 @@ function draw_dialog(f, app, d; title::AbstractString, icon::AbstractString = ""
     typing = unsafe_load(ig.GetIO()).WantTextInput
     m = app.ui.menu
     menu_here = m isa OpenMenu && m.level == level   # Esc and Enter go to the menu
+    search_here = app.ui.search !== nothing && app.ui.search_level == level   # or to the search
     pos = ig.GetWindowPos()
     size = ig.GetWindowSize()
     b = Box(pos.x, pos.y, pos.x + dw, pos.y + size.y)
@@ -232,7 +234,7 @@ function draw_dialog(f, app, d; title::AbstractString, icon::AbstractString = ""
     ig.Dummy((dw, 0f0))
     ig.AddRect(dl, (b.x0, b.y0), (b.x1, footer_end), u32(t.border_strong), p(10), hl)
 
-    if top && !broken && !menu_here
+    if top && !broken && !menu_here && !search_here
         cancel |= ig.IsKeyPressed(lib.ImGuiKey_Escape, false)
         enter = ig.IsKeyPressed(lib.ImGuiKey_Enter, false) || ig.IsKeyPressed(lib.ImGuiKey_KeypadEnter, false)
         ok |= typing && enter && ok_enabled && !ok_busy && !multiline_active()
@@ -240,6 +242,7 @@ function draw_dialog(f, app, d; title::AbstractString, icon::AbstractString = ""
     # The next dialog opens inside this one; the top one holds its open menu.
     !broken && level < length(dialogs) && draw_modal(app, dialogs[level+1])
     !broken && top && draw_dialog_menu(app, level)
+    !broken && top && draw_search(app, level)   # the command search opens over the top dialog
     ig.EndPopup()
     broken && return nothing
     if cancel

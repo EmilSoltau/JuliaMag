@@ -25,10 +25,11 @@ end
         @test LIGHT.brand == hex_rgba("#7D4A9B") && DARK.brand == LIGHT.brand
         @test LIGHT.shadow == (0f0, 0f0, 0f0, 0.11f0) && DARK.backdrop == (0f0, 0f0, 0f0, 0.45f0)
         @test DARK.brand_tint == hex_rgba("#FFD36E")
-        @test fieldcount(Tokens) == 37
+        @test fieldcount(Tokens) == 38
         # Measured from the prototype's render (Chromium's text selection), not its CSS.
-        @test RENDERED_TOKENS == (:text_selection,)
+        @test RENDERED_TOKENS == (:text_selection, :placeholder)
         @test LIGHT.text_selection == hex_rgba("#3367D1") && DARK.text_selection == hex_rgba("#0439A4")
+        @test LIGHT.placeholder == DARK.placeholder == hex_rgba("#757575")
         @test hex_rgba("#FF0000") == (1f0, 0f0, 0f0, 1f0)
         @test_throws ArgumentError hex_rgba("red")
     end

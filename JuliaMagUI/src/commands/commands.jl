@@ -49,7 +49,7 @@ struct OpenDialog
     which::Symbol
 end
 
-"Show a side pane: `:tools` or `:jobs`."
+"Show a side pane: `:tools` (the right pane) or `:jobs` (the Jobs tab of the left pane)."
 struct OpenPane
     which::Symbol
 end
@@ -383,7 +383,7 @@ function shell_commands()::Vector{Command}
     push!(c, Command("session.redo", "Redo", app -> run_undo(app, true);
         icon = "redo", help = "Redo the change that was undone.", shortcut = "Ctrl+Y",
         enabled = app -> undo_enabled(app, true)))
-    push!(c, Command("ui.command_search", "Command Search", app -> (app.ui.search = ""; app.ui.search_index = 0; nothing);
+    push!(c, Command("ui.command_search", "Command Search", open_search!;
         icon = "search", help = "Find a command by name.", shortcut = "Ctrl+K",
         places = [Core.Place("Help", "Help")]))
     push!(c, Command("ui.ribbon", "Collapse Ribbon", toggle_ribbon!;
@@ -394,13 +394,13 @@ function shell_commands()::Vector{Command}
     push!(c, theme_command("ui.theme.system", "System Theme", THEME_SYSTEM, "monitor", "Follow the system theme."))
     push!(c, Command("ui.theme.toggle", "Toggle Light and Dark Theme", toggle_theme!;
         icon = "moon", help = "Switch between the light and dark theme.", shortcut = "Ctrl+Shift+L"))
-    push!(c, Command("ui.tools_pane", "All Tools", app -> request!(app, OpenPane(:tools));
+    push!(c, Command("ui.tools_pane", "All Tools", app -> toggle_right_pane!(app, :tools);
         icon = "tools", help = "Show the list of all tools.",
         places = [Core.Place("Database Tools", "Find"), Core.Place("Help", "About")],
         checked = app -> :tools in app.ui.right_tabs))
     push!(c, Command("ui.jobs_pane", "Jobs", app -> request!(app, OpenPane(:jobs));
         icon = "play", help = "Show the jobs of the project.",
-        checked = app -> :jobs in app.ui.right_tabs))
+        checked = app -> app.ui.left_tab === :jobs))
     push!(c, Command("ui.shortcuts", "Keyboard Shortcuts...", app -> request!(app, OpenDialog(:shortcuts));
         icon = "keyboard", help = "Show the keyboard shortcuts.", places = [Core.Place("Help", "Help")]))
     push!(c, Command("ui.getting_started", "Getting Started...", app -> request!(app, OpenDialog(:getting_started));

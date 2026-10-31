@@ -1,6 +1,6 @@
-# The side panes: their widths, the left pane frame with its header band of text tabs,
-# and the splitters that resize them. The Data tab body is in data.jl, the Jobs tab body
-# in jobs.jl; the right pane comes in a later task.
+# The side panes: their widths, the frames of the left and right pane with their header
+# bands of text tabs, the splitters that resize them, and the search box they share. The
+# Data tab body is in data.jl, the Jobs tab body in jobs.jl, the Tools pane in tools.jl.
 
 # Sizes in logical pixels (prototype CSS).
 const PANE_HEAD_H = 34
@@ -178,26 +178,174 @@ function draw_left_pane(app, dl, b::Box)::Bool
         badge = key === :jobs && running > 0 ? string(running) : ""
         bw = isempty(badge) ? 0f0 : fpx(s, 6) + badge_width(s, badge)
         tab = Box(x, head.y0, x + round(tw + bw + p(18)), head.y1 - hl)
-        clicked, hovered, _ = hit(label, tab)
+        clicked, _ = draw_pane_tab(app, dl, tab, label, on)
         clicked && (app.ui.left_tab = key)
-        if hovered && !on
-            ig.AddRectFilled(dl, (tab.x0 + p(1), tab.y0 + p(5)), (tab.x1 - p(1), tab.y1 - p(5)),
-                u32(t.hover), p(4))
-        end
-        role = on ? FONT_SEMIBOLD : FONT_REGULAR
-        lw = text_width(role, BODY_FONT_SIZE, label)
-        lx = tab.x0 + p(9) + (tw - lw) / 2
-        draw_text_mid(dl, role, BODY_FONT_SIZE, lx, centre_y(tab), u32(on ? t.text : t.text_dim), label)
         isempty(badge) || draw_badge(app, dl, tab.x0 + p(9) + tw + fpx(s, 6), centre_y(tab), badge)
-        if on
-            ig.AddRectFilled(dl, (tab.x0 + p(4), tab.y1 - p(2)), (tab.x1 - p(4), tab.y1), u32(t.accent))
-        end
         x = tab.x1 + p(2)
     end
     body = Box(b.x0, head.y1, b.x1 - hl, b.y1)
     app.ui.left_tab === :data ? draw_data_tab(app, dl, body) : draw_jobs_tab(app, dl, body)
     ig.PopID()
     return hot
+end
+
+"""
+    draw_pane_tab(app, dl, tab, label, on; overlap = false) -> (clicked, hovered)
+
+A text tab of a pane header (`.ptab`) in box `tab`: the label 9 px in, centred in its
+semibold width so the tabs never move, `text` and semibold when `on`, else `text_dim`; a
+`hover` fill inset 5 px under the mouse; a 2 px `accent` line at the bottom when `on`.
+With `overlap`, an item submitted after it on top of it (its close x) takes the mouse there.
+"""
+function draw_pane_tab(app, dl, tab::Box, label::AbstractString, on::Bool; overlap::Bool = false)
+    s = app.window.scale
+    t = app.tokens
+    p(v) = px(s, v)
+    clicked, hovered, _ = hit(label, tab; overlap)
+    if hovered && !on
+        ig.AddRectFilled(dl, (tab.x0 + p(1), tab.y0 + p(5)), (tab.x1 - p(1), tab.y1 - p(5)),
+            u32(t.hover), p(4))
+    end
+    tw = text_width(FONT_SEMIBOLD, BODY_FONT_SIZE, label)
+    role = on ? FONT_SEMIBOLD : FONT_REGULAR
+    lw = text_width(role, BODY_FONT_SIZE, label)
+    lx = tab.x0 + p(9) + (tw - lw) / 2
+    draw_text_mid(dl, role, BODY_FONT_SIZE, lx, centre_y(tab), u32(on ? t.text : t.text_dim), label)
+    on && ig.AddRectFilled(dl, (tab.x0 + p(4), tab.y1 - p(2)), (tab.x1 - p(4), tab.y1), u32(t.accent))
+    return clicked, hovered
+end
+
+# --- The right pane ---
+
+const RIGHT_TABS = (:tools => "Tools",)
+
+"Show the right pane `which` (`:tools`), opening its tab when it is not open."
+function open_right_pane!(app, which::Symbol)
+    ui = app.ui
+    which in ui.right_tabs || push!(ui.right_tabs, which)
+    ui.right_active = which
+    return nothing
+end
+
+"Close the tab of the right pane `which`; the last tab left is shown. The pane hides with no tab."
+function close_right_pane!(app, which::Symbol)
+    ui = app.ui
+    filter!(!=(which), ui.right_tabs)
+    ui.right_active === which && (ui.right_active = isempty(ui.right_tabs) ? :none : last(ui.right_tabs))
+    return nothing
+end
+
+"""
+    toggle_right_pane!(app, which)
+
+As the prototype's `toggleRight`: close the right pane `which` when it is shown, else ask to
+show it (an `OpenPane` request).
+"""
+function toggle_right_pane!(app, which::Symbol)
+    app.ui.right_active === which ? close_right_pane!(app, which) : request!(app, OpenPane(which))
+    return nothing
+end
+
+function handle_request!(app, r::OpenPane)
+    if r.which === :tools
+        open_right_pane!(app, :tools)
+    elseif r.which === :jobs
+        app.ui.left_tab = :jobs
+    else
+        return false
+    end
+    return true
+end
+
+"""
+    draw_right_pane(app, dl, b) -> Bool
+
+The right pane, as the prototype's `#right`: `pane` fill, a 1 px `border` on the left, the
+34 px header band with a tab per open pane (each with a 16 px close x) and "Close all
+panes" at the right, and the body of the shown pane. The splitter on its left edge is
+submitted first. Returns true when the splitter is hot: then call `paint_splitter` after.
+"""
+function draw_right_pane(app, dl, b::Box)::Bool
+    ui = app.ui
+    s = app.window.scale
+    t = app.tokens
+    p(v) = px(s, v)
+    f(v) = fpx(s, v)
+    hl = hairline(s)
+    ig.PushID("right")
+    hot = splitter!(app, :right, b.x0, b.y0, b.y1)
+    ig.AddRectFilled(dl, (b.x0, b.y0), (b.x1, b.y1), u32(t.pane))
+    ig.AddRectFilled(dl, (b.x0, b.y0), (b.x0 + hl, b.y1), u32(t.border))
+    head = Box(b.x0 + hl, b.y0, b.x1, b.y0 + p(PANE_HEAD_H))
+    ig.AddRectFilled(dl, (head.x0, head.y0), (head.x1, head.y1), u32(t.pane_header))
+    ig.AddRectFilled(dl, (head.x0, head.y1 - hl), (head.x1, head.y1), u32(t.border))
+    x = head.x0 + p(6)
+    closing = nothing
+    for key in copy(ui.right_tabs)
+        label = something(lookup_tab(key), string(key))
+        tw = text_width(FONT_SEMIBOLD, BODY_FONT_SIZE, label)
+        tab = Box(x, head.y0, x + round(tw + p(9 + 6 + 16 + 9)), head.y1 - hl)
+        cb = Box(tab.x1 - p(9 + 16), round(centre_y(tab) - f(8)), tab.x1 - p(9), round(centre_y(tab) - f(8)) + p(16))
+        # The close x comes after the tab: it takes the mouse there and is drawn on top.
+        clicked, _ = draw_pane_tab(app, dl, tab, label, ui.right_active === key; overlap = true)
+        clicked && (ui.right_active = key)
+        closed, close_hot = icon_button(app, "Close " * label, "close", cb; size = 10, radius = 3,
+            style = :dim, dl)
+        close_hot && item_tip!(app, "Close " * label)
+        closed && (closing = key)
+        x = tab.x1 + p(2)
+    end
+    all_box = Box(head.x1 - p(6 + 22), round(centre_y(head) - hl / 2 - f(11)), head.x1 - p(6),
+        round(centre_y(head) - hl / 2 - f(11)) + p(22))
+    close_all, all_hot = icon_button(app, "Close all panes", "close", all_box; style = :dim)
+    all_hot && item_tip!(app, "Close all panes")
+    body = Box(head.x0, head.y1, b.x1, b.y1)
+    ui.right_active === :tools && draw_tools_pane(app, dl, body)
+    ig.PopID()
+    closing === nothing || close_right_pane!(app, closing)
+    close_all && (empty!(ui.right_tabs); ui.right_active = :none)
+    return hot
+end
+
+lookup_tab(key::Symbol) = (k = findfirst(p -> first(p) === key, RIGHT_TABS); k === nothing ? nothing : last(RIGHT_TABS[k]))
+
+"""
+    search_box!(app, dl, box, id, buffer, hint; flags = 0) -> (text, active)
+
+A search box, as the prototype's `.search`, in `box` (28 high): `input` fill, 1 px
+`border`, radius 6, the 15 px dim search icon 7 px in, and the text field `id` for
+`buffer` 6 px after it (with the 1 by 2 px padding of an `<input>`); `hint` in
+`placeholder` grey while it is empty. While the field has the
+focus its border is a 2 px `accent` ring. Returns the text and whether the field is active.
+"""
+function search_box!(app, dl, box::Box, id::AbstractString, buf::Vector{UInt8}, hint::AbstractString;
+        flags::Integer = 0)
+    s = app.window.scale
+    t = app.tokens
+    f(v) = fpx(s, v)
+    hl = hairline(s)
+    ig.AddRectFilled(dl, (box.x0, box.y0), (box.x1, box.y1), u32(t.input), f(6))
+    icon_x = box.x0 + hl + f(7)
+    draw_icon(dl, "search", (rnd(icon_x), rnd(centre_y(box) - f(7.5))), 15; style = :dim)
+    # The `<input>` keeps Chromium's own padding of 1 by 2 px.
+    field = Box(icon_x + f(15 + 6 + 2), box.y0 + hl + f(1), box.x1 - hl - f(8 + 2), box.y1 - hl - f(1))
+    changed, active = text_input!(app, id, buf, field; flags, input = true)
+    text = field_text(buf)
+    if isempty(text)
+        shown = elide(text_width, hint, width(field))
+        with_font(FONT_REGULAR, BODY_FONT_SIZE) do
+            ig.AddText(dl, (round(field.x0), input_text_y(FONT_REGULAR, BODY_FONT_SIZE, centre_y(field))),
+                u32(t.placeholder), shown)
+        end
+    end
+    if active
+        ig.AddRect(dl, (box.x0 - hl / 2, box.y0 - hl / 2), (box.x1 + hl / 2, box.y1 + hl / 2),
+            u32(t.accent), f(6) + hl / 2, 2 * hl)
+    else
+        ig.AddRect(dl, (box.x0, box.y0), (box.x1, box.y1), u32(t.border), f(6), hl)
+    end
+    changed && request_frames!(app.window::Window)
+    return text, active
 end
 
 # The prototype's `.badge`: a 16 px round `accent` pill with `on_accent` text, from `x`.

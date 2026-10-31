@@ -25,6 +25,7 @@ include("app/worker.jl")
 include("app/state.jl")
 include("commands/commands.jl")
 include("commands/keys.jl")
+include("commands/search.jl")
 include("app/modal.jl")
 include("panes/panes.jl")
 include("shell/shell.jl")
@@ -40,6 +41,7 @@ include("dialogs/form.jl")
 include("dialogs/widgets.jl")
 include("dialogs/tool_dialog.jl")
 include("panes/jobs.jl")
+include("panes/tools.jl")
 
 """
     main(; project = nothing, config_dir = config_dir(), extra_ui = nothing, on_app = nothing,
