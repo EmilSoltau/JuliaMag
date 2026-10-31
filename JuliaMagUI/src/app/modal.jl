@@ -409,24 +409,28 @@ struct ConfirmDialog
     action::String
     danger::Bool
     on_yes::Function
+    on_no::Function
 end
 
 """
-    confirm!(app, title, text; action, danger = false, on_yes)
+    confirm!(app, title, text; action, danger = false, on_yes, on_no = app -> nothing)
 
 Ask before doing something, as the prototype's `confirmBox`: a 420 px dialog with `text`,
 Cancel and the primary button `action`. A `danger` question has the warning icon, else
-the info icon. The primary button closes the dialog and calls `on_yes(app)`.
+the info icon. The primary button closes the dialog and calls `on_yes(app)`; Cancel, Esc
+and the close x close it and call `on_no(app)`.
 """
 function confirm!(app, title::AbstractString, text::AbstractString; action::AbstractString,
-        danger::Bool = false, on_yes::Function)
-    return push_dialog!(app, ConfirmDialog(String(title), String(text), String(action), danger, on_yes))
+        danger::Bool = false, on_yes::Function, on_no::Function = app -> nothing)
+    return push_dialog!(app, ConfirmDialog(String(title), String(text), String(action), danger,
+        on_yes, on_no))
 end
 
 function draw_modal(app, d::ConfirmDialog)
     draw_dialog(app, d; title = d.title, icon = d.danger ? "warn" : "info", width = 420,
         ok_label = d.action,
-        on_ok = () -> (filter!(x -> x !== d, app.ui.dialogs); d.on_yes(app))) do
+        on_ok = () -> (filter!(x -> x !== d, app.ui.dialogs); d.on_yes(app)),
+        on_cancel = () -> (filter!(x -> x !== d, app.ui.dialogs); d.on_no(app))) do
         paragraph(app, d.text)
     end
     return nothing

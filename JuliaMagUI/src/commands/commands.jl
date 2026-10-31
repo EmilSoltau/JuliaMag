@@ -119,6 +119,8 @@ read this list.
 - `menu_label`: the text in such a menu, such as `"Geosoft XYZ..."` for `"Import Geosoft XYZ..."`.
 - `changes_project`: it changes the project at once (Undo, line selection), or switches or
   closes it. Such a command waits while a dialog is open (see `search_reason`).
+- `where`: where a command with no ribbon place lives, for the search's location column,
+  such as `"Project"` or `"Quick Access"`, as the prototype's `where`.
 """
 struct Command
     id::String
@@ -135,6 +137,7 @@ struct Command
     menu::Vector{String}
     menu_label::String
     changes_project::Bool
+    where::String
 end
 
 function Command(id::AbstractString, name::AbstractString, run::Function;
@@ -143,10 +146,10 @@ function Command(id::AbstractString, name::AbstractString, run::Function;
         shortcut::AbstractString = "", enabled::Function = app -> nothing,
         checked::Function = app -> false, searchable::Bool = true,
         menu::AbstractVector{<:AbstractString} = String[], menu_label::AbstractString = name,
-        changes_project::Bool = false)
+        changes_project::Bool = false, where::AbstractString = "")
     return Command(String(id), String(name), String(label), String(icon), String(help),
         Vector{Core.Place}(places), String(shortcut), enabled, run, checked, searchable,
-        Vector{String}(menu), String(menu_label), changes_project)
+        Vector{String}(menu), String(menu_label), changes_project, String(where))
 end
 
 const SMALL_WORDS = ("and", "of", "to", "the", "a", "in", "on", "or", "for")
@@ -366,55 +369,61 @@ function select_lines(app, flag::Bool)
     return nothing
 end
 
-theme_command(id, name, mode, icon, help) =
-    Command(id, name, app -> set_theme_mode!(app, mode); icon, help,
+theme_command(id, name, label, mode, icon, help) =
+    Command(id, name, app -> set_theme_mode!(app, mode); label, icon, help,
         places = [Core.Place("Settings", "Theme")],
         checked = app -> app.config.theme == mode)
 
 function shell_commands()::Vector{Command}
     c = Command[]
     push!(c, Command("project.backstage", "Project", app -> request!(app, OpenBackstage(:start));
-        icon = "folder", help = "Open the Project page.",
+        icon = "folder", help = "Open the Project page.", where = "Project",
         changes_project = true))
     push!(c, Command("project.new", "New Project...", app -> request!(app, OpenBackstage(:new));
-        icon = "new", help = "Make a new project.", shortcut = "Ctrl+N",
+        icon = "new", help = "Make a new project.", shortcut = "Ctrl+N", where = "Project",
         changes_project = true))
     push!(c, Command("project.open", "Open Project...", app -> request!(app, OpenBackstage(:open));
-        icon = "open", help = "Open a project folder.", shortcut = "Ctrl+O",
+        icon = "open", help = "Open a project folder.", shortcut = "Ctrl+O", where = "Project",
         changes_project = true))
     push!(c, Command("project.close", "Close Project", app -> request!(app, CloseProject());
         icon = "close", help = "Close the project.", enabled = app -> has_session(app) ? nothing : NEED_PROJECT,
+        where = "Project", changes_project = true))
+    push!(c, Command("project.run_script", "Run Script...", app -> request!(app, OpenBackstage(:script));
+        icon = "script", help = "Run a Julia script of JuliaMag commands.", where = "Project",
         changes_project = true))
     push!(c, Command("session.undo", "Undo", app -> run_undo(app, false);
         icon = "undo", help = "Undo the last change.", shortcut = "Ctrl+Z",
-        enabled = app -> undo_enabled(app, false),
+        enabled = app -> undo_enabled(app, false), where = "Quick Access",
         changes_project = true))
     push!(c, Command("session.redo", "Redo", app -> run_undo(app, true);
         icon = "redo", help = "Redo the change that was undone.", shortcut = "Ctrl+Y",
-        enabled = app -> undo_enabled(app, true),
+        enabled = app -> undo_enabled(app, true), where = "Quick Access",
         changes_project = true))
     push!(c, Command("ui.command_search", "Command Search", app -> open_search!(app);
         icon = "search", help = "Find a command by name.", shortcut = "Ctrl+K",
-        places = [Core.Place("Help", "Help")]))
+        places = [Core.Place("Help", "Help"; order = 1)]))
     push!(c, Command("ui.ribbon", "Collapse Ribbon", toggle_ribbon!;
         icon = "chevUp", help = "Hide or show the ribbon.", shortcut = "Ctrl+F1",
-        checked = app -> app.config.ribbon_collapsed))
-    push!(c, theme_command("ui.theme.light", "Light Theme", THEME_LIGHT, "sun", "Use the light theme."))
-    push!(c, theme_command("ui.theme.dark", "Dark Theme", THEME_DARK, "moon", "Use the dark theme."))
-    push!(c, theme_command("ui.theme.system", "System Theme", THEME_SYSTEM, "monitor", "Follow the system theme."))
+        checked = app -> app.config.ribbon_collapsed, where = "Window"))
+    push!(c, theme_command("ui.theme.light", "Light Theme", "Light", THEME_LIGHT, "sun", "Use the light theme."))
+    push!(c, theme_command("ui.theme.dark", "Dark Theme", "Dark", THEME_DARK, "moon", "Use the dark theme."))
+    push!(c, theme_command("ui.theme.system", "System Theme", "System", THEME_SYSTEM, "monitor",
+        "Follow the system setting."))
     push!(c, Command("ui.theme.toggle", "Toggle Light and Dark Theme", toggle_theme!;
-        icon = "moon", help = "Switch between the light and dark theme.", shortcut = "Ctrl+Shift+L"))
+        icon = "moon", help = "Switch between the light and dark theme.", shortcut = "Ctrl+Shift+L",
+        where = "Quick Access"))
     push!(c, Command("ui.tools_pane", "All Tools", app -> toggle_right_pane!(app, :tools);
         icon = "tools", help = "Show the list of all tools.",
         places = [Core.Place("Database Tools", "Find"), Core.Place("Help", "About")],
         checked = app -> :tools in app.ui.right_tabs))
     push!(c, Command("ui.jobs_pane", "Jobs", app -> request!(app, OpenPane(:jobs));
         icon = "play", help = "Show the jobs of the project.",
-        checked = app -> app.ui.left_tab === :jobs))
+        checked = app -> app.ui.left_tab === :jobs, where = "Panes"))
     push!(c, Command("ui.shortcuts", "Keyboard Shortcuts...", app -> request!(app, OpenDialog(:shortcuts));
-        icon = "keyboard", help = "Show the keyboard shortcuts.", places = [Core.Place("Help", "Help")]))
+        icon = "keyboard", help = "Show the keyboard shortcuts.", places = [Core.Place("Help", "Help"; order = 3)]))
     push!(c, Command("ui.getting_started", "Getting Started...", app -> request!(app, OpenDialog(:getting_started));
-        icon = "help", help = "Show the steps from data to map.", places = [Core.Place("Help", "Help")]))
+        icon = "help", help = "The processing chain and where each step lives.",
+        places = [Core.Place("Help", "Help"; order = 2)]))
     push!(c, Command("ui.about", "About JuliaMag...", app -> request!(app, OpenDialog(:about));
         label = "About", icon = "about", help = "Show the version and credits.",
         places = [Core.Place("Help", "About")]))
@@ -447,8 +456,8 @@ end
 """
     commands(app) -> Vector{Command}
 
-Every command: the core's tools, importers and exporters, the four split buttons and the
-shell's own. The list is cached. It is built again when a project opens (`set_session!`
+Every command: the core's tools, importers and exporters, the four split buttons, the
+shell's own and the Settings tab's (settings_tab.jl). The list is cached. It is built again when a project opens (`set_session!`
 clears the cache) and when the number of tools, importers or exporters changes.
 """
 function commands(app)::Vector{Command}
@@ -464,6 +473,7 @@ function commands(app)::Vector{Command}
         push!(list, import_split(kind, importers), export_split(kind, exporters))
     end
     append!(list, shell_commands())
+    append!(list, settings_commands())
     app.command_cache = CommandCache(sizes, list)
     return list
 end
@@ -471,10 +481,10 @@ end
 """
     location(cmd) -> String
 
-`"Tab > Group"` of the command's first place, or `""`.
+`"Tab > Group"` of the command's first place, else its `where`, such as `"Project"`.
 """
 function location(cmd::Command)::String
-    isempty(cmd.places) && return ""
+    isempty(cmd.places) && return cmd.where
     p = first(cmd.places)
     return p.tab * " > " * p.group
 end

@@ -9,6 +9,7 @@ import PNGFiles
 import Cairo
 import Rsvg
 import NativeFileDialog
+import Logging
 using JSON3
 using PrecompileTools: @setup_workload, @compile_workload
 
@@ -27,6 +28,7 @@ include("commands/commands.jl")
 include("commands/keys.jl")
 include("commands/search.jl")
 include("app/modal.jl")
+include("app/projects.jl")
 include("panes/panes.jl")
 include("shell/shell.jl")
 include("shell/menu.jl")
@@ -42,15 +44,24 @@ include("dialogs/widgets.jl")
 include("dialogs/tool_dialog.jl")
 include("panes/jobs.jl")
 include("panes/tools.jl")
+include("backstage/backstage.jl")
+include("ribbon_tabs/settings_tab.jl")
 
 """
     main(; project = nothing, config_dir = config_dir(), extra_ui = nothing, on_app = nothing,
          size = (1480, 920), scale = nothing, fonts = :system, engine = nothing,
          passive = false)
 
-Start the app: the window with the shell (`draw_app`). Opening `project` comes in a later
-task. The theme comes from the settings in `config_dir`.
+Start the app: the window with the shell (`draw_app`). It opens `project` when one is
+given, else the last project when the setting "Open Last Project" is on (`open_last!`).
+The theme and the other settings come from `config_dir`, and so does the log file:
+warnings and errors also go to `juliamag.log` there (`with_app_log`).
+The Software Rendering setting is applied before the window opens (`rendering_env`).
 It makes the `AppState` and its worker, and stops the worker when the window closes.
+
+Closing the window closes the project first (`request_quit!`): it asks when jobs run and
+shows the warnings of the close. Then `app.quit_hook` ends the loop. A project that is
+still open when the loop ends another way (a test, an error) is closed here.
 
 The other keywords are for tests, screenshots and benchmarks:
 `extra_ui(w)` is drawn after the app in every frame, `on_app(app)` gets the `AppState`
@@ -62,17 +73,47 @@ function main(; project::Union{Nothing,AbstractString} = nothing,
         on_app = nothing, size::Tuple{Integer,Integer} = (1480, 920),
         scale::Union{Nothing,Real} = nothing, fonts::Symbol = :system, engine = nothing,
         passive::Bool = false)
-    project === nothing || @debug "Opening a project is not built yet" project
-    config, _ = load_config(config_dir)   # a broken settings file gives the defaults
+    with_app_log(config_dir) do
+        run_app(project, String(config_dir), extra_ui, on_app, size, scale, fonts, engine, passive)
+    end
+    return nothing
+end
+
+function run_app(project, config_dir::String, extra_ui, on_app, size, scale, fonts, engine, passive)
+    config, problem = load_config(config_dir)   # a broken settings file gives the defaults
+    problem === nothing || @warn problem
+    for (key, value) in rendering_env(config)
+        haskey(ENV, key) || (ENV[key] = value)   # before the window and its OpenGL driver
+    end
     dark = config.theme == THEME_SYSTEM ? system_dark() : false
     tokens = tokens_for(config.theme, dark)
     app = AppState(config, tokens; config_dir)
     try
         on_app === nothing || on_app(app)
-        run_window(AppFrame(app, extra_ui); tokens, size, scale, fonts, engine, passive)
+        project === nothing ? open_last!(app) : open_project!(app, project)
+        run_window(AppFrame(app, extra_ui); tokens, size, scale, fonts, engine, passive,
+            on_close = () -> request_quit!(app))
+    catch e
+        e isa InterruptException || @error "JuliaMag stopped with an error" exception = (e, catch_backtrace())
+        rethrow()
     finally
         app.window = nothing
         stop_worker!(app.queue)
+        close_left_project(app)
+    end
+    return nothing
+end
+
+# Close a project that is still open when the app ends without the close flow. The
+# worker has stopped, so this runs here; nothing draws any more.
+function close_left_project(app)
+    s = app.session
+    (s === nothing || !isopen(s)) && return nothing
+    try
+        Core.close_session!(s)
+    catch e
+        e isa InterruptException && rethrow()
+        @error "The project could not be closed" exception = (e, catch_backtrace())
     end
     return nothing
 end

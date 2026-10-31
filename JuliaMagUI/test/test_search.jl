@@ -53,8 +53,8 @@ ids(cmds) = [c.id for c in cmds]
     @testset "an empty query lists the shell commands first, in the prototype's order" begin
         with_app(app_with_database()) do app
             r = ids(search_commands(UI.commands(app), ""))
-            @test r[1:6] == ["project.backstage", "project.new", "project.open", "project.close",
-                "session.undo", "session.redo"]
+            @test r[1:7] == ["project.backstage", "project.new", "project.open", "project.close",
+                "project.run_script", "session.undo", "session.redo"]
             @test findfirst(==("ui.command_search"), r) < findfirst(==("database.channel_math"), r)
             # A query still ranks by score first.
             @test first(search_commands(UI.commands(app), "channel m")).id == "database.channel_math"

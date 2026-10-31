@@ -19,7 +19,8 @@ mark or a blank. `reason` is why the row cannot run (it is greyed), or `nothing`
 `shortcut` is the dim text at the right: a key chord, or a hint such as a channel's units.
 `help` and `id` go into its tooltip. A `danger` row (such as Remove) is red.
 `action(app)` runs on a click; the menu then closes, unless the row says `stay` (the rows
-of a checklist). `menu_separator()` makes the line between groups of rows.
+of a checklist). `menu_separator()` makes the line between groups of rows, and
+`menu_head(label)` a small title over a group (`head`).
 """
 struct MenuItem
     label::String
@@ -33,6 +34,7 @@ struct MenuItem
     separator::Bool
     stay::Bool
     action::Function
+    head::Bool
 end
 
 MenuItem(label::AbstractString; icon::AbstractString = "", shortcut::AbstractString = "",
@@ -41,13 +43,19 @@ MenuItem(label::AbstractString; icon::AbstractString = "", shortcut::AbstractStr
         stay::Bool = false, action::Function = app -> nothing) =
     MenuItem(String(label), String(icon), String(shortcut), checked,
         reason === nothing ? nothing : String(reason), String(help), String(id), danger, false,
-        stay, action)
+        stay, action, false)
 
 "The line between two groups of menu rows (the prototype's `.msep`)."
-menu_separator() = MenuItem("", "", "", nothing, nothing, "", "", false, true, false, app -> nothing)
+menu_separator() = MenuItem("", "", "", nothing, nothing, "", "", false, true, false, app -> nothing, false)
+
+"A small title over a group of menu rows (the prototype's `.mhead`), such as \"Tabs\"."
+menu_head(label::AbstractString) =
+    MenuItem(String(label), "", "", nothing, nothing, "", "", false, false, false, app -> nothing, true)
 
 const MENU_ROW_H = 24
 const MENU_SEPARATOR_H = 9   # 1 px line, 4 px above and below
+const MENU_HEAD_H = 22
+const MENU_HEAD_SIZE = 10.5f0   # semibold, upper case, 0.03 em apart
 
 """
     OpenMenu
@@ -107,10 +115,14 @@ function menu_layout(anchor::Box, items::AbstractVector{MenuItem}, viewport::Box
     p(v) = px(scale, v)
     hl = hairline(scale)
     icons = any(it -> !isempty(it.icon) || it.checked !== nothing, items)
-    row_h(it) = p(it.separator ? MENU_SEPARATOR_H : MENU_ROW_H)
+    row_h(it) = p(it.separator ? MENU_SEPARATOR_H : it.head ? MENU_HEAD_H : MENU_ROW_H)
     row_w = 0f0
     for it in items
         it.separator && continue
+        if it.head
+            row_w = max(row_w, p(16) + measure(uppercase(it.label), MENU_HEAD_SIZE))
+            continue
+        end
         w = p(6) + (icons ? p(24) : 0f0) + measure(it.label, BODY_FONT_SIZE) + p(10)
         isempty(it.shortcut) || (w += p(16) + measure(it.shortcut, 11))
         row_w = max(row_w, w)
@@ -336,6 +348,11 @@ function draw_menu_rows(app, m::OpenMenu, l::MenuLayout)
                 u32(t.border))
             continue
         end
+        if it.head
+            draw_spaced_text(dl, FONT_SEMIBOLD, MENU_HEAD_SIZE, row.x0 + p(8), centre_y(row),
+                u32(t.text_dim), uppercase(it.label), fpx(s, 0.03 * MENU_HEAD_SIZE))
+            continue
+        end
         enabled = it.reason === nothing
         id = it.label in seen_ids ? it.label * "##" * string(k) : it.label
         push!(seen_ids, it.label)
@@ -402,7 +419,7 @@ end
 
 # The row the arrow, page and Home/End keys move the highlight to, or `m.key`.
 function menu_key(m::OpenMenu, l::MenuLayout, scale::Real)::Int
-    ok(k) = !m.items[k].separator && m.items[k].reason === nothing
+    ok(k) = !m.items[k].separator && !m.items[k].head && m.items[k].reason === nothing
     n = length(m.items)
     candidates = filter(ok, 1:n)
     isempty(candidates) && return m.key

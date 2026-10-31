@@ -27,7 +27,7 @@ UI.handle_request!(app, ::SwitchProjectRequest) = (UI.set_session!(app, nothing)
             @test UI.tab_order(cmds, String[]) == ["Database", "Database Tools", "Coordinates", "Grid and Image"]
             @test UI.tab_order(cmds, ["Coordinates"]) == ["Database", "Database Tools", "Grid and Image"]
             @test UI.location(cm) == "Database Tools > Channels"
-            @test UI.location(only(filter(c -> c.id == "session.undo", cmds))) == ""
+            @test UI.location(only(filter(c -> c.id == "session.undo", cmds))) == "Quick Access"   # its `where`
             @test UI.commands(app) === cmds   # cached
 
             gs = only(filter(c -> c.id == "grid.statistics", cmds))

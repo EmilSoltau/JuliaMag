@@ -13,7 +13,7 @@ foreach(f -> endswith(f, ".svg") && include_dependency(joinpath(ICON_DIR, f)), r
 
 The icon sizes in the atlas, in logical pixels.
 """
-const ICON_SIZES = (10, 12, 14, 15, 16, 18, 22, 24, 32, 48)
+const ICON_SIZES = (10, 12, 14, 15, 16, 18, 20, 22, 24, 32, 44, 48)
 
 """
     ICON_STYLES
@@ -33,13 +33,15 @@ const ICON_STYLES = (:normal, :disabled, :nav, :on_accent, :dim, :danger)
     ICON_STYLE_SIZES
 
 The sizes the atlas holds for each style, as the prototype uses them:
-`:normal` at every size, `:disabled` for buttons and menus, `:nav` for the backstage
-nav (18) and its cards (48), `:on_accent` for selected rows (16) and dialog heads (22),
+`:normal` at every size but 44, `:disabled` for buttons and menus, `:nav` for the backstage
+nav (18), its Back arrow (22) and the 44 px logo of its pages (the logo has no ink colour,
+so the nav colours draw it as the normal ones do), `:on_accent` for selected rows (16) and dialog heads (22),
 `:dim` for the search pill, the ribbon chevron and the Data tree chevrons (14), the Data
 filter box (15) and the ribbon scroll arrows (16), `:danger` for the red rows of a menu (16).
 Another size is drawn scaled from the next bigger size of its style.
 """
-const ICON_STYLE_SIZES = (ICON_SIZES, (16, 18, 32), (18, 48), (16, 22), (14, 15, 16), (16,))
+const ICON_STYLE_SIZES = ((10, 12, 14, 15, 16, 18, 20, 22, 24, 32, 48), (16, 18, 32), (18, 22, 44),
+    (16, 22), (14, 15, 16), (16,))
 
 # The placeholder colour of each prototype colour variable in the SVG files.
 # tools/extract_icons.jl writes the same table.

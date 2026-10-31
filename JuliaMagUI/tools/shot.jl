@@ -6,7 +6,7 @@
 # The script has one JSON object per line, each with one action. Blank lines and lines
 # that start with # are skipped. The actions run in order:
 #
-#   {"open": "path/to/project"}  open a project (not built yet: fails)
+#   {"open": "path/to/project"}  open a project and wait until it shows
 #   {"click": "Window/Button"}   click an item, by ImGuiTestEngine reference
 #   {"key": "Ctrl+K"}            press a key chord
 #   {"type": "text"}             type text into the focused input
@@ -72,7 +72,15 @@ end
 
 function run_action(ctx::TestContext, action::String, arg, out_dir::AbstractString)
     if action == "open"
-        error("the app cannot open a project yet")
+        app = ctx.app_state()
+        folder = abspath(String(arg))
+        UI.open_project!(app, folder)
+        ctx.wait_until(timeout = 30) do
+            app.switching === nothing && app.queue.pending == 0 && (app.session === nothing || app.snap !== nothing)
+        end
+        app.session === nothing && error("the project in $folder did not open: " *
+                                         join((t.text for t in app.toasts), " "))
+        ctx.frames(SETTLE_FRAMES)
     elseif action == "click"
         ctx.click(String(arg))
     elseif action == "key"

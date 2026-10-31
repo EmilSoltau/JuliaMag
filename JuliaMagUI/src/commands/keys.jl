@@ -148,10 +148,10 @@ end
 "The Keyboard Shortcuts dialog (Help > Keyboard Shortcuts)."
 struct ShortcutsDialog end
 
-function handle_request!(app, r::OpenDialog)
-    r.which === :shortcuts || return false   # the other dialogs come with the Help tab
+"Open the Keyboard Shortcuts dialog, unless it is open."
+function open_shortcuts!(app)
     any(d -> d isa ShortcutsDialog, app.ui.dialogs) || push_dialog!(app, ShortcutsDialog())
-    return true
+    return nothing
 end
 
 const SHORTCUT_KEYS_W = 240   # the key column

@@ -485,21 +485,24 @@ end
 # --- Files ---
 
 """
-    native_pick_file(; save = false, title = "", extensions = String[], start = "") -> String
+    native_pick_file(; save = false, folder = false, title = "", extensions = String[],
+                     start = "") -> String
 
-Ask for a file with the system's own dialog (NativeFileDialog): a file to open, or with
-`save` a file to write. `extensions` (such as `".xyz"`) filter the list; `start` is the
-folder to start in, or for a save the file name to suggest in its folder. Returns the
-path, or `""` when the user cancelled. Throws when the system dialog cannot open (such
-as a Linux without GTK). NativeFileDialog shows no `title` and suggests no file name.
+Ask for a file with the system's own dialog (NativeFileDialog): a file to open, with
+`save` a file to write, or with `folder` a folder. `extensions` (such as `".xyz"`) filter
+the list; `start` is the folder to start in, or for a save the file name to suggest in
+its folder. Returns the path, or `""` when the user cancelled. Throws when the system
+dialog cannot open (such as a Linux without GTK). NativeFileDialog shows no `title` and
+suggests no file name.
 """
-function native_pick_file(; save::Bool = false, title::AbstractString = "",
+function native_pick_file(; save::Bool = false, folder::Bool = false, title::AbstractString = "",
         extensions::AbstractVector{<:AbstractString} = String[], start::AbstractString = "")::String
     filters = join((lstrip(e, '.') for e in extensions), ",")
-    folder = save && !isempty(start) ? dirname(start) : String(start)
-    isdir(folder) || (folder = "")
-    path = save ? NativeFileDialog.save_file(folder; filterlist = filters) :
-        NativeFileDialog.pick_file(folder; filterlist = filters)
+    dir = save && !isempty(start) ? dirname(start) : String(start)
+    isdir(dir) || (dir = "")
+    path = folder ? NativeFileDialog.pick_folder(dir) :
+        save ? NativeFileDialog.save_file(dir; filterlist = filters) :
+        NativeFileDialog.pick_file(dir; filterlist = filters)
     return String(path)
 end
 
@@ -512,6 +515,17 @@ function ask_file(app; save::Bool, title::AbstractString, extensions, start::Abs
     catch e
         e isa InterruptException && rethrow()
         toast!(app, :error, "The file dialog could not open: " * plain_message(e))
+        return ""
+    end
+end
+
+# Ask for a folder through `app.pick_file`, starting in `start`. As `ask_file`.
+function ask_folder(app; title::AbstractString, start::AbstractString)::String
+    try
+        return String(app.pick_file(; folder = true, title = String(title), start = String(start)))
+    catch e
+        e isa InterruptException && rethrow()
+        toast!(app, :error, "The folder dialog could not open: " * plain_message(e))
         return ""
     end
 end

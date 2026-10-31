@@ -54,14 +54,18 @@ Base.hash(a::SmallColumn, h::UInt) = hash(a.cmd_ids, hash(:SmallColumn, h))
 Base.hash(a::Custom, h::UInt) = hash(a.kind, hash(:Custom, h))
 Base.hash(a::RibbonGroup, h::UInt) = hash(a.items, hash(a.name, hash(:RibbonGroup, h)))
 
-# Commands that the ribbon draws as a custom item.
-const RIBBON_CUSTOM = Dict("database.choose" => :db_chooser)
+# Commands that the ribbon draws as a custom item: the "Acts on" chooser, the Defaults
+# combos and the Show Tabs menu button of the Settings tab (settings_tab.jl).
+const RIBBON_CUSTOM = Dict("database.choose" => :db_chooser, "settings.defaults" => :defaults,
+    "settings.tabs" => :tabs_menu)
 
 # The shell's own groups come first on these tabs, in this order. Other groups follow in
 # the order their first command was placed.
 const RIBBON_FIRST_GROUPS = Dict(
     "Database" => ["Database", "Import", "Export", "Lines", "Channels"],
     "Grid and Image" => ["Import", "Export"],
+    "Settings" => ["Theme", "Defaults", "Startup", "Rendering", "Ribbon"],
+    "Help" => ["Help", "About"],
 )
 
 # Does `c` at place `p` become a split button?
@@ -159,6 +163,8 @@ item_width(item::SmallColumn, measure; label = identity, scale::Real = 1, note =
 
 function item_width(item::Custom, measure; label = identity, scale::Real = 1, note = "")::Float32
     check_custom(item)
+    item.kind === :defaults && return defaults_width(scale)
+    item.kind === :tabs_menu && return tabs_menu_width(measure, label(TABS_MENU_ID); scale)
     note_w = isempty(note) ? 0f0 : min(Float32(measure(note, GROUP_LABEL_SIZE)), fpx(scale, 180))
     inner = max(fpx(scale, 170), measure(CHOOSER_LABEL, GROUP_LABEL_SIZE) + fpx(scale, 1), note_w)
     return inner + fpx(scale, 8)
@@ -166,7 +172,7 @@ end
 
 # The custom items the ribbon knows. Another kind is an error, when sized and when drawn.
 check_custom(item::Custom) =
-    item.kind === :db_chooser || throw(ArgumentError("no ribbon item :$(item.kind)"))
+    item.kind in (:db_chooser, :defaults, :tabs_menu) || throw(ArgumentError("no ribbon item :$(item.kind)"))
 
 """
     group_content_width(g, measure; label = identity, scale = 1, note = "") -> Float32
@@ -477,7 +483,13 @@ end
 
 function draw_item(app, dl, item::Custom, x, top, iw, frame)
     check_custom(item)
-    draw_db_chooser(app, dl, x, top, frame::RibbonFrame)
+    if item.kind === :defaults
+        draw_defaults(app, dl, x, top, frame::RibbonFrame)
+    elseif item.kind === :tabs_menu
+        draw_tabs_menu(app, dl, x, top, iw, frame::RibbonFrame)
+    else
+        draw_db_chooser(app, dl, x, top, frame::RibbonFrame)
+    end
     return nothing
 end
 

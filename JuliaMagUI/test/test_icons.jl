@@ -78,10 +78,12 @@ const PROTOTYPE_HTML = joinpath(@__DIR__, "..", "..", "prototype", "juliamag-ui.
         end
         # A size a style does not hold comes from its next bigger size, else its biggest.
         normal, disabled, nav, on_accent, dim = 1, 2, 3, 4, 5
-        @test ICON_SIZES[icon_size_index(normal, 20)] == 22
+        @test ICON_SIZES[icon_size_index(normal, 20)] == 20   # the Tools pane and recent rows
+        @test ICON_SIZES[icon_size_index(normal, 44)] == 48
         @test ICON_SIZES[icon_size_index(normal, 64)] == 48
         @test ICON_SIZES[icon_size_index(disabled, 10)] == 16
-        @test ICON_SIZES[icon_size_index(nav, 22)] == 48
+        @test ICON_SIZES[icon_size_index(nav, 22)] == 22   # the backstage Back arrow
+        @test ICON_SIZES[icon_size_index(nav, 44)] == 44   # the logo of the backstage pages
         @test ICON_SIZES[icon_size_index(on_accent, 32)] == 22
         @test ICON_SIZES[icon_size_index(dim, 18)] == 16
         @test ICON_SIZES[icon_size_index(dim, 16)] == 16   # the ribbon scroll arrows

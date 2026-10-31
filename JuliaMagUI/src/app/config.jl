@@ -160,11 +160,21 @@ end
 Put `folder` (made absolute with `realpath`) first in the recent list. Keeps $MAX_RECENT.
 """
 function add_recent!(c::AppConfig, folder::AbstractString)
-    path = realpath(folder)
-    filter!(!=(path), c.recent)
-    pushfirst!(c.recent, path)
-    length(c.recent) > MAX_RECENT && resize!(c.recent, MAX_RECENT)
+    c.recent = recent_after_open(c.recent, realpath(folder))
     return c
+end
+
+"""
+    recent_after_open(recent, path) -> Vector{String}
+
+The recent list after `path` (already absolute) opened: `path` first, no copy of it
+further down, at most $MAX_RECENT. It reads no file, so the render thread may call it.
+"""
+function recent_after_open(recent::AbstractVector{<:AbstractString}, path::AbstractString)::Vector{String}
+    out = String[String(path)]
+    append!(out, (String(p) for p in recent if p != path))
+    length(out) > MAX_RECENT && resize!(out, MAX_RECENT)
+    return out
 end
 
 """

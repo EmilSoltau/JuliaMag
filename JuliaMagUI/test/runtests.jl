@@ -22,6 +22,7 @@ include("support/state.jl")
     include("test_form.jl")
     include("test_jobs_view.jl")
     include("test_search.jl")
+    include("test_projects.jl")
     include("window/test_harness.jl")
     include("window/test_shell.jl")
     include("window/test_ribbon.jl")
@@ -29,6 +30,7 @@ include("support/state.jl")
     include("window/test_dialogs.jl")
     include("window/test_jobs.jl")
     include("window/test_search.jl")
+    include("window/test_backstage.jl")
 end
 
 end

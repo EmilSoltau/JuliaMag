@@ -25,6 +25,7 @@ using JuliaMagCore
                 @test isdir(joinpath(p.folder, d))
             end
             @test isfile(joinpath(p.folder, "project.jmag.json"))
+            @test JuliaMagCore.PROJECT_FILE == "project.jmag.json" && Base.ispublic(JuliaMagCore, :PROJECT_FILE)
             @test new_item_id(p, ITEM_DATABASE) == "db-1"
             @test new_item_id(p, ITEM_GRID) == "grid-1"
             @test new_item_id(p, ITEM_MAP) == "map-1"

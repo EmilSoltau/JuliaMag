@@ -330,12 +330,59 @@ end
 # The size of a text field's buffer, in bytes: names of 200 characters and more fit.
 const FIELD_BYTES = 1024
 
+"What the backstage knows of a recent project folder: its project's name, and whether it was found."
+struct RecentInfo
+    name::String
+    found::Bool
+end
+
+"""
+    BackstageState
+
+What the backstage pages keep while the app runs. Changed on the render thread only.
+
+- `scroll`: how far the page is scrolled, in device pixels; `content_h`: the page's height
+  in the last frame.
+- `name_buffer`, `folder_buffer`: the New page's Name and Folder (the folder the project
+  folder goes in); `filled`: they have their first values. `new_problem`,
+  `folder_problem`: why the name or the folder was refused, or `nothing`.
+- `recent`: the project name and whether the folder was found, for each recent folder,
+  read on the worker when the backstage opens (`refresh_recent!`).
+- `open_path`: the real path of the folder of the project the app opened, or `""`.
+- `script`: the project's script (`Core.script_text`), or `nothing` until it is read;
+  `script_of`: the session and revision it was read at; `script_wrap`: its lines cut to the
+  box, for the width they were cut at (a cache); `script_scroll`: how far its box is scrolled.
+- `output`: what the last script run printed with its error at the end, or `nothing`
+  before any run; `output_failed`: the run threw, and `output_error` is its error (the
+  last lines of `output`); `output_scroll`: how far its box is scrolled.
+"""
+Base.@kwdef mutable struct BackstageState
+    scroll::Float32 = 0f0
+    content_h::Float32 = 0f0
+    name_buffer::Vector{UInt8} = zeros(UInt8, FIELD_BYTES)
+    folder_buffer::Vector{UInt8} = zeros(UInt8, FIELD_BYTES)
+    filled::Bool = false
+    new_problem::Union{Nothing,String} = nothing
+    folder_problem::Union{Nothing,String} = nothing
+    recent::Dict{String,RecentInfo} = Dict{String,RecentInfo}()
+    open_path::String = ""
+    script::Union{Nothing,String} = nothing
+    script_of::Any = nothing
+    script_wrap::Any = nothing
+    script_scroll::Float32 = 0f0
+    output::Union{Nothing,String} = nothing
+    output_failed::Bool = false
+    output_error::String = ""
+    output_scroll::Float32 = 0f0
+end
+
 """
     UiState
 
 What the UI shows and where, apart from the project data. Changed on the render thread only.
 
 - `tab`: the ribbon tab; `backstage`, `backstage_page`: the Project page and its page;
+  `bs`: what its pages keep (a `BackstageState`);
   `ribbon_peek`: a collapsed ribbon shown for a moment.
 - `left_tab`: `:data` or `:jobs`; `right_tabs`, `right_active`: the open right panes (such
   as `:tools`) in the order they opened, and the one shown (`:none` when none is open).
@@ -390,6 +437,7 @@ Base.@kwdef mutable struct UiState
     tab::String = "Database"
     backstage::Bool = false
     backstage_page::Symbol = :start
+    bs::BackstageState = BackstageState()
     ribbon_peek::Bool = false
     left_tab::Symbol = :data
     right_tabs::Vector{Symbol} = Symbol[]
@@ -477,8 +525,15 @@ and the worker hands results back through `drain!`.
 - `draw_ns`: how long the last `draw_app` took, in nanoseconds (tests and benchmarks read it).
 - `draw_errors`: each different error that cut a frame short (see `guarded_frame`), with
   how often it came. At most `MAX_DRAW_ERRORS`. Tests fail when it is not empty.
-- `pick_file`: asks the user for a file, as `pick_file(; save, title, extensions, start)`
-  (see `native_pick_file`): the path, or `""` when the user cancelled. Tests replace it.
+- `pick_file`: asks the user for a file, as `pick_file(; save, title, extensions, start)`,
+  or for a folder, as `pick_file(; folder = true, title, start)` (see `native_pick_file`):
+  the path, or `""` when the user cancelled. Tests replace it.
+- `switching`: what the app says while a project opens or closes ("Opening Survey...",
+  "Closing..."), or `nothing`. While it is set, the shell is greyed and takes no input.
+- `quit_pending`: the user asked to quit; the app closes the project, then quits
+  (see `advance_quit!`). An app-level flag, so a project switch never drops it.
+- `quit_hook`: called once to end the app, as `quit_hook(app)`. By default it ends the
+  render loop; tests record the call instead.
 
 The constructor starts the worker. Stop it with `stop_worker!(app.queue)`.
 """
@@ -499,12 +554,23 @@ mutable struct AppState
     draw_ns::Int
     draw_errors::Vector{DrawError}
     pick_file::Function
+    switching::Union{Nothing,String}
+    quit_pending::Bool
+    quit_hook::Function
 end
 
 AppState(config::AppConfig, tokens::Tokens; session::Union{Nothing,Core.Session} = nothing,
         config_dir::AbstractString = JuliaMagUI.config_dir()) =
     AppState(config, tokens, session, nothing, false, Worker(), UiState(), Toast[], nothing, 0,
-        nothing, String(config_dir), nothing, 0, DrawError[], native_pick_file)
+        nothing, String(config_dir), nothing, 0, DrawError[], native_pick_file, nothing, false,
+        end_loop)
+
+# The default quit hook: end the render loop after this frame.
+function end_loop(app)
+    w = app.window
+    w === nothing || quit!(w)
+    return nothing
+end
 
 """
     set_session!(app, s)
@@ -515,8 +581,9 @@ build of the old session that comes back later is dropped too), the count of sho
 warnings, a failed build, the Data tree's current database, selection, expanded
 nodes, filter, scroll and cached rows, the open dialogs and menu, the requests not
 handled yet (they were made for the old project), whether a job has shown the Jobs pane,
-and what the Jobs tab knew of the old jobs (so the new project's finished jobs make no
-toasts). Call it on the render thread. It does not close the old session.
+what the Jobs tab knew of the old jobs (so the new project's finished jobs make no
+toasts), and the old project's script on the Run Script page. Call it on the render
+thread. It does not close the old session.
 """
 function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     app.session = s
@@ -546,5 +613,10 @@ function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     empty!(ui.job_bars)
     ui.jobs_seen = nothing
     ui.jobs_watched = nothing
+    ui.bs.open_path = ""
+    ui.bs.script = nothing
+    ui.bs.script_of = nothing
+    ui.bs.script_wrap = nothing
+    ui.bs.script_scroll = 0f0
     return nothing
 end

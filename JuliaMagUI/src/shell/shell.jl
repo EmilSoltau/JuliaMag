@@ -88,15 +88,17 @@ const PEEK_FLAGS = ig.ImGuiWindowFlags_NoDecoration | ig.ImGuiWindowFlags_NoMove
 """
     draw_app(app)
 
-Draw one frame of the app: the shell, then the dialogs, the command search, the ribbon
-peek, the open menu, the toasts and the tooltip. It handles the requests of the last frame first, then makes
-the toasts of jobs that ended (`watch_jobs!`), and the shortcuts last.
+Draw one frame of the app: the shell (or, while it is open, only the backstage), then the
+dialogs, the command search, the ribbon peek, the open menu, the busy state of a project
+that opens or closes, the toasts and the tooltip. It handles the requests of the last
+frame first, moves a quit along (`advance_quit!`), makes the toasts of jobs that ended
+(`watch_jobs!`), and handles the shortcuts last (none while a project opens or closes).
 Call it on the render thread once per frame, after `drain!` and `refresh!`.
 """
 function draw_app(app)
-    w = app.window::Window
     ui = app.ui
     handle_requests!(app)
+    advance_quit!(app)
     watch_jobs!(app)
     prune_toasts!(app)
     sync_current_db!(app)
@@ -104,6 +106,24 @@ function draw_app(app)
     ui.tip = nothing
     ui.tip_hovered = false
     sync_search!(app)
+    if ui.backstage
+        draw_backstage(app)
+        draw_menu(app)
+    else
+        draw_shell(app)
+    end
+    draw_busy(app)
+    draw_toasts(app)
+    app.switching === nothing && handle_shortcuts!(app)
+    ui.tip_hovered || (ui.tooltip_id = 0)
+    draw_tooltip(app)
+    return nothing
+end
+
+# The shell: the frame with its panes, the dialogs, the search, the ribbon peek and the menu.
+function draw_shell(app)
+    w = app.window::Window
+    ui = app.ui
     modal = !isempty(ui.dialogs)
     searching = ui.search !== nothing
     collapsed = app.config.ribbon_collapsed
@@ -157,10 +177,6 @@ function draw_app(app)
         !modal && !searching && !had_menu && ig.IsKeyPressed(lib.ImGuiKey_Escape, false) &&
             (ui.ribbon_peek = false)
     end
-    draw_toasts(app)
-    handle_shortcuts!(app)
-    ui.tip_hovered || (ui.tooltip_id = 0)
-    draw_tooltip(app)
     return nothing
 end
 
