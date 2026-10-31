@@ -129,6 +129,34 @@ window_testset("command search") do
         end
     end
 
+    @testset "a reopened search starts on its first row, also over a dialog" begin
+        with_project_app(kangaroo()) do ctx, app
+            ctx.key("Ctrl+K"); ctx.frames(2)
+            @test UI.search_hits!(app)[1].id == "project.backstage"   # lit first
+            ctx.key("Escape"); ctx.frames(2)
+            ctx.click("JuliaMag/tabs/Database Tools")
+            ctx.click("JuliaMag/ribbon/Channel Math")
+            ctx.wait_until(() -> last_dialog(app) isa ToolDialog; timeout = 5)
+            ctx.frames(2)
+            ctx.key("Ctrl+K"); ctx.frames(2)
+            hits = UI.search_hits!(app)
+            # Project now waits for the dialog and sorts last; the highlight stays on row 1.
+            @test app.ui.search_index == 1 && app.ui.search_scroll == 0
+            first_hit = hits[1]
+            @test UI.search_reason(app, first_hit) === nothing && te.ItemExists(search_ref(first_hit.id))
+            @test first_hit.id == "ui.command_search"
+            # Enter runs that row: Command Search opens the search again, empty, with no toast.
+            ctx.type("comm"); ctx.frames(2)
+            @test UI.search_hits!(app)[app.ui.search_index].id == "ui.command_search"
+            toasts = length(app.toasts)
+            ctx.key("Enter"); ctx.frames(3)
+            @test app.ui.search == "" && length(app.toasts) == toasts && last_dialog(app) isa ToolDialog
+            ctx.key("Escape"); ctx.frames(2)
+            ctx.key("Escape")
+            ctx.wait_until(() -> isempty(app.ui.dialogs))
+        end
+    end
+
     @testset "a command that cannot run shows its reason" begin
         with_test_app() do ctx
             app = ctx.app_state()
@@ -317,6 +345,27 @@ window_testset("command search") do
             te.MouseDragWithDelta((20, 0))
             ctx.frames(2)
             @test app.config.right_width == 290f0   # shown 310 (900 - 430 - 160), less 20
+        end
+    end
+
+    @testset "a click on a squeezed pane's splitter keeps the saved width" begin
+        dir = mktempdir()
+        config, _ = UI.load_config(dir)
+        config.left_width = 480; config.right_width = 480
+        UI.save_config(config, dir)
+        with_test_app(; size = (900, 560), config_dir = dir) do ctx
+            app = ctx.app_state()
+            UI.run_command!(app, "ui.tools_pane")
+            ctx.frames(3)
+            # The right pane shows at 260; a click with no move leaves its 480.
+            ctx.click("JuliaMag/right/splitter")
+            ctx.frames(2)
+            ctx.wait_until(() -> app.queue.pending == 0)
+            @test app.config.right_width == 480f0 && UI.load_config(dir)[1].right_width == 480f0
+            ctx.click("JuliaMag/left/splitter")
+            ctx.frames(2)
+            ctx.wait_until(() -> app.queue.pending == 0)
+            @test app.config.left_width == 480f0 && UI.load_config(dir)[1].left_width == 480f0
         end
     end
 

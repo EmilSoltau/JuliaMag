@@ -38,11 +38,15 @@ end
 pane_setting(side::Symbol) = side === :left ? (:left_width, LEFT_RANGE, LEFT_DEFAULT) :
     (:right_width, RIGHT_RANGE, RIGHT_DEFAULT)
 
-"A splitter drag: the pane `side`, its width and the mouse x when the drag began."
-struct SplitterDrag
+"""
+A splitter drag: the pane `side`, its width and the mouse x when the drag began, and whether
+the mouse has `moved` since (a plain click changes nothing).
+"""
+mutable struct SplitterDrag
     side::Symbol
     start_width::Float32
     start_x::Float32
+    moved::Bool
 end
 
 """
@@ -50,7 +54,8 @@ end
 
 The splitter on the inner edge of the `side` pane (`:left` or `:right`) at device x
 `edge`, from `y0` to `y1`: 6 px wide over the edge, as the prototype's `.splitter`.
-A drag changes the pane width in the settings at once; the release saves the settings.
+A drag changes the pane width in the settings at once once the mouse moved; the release
+then saves the settings. A plain click changes nothing.
 It starts from the width the pane is `shown` at, in logical pixels (in a narrow window
 that can be less than the setting), so the edge follows the mouse.
 Returns true while the mouse is on it or drags it; then `paint_splitter` draws its line.
@@ -66,15 +71,17 @@ function splitter!(app, side::Symbol, edge::Real, y0::Real, y1::Real;
     if ig.IsItemActivated()
         start = shown === nothing ? pane_width(getfield(app.config, field), range, default) :
             Float32(clamp(shown, range[1], range[2]))
-        app.ui.drag = SplitterDrag(side, start, mouse.x)
+        app.ui.drag = SplitterDrag(side, start, mouse.x, false)
     end
     d = app.ui.drag
     if held && d isa SplitterDrag && d.side === side
-        setfield!(app.config, field, drag_width(d.start_width, mouse.x - d.start_x, s, side, range))
+        # Only a real move writes the width: a click on a squeezed pane keeps the saved one.
+        d.moved |= mouse.x != d.start_x
+        d.moved && setfield!(app.config, field, drag_width(d.start_width, mouse.x - d.start_x, s, side, range))
     end
     if ig.IsItemDeactivated() && d isa SplitterDrag && d.side === side
         app.ui.drag = nothing
-        save_settings!(app)
+        d.moved && save_settings!(app)
     end
     (hovered || held) && ig.SetMouseCursor(ig.ImGuiMouseCursor_ResizeEW)
     return hovered || held

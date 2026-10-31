@@ -72,7 +72,7 @@ end
     open_search!(app)
 
 Open the command search over whatever is open now, with an empty query and the first row
-highlighted. Any open menu closes. Does nothing when the search is open already.
+highlighted (the old results are dropped, so they cannot move it). Any open menu closes. Does nothing when the search is open already.
 """
 function open_search!(app)
     ui = app.ui
@@ -81,6 +81,7 @@ function open_search!(app)
     fill!(ui.search_buffer, 0x00)
     ui.search_index = 1
     ui.search_scroll = 0f0
+    ui.search_cache = nothing   # the old results must not move the highlight
     ui.search_level = length(ui.dialogs)
     ui.search_focus = true
     close_menu!(app)
@@ -100,6 +101,7 @@ function set_search_query!(app, text::AbstractString)
     ui.search = String(text)
     ui.search_index = 1
     ui.search_scroll = 0f0
+    ui.search_cache = nothing
     return nothing
 end
 
