@@ -103,6 +103,14 @@ These were out of scope for the UI shell.
   At scale 1 it makes the space 4 px and that sentence 264 px, and line heights stay the same.
   Its glyphs were not checked for blur.
   At scale 1.5 it makes text narrower, so it needs one font per size and scale, or a fix in ImGui; that is why it is not in plan 3.
+- Long expressions in text (`wrap_units` in `shell/draw.jl`): it glues an operator chain into one unit, so `A = B - C + D` is one unit.
+  A long expression can run past the box.
+  Consider breaking a unit after the last operator when it is wider than the line.
+- `ViewCache` (`app/state.jl`) watches only `database.json` and `grid.json`.
+  If a channel file is cut or damaged outside the app, no error shows until the JSON changes.
+  Before the cache, every revision bump read the files again.
+- With three sticky toasts open, a new ordinary toast is dropped at once (`add_toast!`).
+  The user then sees no toast for their action while three errors stay.
 
 ## Checks on real systems
 
@@ -126,6 +134,9 @@ These were out of scope for the UI shell.
 - Windows: call `GetLastError` right after `OpenProcess`, so the pid check reads the right error.
 - Windows: renaming a lock file that another program holds open without share-delete gives a raw `IOError`.
 - Windows: rename and read failures in `take_over!` escape as raw errors.
+- Plan 5: `thrown_by_juliamag` (`app/worker.jl`) compares the first frame's file with `SOURCE_DIR` and `pathof(JuliaMagCore)`.
+  In a packaged or relocated build the debug paths can differ.
+  Then every JuliaMag `ArgumentError` would count as a bug.
 
 ## Can wait
 
