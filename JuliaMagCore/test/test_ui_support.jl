@@ -117,7 +117,10 @@ isdefined(@__MODULE__, :add_test_grid!) || include(joinpath(@__DIR__, "support",
         catch e
             e
         end
-        sleep(0.3)                      # the edit has passed the first check and waits for the lock
+        # Wait until the edit has passed the first check and waits for the lock: Base sets the
+        # PARKED bit (0x02) of a `ReentrantLock`'s `havelock` while a task waits for it.
+        # No fixed sleep, so a slow start cannot skip the inner check.
+        @test timedwait(() -> s.lock.havelock & 0x02 != 0, 20; pollint = 0.005) === :ok
         s.state[] = 1                   # the close has started
         notify(release)
         wait(holder)
@@ -169,6 +172,9 @@ end
         t = ToolSpec("t.when", "When", "", "", Place[], Pair{String,ItemKind}[], list, :quick, (a...) -> nothing)
         @test setting_problems(t, Dict("on" => false, "n" => "x")) == Pair{String,String}[]
         @test setting_problems(t, Dict("on" => true, "n" => "x")) == ["n" => "N must be a number."]
+        # Inputs that are not a table: said so, not "has no setting".
+        @test setting_problems(t, Dict("on" => false, "inputs" => 3)) ==
+              ["inputs" => "The inputs of When must be a table of input name => item id."]
         @test validate(t, Dict("on" => true, "n" => "x")) == ["N must be a number."]
         # Input problems come first and use the input name as key.
         t2 = ToolSpec("t.when2", "When2", "", "", Place[], ["database" => ITEM_DATABASE], list, :quick, (a...) -> nothing)
@@ -209,7 +215,7 @@ end
             SettingSpec[BoolSetting("on", "On"), NumberSetting("n", "N"; default = 1, when = "on" => ["true"])],
             :quick, (a...) -> nothing))
         try
-            ok, msg, _ = run_tool(s, "t.when_run"; on = false, n = "junk")
+            ok, _, _ = run_tool(s, "t.when_run"; on = false, n = "junk")
             @test ok
             @test s.history[end].args["n"] == 1
             @test last_settings(s, "t.when_run")["n"] == 1
@@ -224,7 +230,10 @@ end
         @test Place("Database", "Import"; size = :small, order = 3).size == :small
         @test_throws ArgumentError Place("a", "b"; size = :huge)
         small_ids = ["coordinates.set_current", "coordinates.guess_utm"]
-        for t in tools(), p in t.places
+        # The built-in tools only: a tool another test leaves registered must not count.
+        builtin = filter(t -> parentmodule(t.run) === JuliaMagCore, tools())
+        @test length(builtin) >= 8
+        for t in builtin, p in t.places
             @test p.size == (t.id in small_ids && p.tab == "Coordinates" ? :small : :big)
         end
     end
@@ -372,6 +381,19 @@ end
         close_session!(s)
     end
 
+    @testset "the cursor, the marks, pairs and line selection refuse a closed session" begin
+        s, id = pair_session()
+        ls = [l.id for l in database(s.project, id).lines]
+        set_cursor!(s, Cursor(id, first(ls), 1))
+        close_session!(s)
+        @test_throws SessionClosedError set_cursor!(s, Cursor(id, first(ls), 2))
+        @test_throws SessionClosedError set_marked!(s, (1, 2))
+        @test_throws SessionClosedError add_pair!(s, id, "MAG", "ALT")
+        @test_throws SessionClosedError remove_pair!(s, id, "X", "Y")
+        @test_throws SessionClosedError set_lines_selected!(s, id, ls[1:1], false)
+        @test s.cursor.row == 1 && s.marked === nothing
+    end
+
     @testset "the three edits replay by script" begin
         s = fresh_session()
         copy_folder = joinpath(mktempdir(), "copy")       # the project before the import
@@ -387,7 +409,7 @@ end
         @test occursin("\nset_lines_selected!(s, db_1, [LineId(LINE, 1001, 0), LineId(LINE, 1002, 0)], false)\n", text)
         @test occursin("\nremove_pair!(s, db_1, \"X\", \"Y\")\n", text)
         close_session!(s)
-        # The copy was made after the import, so the script replays on it.
+        # The copy was made before the import: the script imports again, then replays the three edits.
         include_string(Module(), text)
         db = database(open_project(copy_folder), "db-1")
         @test [(p.x, p.y) for p in db.pairs] == [("MAG", "ALT")] && db.current_pair == 0

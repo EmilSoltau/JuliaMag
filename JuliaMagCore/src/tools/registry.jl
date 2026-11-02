@@ -79,6 +79,7 @@ function register_tool!(spec::ToolSpec)
     lock(TOOLS_LOCK) do
         k = findfirst(t -> t.id == spec.id, TOOLS)
         k === nothing ? push!(TOOLS, spec) : (TOOLS[k] = spec)
+        bump_registry!()
     end
     return spec
 end
@@ -89,6 +90,7 @@ function unregister_tool!(id::AbstractString)::Bool
         k = findfirst(t -> t.id == id, TOOLS)
         k === nothing && return false
         deleteat!(TOOLS, k)
+        bump_registry!()
         return true
     end
 end
@@ -144,14 +146,18 @@ order. `validate` returns the sentences only. A setting that is not used (see
 `is_active`) is skipped. A key that is not a setting is a problem under its own key.
 
 For a tool, the inputs are checked first when they are given, as `inputs` or as
-`values["inputs"]`; an input problem has the input's name as its key.
+`values["inputs"]`; an input problem has the input's name as its key. A
+`values["inputs"]` that is not a table of input names is a problem under `"inputs"`.
 """
 function setting_problems(spec::ToolSpec, values::AbstractDict; session::Union{Nothing,Session} = nothing,
                           inputs::Union{Nothing,AbstractDict} = nothing)::Vector{Pair{String,String}}
     given = get(values, "inputs", nothing)
     ins = inputs !== nothing ? inputs : given isa AbstractDict ? given : nothing
-    rest = ins === nothing ? values : Dict{String,Any}(String(k) => v for (k, v) in values if k != "inputs")
+    rest = Dict{String,Any}(String(k) => v for (k, v) in values if k != "inputs")
     own = ins === nothing ? Pair{String,String}[] : input_problem_pairs(spec, ins)
+    if inputs === nothing && haskey(values, "inputs") && !(given isa AbstractDict)
+        push!(own, "inputs" => "The inputs of $(spec.name) must be a table of input name => item id.")
+    end
     return vcat(own, settings_problems(spec.settings, rest, spec.name; session))
 end
 
@@ -291,13 +297,15 @@ function run_tool(s::Session, id::AbstractString; inputs::AbstractDict = Dict{St
     ins = Dict{String,String}(String(k) => String(v) for (k, v) in inputs)
     args = tool_args(values, ins)
     if spec.mode == :job
-        remember_settings!(s, spec.id, values)
-        try
-            return start_job!(s, spec.id, args, tool_work(s, spec, ins, values))
+        job = try
+            start_job!(s, spec.id, args, tool_work(s, spec, ins, values))
         catch e
             e isa SessionClosedError || rethrow()
             return (false, sprint(showerror, e), nothing)
         end
+        # Only a job that started remembers its settings; one refused by a close does not.
+        remember_settings!(s, spec.id, values)
+        return job
     end
     return run_quick(s, spec, ins, values, args)
 end
@@ -336,7 +344,7 @@ function tool_rerun_work(s::Session, spec::ToolSpec, a::Dict{String,Any})::Funct
         st = findfirst(x -> x.key == k, spec.settings)
         values[k] = st === nothing ? v : setting_value(spec.settings[st], v)
     end
-    values = deactivate_settings(spec.settings, values)
+    # `rerun!` gave `a` with its unused settings at their defaults already (`deactivate_settings`).
     problems = vcat(input_problems(spec, inputs), validate(spec, values; session = s))
     isempty(problems) || return (_, _) -> throw(ToolError(join(problems, " ")))
     ins = Dict{String,String}(String(k) => String(v) for (k, v) in inputs)

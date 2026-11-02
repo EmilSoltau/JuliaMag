@@ -514,3 +514,36 @@ end
     @test r.rows == 100
     @test collect(read_channel(database(s.project, id), LineId(LINE, 1001, 0), "MAG")) == 2 .* (1.0:100.0)
 end
+
+@testset "export_file and rerun! keep unused settings at their defaults" begin
+    # A setting that counts only when another has a value (`when`): unused, it is kept at
+    # its default in the job's args, the history, and a run again.
+    settings = [ChoiceSetting("mode", "Mode", ["plain", "fancy"]),
+        TextSetting("style", "Style"; default = "none", when = "mode" => ["fancy"])]
+    seen = Dict{String,Any}[]
+    register_exporter!(ExporterSpec("test.when_export", "When", ".when", ITEM_DATABASE, settings,
+        (s, id, path, st, p) -> (push!(seen, st); write(path, "x"); ExportResult(path, 0, 0, String[]))))
+    tool = ToolSpec("test.when_tool", "When", "", "", Place[], Pair{String,ItemKind}[], settings, :job,
+        (s, i, st, p, r) -> (push!(seen, st); ProjectItem[]))
+    register_tool!(tool)
+    try
+        s, id, dir = synthetic_session()
+        path = joinpath(dir, "out.when")
+        j = wait_job(export_file(s, id, path; exporter = "test.when_export", mode = "plain", style = "bold"))
+        @test status(j) == JOB_DONE && j.args["style"] == "none" && last(seen)["style"] == "none"
+        j2 = wait_job(rerun!(s, j; args = merge(j.args, Dict{String,Any}("style" => "bold"))))
+        @test status(j2) == JOB_DONE && j2.args["style"] == "none" && last(seen)["style"] == "none"
+        j3 = wait_job(rerun!(s, j2; args = merge(j2.args, Dict{String,Any}("mode" => "fancy", "style" => "bold"))))
+        @test j3.args["style"] == "bold" && last(seen)["style"] == "bold"
+        # A job tool, run again with an unused setting changed.
+        t = run_tool(s, "test.when_tool"; mode = "plain")
+        wait_job(t)
+        t2 = wait_job(rerun!(s, t; args = merge(t.args, Dict{String,Any}("style" => "bold"))))
+        @test status(t2) == JOB_DONE && t2.args["style"] == "none" && last(seen)["style"] == "none"
+        close_session!(s)
+    finally
+        unregister_exporter!("test.when_export")
+        unregister_tool!("test.when_tool")
+    end
+    @test !unregister_exporter!("test.when_export")
+end

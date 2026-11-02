@@ -271,7 +271,43 @@ function locked_session(make::Function, folder::String, force::Bool)::Session
     s.held_lock = h
     prepend!(s.warnings, warnings)
     sweep_leftovers!(s, replaced !== nothing)
+    note_opened!(s)
     return s
+end
+
+# The sessions opened inside `close_left_open`, in its task or in tasks started from it.
+const OPENED_SESSIONS = Base.ScopedValues.ScopedValue{Any}(nothing)
+
+note_opened!(s::Session) =
+    (o = OPENED_SESSIONS[]; o === nothing || lock(() -> push!(o[2], s), o[1]); nothing)
+
+"""
+    close_left_open(f, closed = String[])
+
+Run `f()` and return what it returns. Then close every session that `f` opened (also in
+tasks it started) and left open, and push the folder of each one to `closed`. This also
+happens when `f` throws; the error is then thrown again.
+
+Use it to run a user's script: a script that throws before `close_session!`, or never
+calls it, would else keep its project locked by this process. A session that fails to
+close is logged.
+"""
+function close_left_open(f, closed::Vector{String} = String[])
+    opened = (ReentrantLock(), Session[])
+    try
+        return Base.ScopedValues.with(f, OPENED_SESSIONS => opened)
+    finally
+        for s in lock(() -> copy(opened[2]), opened[1])
+            isopen(s) || continue
+            try
+                close_session!(s)
+                push!(closed, s.project.folder)
+            catch e
+                e isa InterruptException && rethrow()
+                @error "A session that a script left open did not close" exception = (e, catch_backtrace())
+            end
+        end
+    end
 end
 
 """
@@ -371,9 +407,11 @@ The `commit` actions run only while the project lock is still ours. When
 another session opened the project with `force = true`, its project file may
 list those folders again, so they are kept, with a warning.
 The lock is removed also when ending the stacks is interrupted.
+Only the first call closes: a call while another close runs returns at once, and the
+state never goes back from closed to closing.
 """
 function close_session!(s::Session)
-    s.state[] = SESSION_CLOSING
+    Threads.atomic_cas!(s.state, SESSION_OPEN, SESSION_CLOSING) == SESSION_OPEN || return nothing
     bump!(s)
     running = filter(j -> status(j) == JOB_RUNNING, jobs(s))
     foreach(cancel!, running)
@@ -476,7 +514,16 @@ function load_history(p::Project, warnings::Vector{String})::Vector{HistoryEntry
     return out
 end
 
-now_text() = Libc.strftime("%Y-%m-%dT%H:%M:%S%z", time())
+"""
+    now_text(t = time())
+
+The time `t` (seconds since 1970) in UTC, whole seconds, with a "Z", such as
+`"2026-10-31T09:15:02Z"`. History entries and project locks record their time with it.
+It does not depend on the machine's time zone or C library: on Windows, `strftime("%z")`
+gave the zone's name. Older records have `+hhmm` or that name; readers accept all forms.
+"""
+now_text(t::Real = time())::String =
+    Dates.format(Dates.unix2datetime(floor(t)), Dates.dateformat"yyyy-mm-ddTHH:MM:SS") * "Z"
 
 """
     job_time_text(t = time())
@@ -830,7 +877,9 @@ Throws `ArgumentError` when the item is not a database of the project, the line 
 in it, or the row is not between 1 and the number of rows of the line.
 """
 function set_cursor!(s::Session, c::Cursor)
+    check_open(s)
     lock(s.lock) do
+        check_open(s)
         k = findfirst(i -> i.id == c.item, s.project.items)
         (k !== nothing && s.project.items[k].kind == ITEM_DATABASE) ||
             throw(ArgumentError("the cursor needs a database, and $(c.item) is not one"))
@@ -855,7 +904,9 @@ Throws `ArgumentError` when there is no cursor, or when the range is not
 `1 <= first <= last <= nrows` of the cursor line.
 """
 function set_marked!(s::Session, range::Union{Nothing,Tuple{Int,Int}})
+    check_open(s)
     lock(s.lock) do
+        check_open(s)
         if range !== nothing
             c = s.cursor
             c === nothing && throw(ArgumentError("rows can be marked only when the cursor is on a line"))

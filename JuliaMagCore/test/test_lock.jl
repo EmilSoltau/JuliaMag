@@ -38,7 +38,9 @@ end
             @test isempty(s.project.items) && isempty(open_project(folder).items)
             close_session!(s)
             @test !isfile(lock_path(folder))
+            rev = revision(s)
             close_session!(s)                     # a second close does nothing
+            @test revision(s) == rev && s.state[] == JuliaMagCore.SESSION_CLOSED   # never back to closing
             s2 = open_session(folder)             # works after close
             @test isfile(lock_path(folder)) && isempty(s2.warnings)
             close_session!(s2)

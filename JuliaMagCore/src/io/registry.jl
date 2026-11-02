@@ -88,6 +88,21 @@ validate(spec::ImporterSpec, settings::AbstractDict; session::Union{Nothing,Sess
 setting_problems(spec::ImporterSpec, values::AbstractDict; session::Union{Nothing,Session} = nothing) =
     settings_problems(spec.settings, values, spec.name; session)
 
+# Goes up by one at each change to the tools, importers or exporters.
+const REGISTRY_GENERATION = Threads.Atomic{Int}(0)
+
+"""
+    registry_generation() -> Int
+
+A number that goes up whenever a tool, importer or exporter is registered, replaced or
+taken out. A caller that keeps a list built from `tools()`, `importers()` or
+`exporters()` builds it again when the number changed. Safe from any thread, and cheap:
+an atomic read.
+"""
+registry_generation()::Int = REGISTRY_GENERATION[]
+
+bump_registry!() = (Threads.atomic_add!(REGISTRY_GENERATION, 1); nothing)
+
 const IMPORTERS = ImporterSpec[]
 const IMPORTERS_LOCK = ReentrantLock()
 
@@ -97,6 +112,7 @@ function register_importer!(spec::ImporterSpec)
     lock(IMPORTERS_LOCK) do
         k = findfirst(i -> i.id == spec.id, IMPORTERS)
         k === nothing ? push!(IMPORTERS, spec) : (IMPORTERS[k] = spec)
+        bump_registry!()
     end
     return spec
 end
@@ -185,8 +201,20 @@ function register_exporter!(spec::ExporterSpec)
     lock(EXPORTERS_LOCK) do
         k = findfirst(e -> e.id == spec.id, EXPORTERS)
         k === nothing ? push!(EXPORTERS, spec) : (EXPORTERS[k] = spec)
+        bump_registry!()
     end
     return spec
+end
+
+"Take an exporter out of the list. Returns false when there was none with that id."
+function unregister_exporter!(id::AbstractString)::Bool
+    lock(EXPORTERS_LOCK) do
+        k = findfirst(e -> e.id == id, EXPORTERS)
+        k === nothing && return false
+        deleteat!(EXPORTERS, k)
+        bump_registry!()
+        return true
+    end
 end
 
 """

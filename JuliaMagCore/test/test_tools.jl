@@ -153,13 +153,17 @@ end
         n = length(tools())
         mk(id, places) = ToolSpec(id, id, "", "", places, Pair{String,ItemKind}[], SettingSpec[], :quick,
                                   (s, i, st, p, r) -> nothing)
+        g = registry_generation()
         register_tool!(mk("test.reg1", [Place("Zeta Tab", "A"), Place("Alpha Tab", "B")]))
+        @test registry_generation() == g + 1
         register_tool!(mk("test.reg2", [Place("Alpha Tab", "C"), Place("Mid Tab", "D")]))
         tb = tabs()
         @test findfirst(==("Zeta Tab"), tb) < findfirst(==("Alpha Tab"), tb) < findfirst(==("Mid Tab"), tb)
         @test count(==("Alpha Tab"), tb) == 1
         # a second registration with the same id replaces the first and keeps its place
+        g = registry_generation()
         register_tool!(mk("test.reg1", [Place("Zeta Tab", "New group")]))
+        @test registry_generation() == g + 1   # a replace changes the list, not its length
         @test length(tools()) == n + 2
         @test tool("test.reg1").places == [Place("Zeta Tab", "New group")]
         @test findfirst(t -> t.id == "test.reg1", tools()) < findfirst(t -> t.id == "test.reg2", tools())
@@ -170,7 +174,13 @@ end
         end
         @test count(t -> startswith(t.id, "test.thread"), tools()) == 8
         foreach(k -> unregister_tool!("test.thread$k"), 0:7)
+        g = registry_generation()
         @test unregister_tool!("test.reg1") && unregister_tool!("test.reg2") && !unregister_tool!("test.reg2")
+        @test registry_generation() == g + 2   # taking out nothing changes nothing
+        g = registry_generation()
+        register_importer!(only(filter(i -> i.id == "import.geosoft_xyz", importers())))
+        register_exporter!(first(exporters()))
+        @test registry_generation() == g + 2
         @test !("Mid Tab" in tabs()) && length(tools()) == n
         # the XYZ importer describes its settings with setting types
         xyz = only(filter(i -> i.id == "import.geosoft_xyz", importers()))
@@ -261,6 +271,32 @@ end
     save_project(s2.project)
     close_session!(s2)
     @test with_session(s3 -> any(w -> occursin("settings.tools is not an object", w), s3.warnings), s.project.folder)
+end
+
+# A setting whose project check closes the session: the close comes between the checks of
+# `run_tool` and the start of the job, as a close on another thread could.
+struct ClosingSetting <: JuliaMagCore.SettingSpec
+    key::String
+    label::String
+    help::String
+    advanced::Bool
+    when::JuliaMagCore.SettingWhen
+    default::String
+end
+JuliaMagCore.setting_problem(::ClosingSetting, x) = nothing
+JuliaMagCore.session_problem(::ClosingSetting, x, s::Session) = (close_session!(s); nothing)
+
+@testset "a job refused by a close does not remember its settings" begin
+    try
+        register_tool!(ToolSpec("test.closing", "Closing", "", "database", Place[], Pair{String,ItemKind}[],
+            [ClosingSetting("name", "Name", "", false, nothing, "made")], :job, (s, i, st, p, r) -> ProjectItem[]))
+        s = fresh_session()
+        ok, msg, _ = run_tool(s, "test.closing"; name = "new")
+        @test !ok && occursin("closed", msg)
+        @test !haskey(s.remembered, "test.closing")
+    finally
+        unregister_tool!("test.closing")
+    end
 end
 
 @testset "job tools" begin

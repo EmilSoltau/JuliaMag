@@ -178,3 +178,35 @@ using JuliaMagCore
         end
     end
 end
+
+@testset "close_left_open closes the sessions a script left open" begin
+    mktempdir() do dir
+        before = new_session(joinpath(dir, "before"), "before")
+        try
+            closed = String[]
+            inner = Ref{Any}(nothing)
+            value = close_left_open(closed) do
+                inner[] = new_session(joinpath(dir, "left"), "left")
+                done = new_session(joinpath(dir, "done"), "done")
+                close_session!(done)
+                fetch(Threads.@spawn new_session(joinpath(dir, "spawned"), "spawned"))
+                42
+            end
+            @test value == 42
+            @test sort(basename.(closed)) == ["left", "spawned"]
+            @test !isopen(inner[]) && isopen(before)
+            # The locks are gone: the projects open again without force.
+            close_session!(open_session(joinpath(dir, "left")))
+            # A script that throws: its sessions close, and the error comes through.
+            closed = String[]
+            @test_throws ErrorException("the script broke") close_left_open(closed) do
+                new_session(joinpath(dir, "broke"), "broke")
+                error("the script broke")
+            end
+            @test basename.(closed) == ["broke"]
+            close_session!(open_session(joinpath(dir, "broke")))
+        finally
+            close_session!(before)
+        end
+    end
+end

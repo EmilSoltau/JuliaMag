@@ -28,6 +28,25 @@ end
     @test JuliaMagCore.job_time_text(31_536_000.5) == "1971-01-01T00:00:00.500Z"
 end
 
+@testset "history and lock times are UTC with a Z, whole seconds" begin
+    # `strftime("%z")` gave the zone's name on Windows (I4). Dates gives the same text everywhere.
+    @test JuliaMagCore.now_text(0.0) == "1970-01-01T00:00:00Z"
+    @test JuliaMagCore.now_text(1_761_902_102.999) == "2025-10-31T09:15:02Z"
+    stamp = r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$"
+    @test occursin(stamp, JuliaMagCore.now_text())
+    mktempdir() do dir
+        s = new_session(joinpath(dir, "p"), "p")
+        try
+            @test occursin(stamp, JuliaMagCore.read_lock(joinpath(s.project.folder, JuliaMagCore.LOCK_FILE)).started)
+            f = joinpath(dir, "a.xyz"); write_synthetic_xyz(f; lines = 1, ties = 0, rows_per_line = 10)
+            wait_job(import_file(s, f; crs = "EPSG:7855"))
+            @test !isempty(s.history) && all(e -> occursin(stamp, e.time), s.history)
+        finally
+            close_session!(s)
+        end
+    end
+end
+
 @testset "job records, ids and history" begin
     mktempdir() do dir
         s = new_session(joinpath(dir, "p"), "p")
