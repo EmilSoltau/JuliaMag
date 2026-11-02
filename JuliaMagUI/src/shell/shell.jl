@@ -197,20 +197,18 @@ end
 """
     guarded(app, f)
 
-Call `f(app)`. An error never ends the frame: a user error (the core's errors and
-`ArgumentError`) becomes an error toast with its message; any other error is a bug, so it
-is noted as a draw error (`note_draw_error!`: logged, toasted, and failed by the tests).
+Call `f(app)`. An error never ends the frame: a user error (`is_user_error`) becomes an
+error toast with its message; any other error is a bug, so it is noted as a draw error
+(`note_draw_error!`: logged, toasted, and failed by the tests).
 """
 function guarded(app, f)
     try
         f(app)
     catch e
         e isa InterruptException && rethrow()
-        if e isa USER_ERRORS
-            toast!(app, :error, plain_message(e))
-        else
-            note_draw_error!(app, e, catch_backtrace())
-        end
+        bt = catch_backtrace()
+        is_user_error(e, bt) ? toast!(app, :error, safe_plain_message(e)) :
+            note_draw_error!(app, e, bt)
     end
     return nothing
 end

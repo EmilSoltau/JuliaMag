@@ -264,7 +264,10 @@ mutable struct DialogPlace
     dialog::Any
     height::Float32
     centre_until::Int
+    window::NTuple{2,Float32}   # the app window's size when the dialog was placed last
 end
+DialogPlace(dialog, height::Real, centre_until::Integer) =
+    DialogPlace(dialog, Float32(height), Int(centre_until), (0f0, 0f0))
 
 # A dialog measures its body one frame late (the child window sizes itself to what it
 # holds), so a new height can come up to this many frames after an open or a toggle.
@@ -274,7 +277,8 @@ const CENTRE_FRAMES = 3
 # it opened or a section toggled, it is centred, as the prototype's `place()`:
 # `Math.max(20, Math.round((innerHeight - h) / 2 - 30))` in CSS px, and centred across.
 # Any other change (an error line, a coordinate system name) keeps it where it is, also
-# where the user dragged it, and only keeps its bottom 20 px inside the window.
+# where the user dragged it, and only keeps its bottom 20 px inside the window. When the
+# app window gets smaller, the dialog is pulled back inside it the same way, and across.
 function keep_on_screen!(app, d, level::Integer, vp, scale::Real)
     places = app.ui.dialog_places
     while length(places) < level
@@ -287,8 +291,11 @@ function keep_on_screen!(app, d, level::Integer, vp, scale::Real)
     # else its footer can stay cut off until the next input (a result from the worker).
     frame <= pl.centre_until && draw_frames!(app.window, pl.centre_until - frame + 1)
     h = Float32(ig.GetWindowSize().y)
-    pl.height == h && return nothing
+    win = (Float32(vp.Size.x), Float32(vp.Size.y))
+    pl.height == h && pl.window == win && return nothing
+    resized = pl.window != win
     pl.height = h
+    pl.window = win
     s = Float32(scale)
     if frame <= pl.centre_until
         top = max(20f0, rnd((vp.Size.y - h) / (2s) - 30)) * s
@@ -297,8 +304,11 @@ function keep_on_screen!(app, d, level::Integer, vp, scale::Real)
         ig.SetWindowPos((vp.Pos.x + left, vp.Pos.y + top))
     else
         pos = ig.GetWindowPos()
+        w = Float32(ig.GetWindowSize().x)
         y = max(vp.Pos.y + px(scale, 20), min(pos.y, vp.Pos.y + vp.Size.y - px(scale, 20) - h))
-        y == pos.y || ig.SetWindowPos((pos.x, round(y)))
+        # Across only when the app window changed: a drag may leave it partly outside.
+        x = resized ? max(vp.Pos.x, min(pos.x, vp.Pos.x + vp.Size.x - w)) : pos.x
+        (x, y) == (pos.x, pos.y) || ig.SetWindowPos((round(x), round(y)))
     end
     return nothing
 end
@@ -334,8 +344,7 @@ one log entry, and a failed test in the harness: T13-C6) and return true; the di
 closes. So a broken form never ends the app.
 """
 function run_body(f, app)::Bool
-    state = Ref{lib.ImGuiErrorRecoveryState}()
-    lib.igErrorRecoveryStoreState(state)
+    state = store_imgui_state()
     try
         f()
         return false
@@ -348,7 +357,49 @@ function run_body(f, app)::Bool
     end
 end
 
+"""
+    ImGuiStatePoint
+
+What `recover_imgui_state` goes back to: ImGui's own error recovery state (windows, ids,
+groups, styles, fonts), and the item width and text wrap stacks of the current window,
+which ImGui's recovery does not cover.
+"""
+struct ImGuiStatePoint
+    state::Base.RefValue{lib.ImGuiErrorRecoveryState}
+    window::Ptr{lib.ImGuiWindow}
+    item_widths::Cint
+    text_wraps::Cint
+end
+
+# The sizes of the item width and text wrap stacks of window `w`. An `ImVector` starts
+# with its `Size`, a `Cint`.
+window_stack_sizes(w::Ptr{lib.ImGuiWindow})::NTuple{2,Cint} =
+    (unsafe_load(Ptr{Cint}(w.DC.ItemWidthStack)), unsafe_load(Ptr{Cint}(w.DC.TextWrapPosStack)))
+
+function store_imgui_state()::ImGuiStatePoint
+    state = Ref{lib.ImGuiErrorRecoveryState}()
+    lib.igErrorRecoveryStoreState(state)
+    w = lib.igGetCurrentWindowRead()
+    w == C_NULL && return ImGuiStatePoint(state, w, Cint(0), Cint(0))
+    return ImGuiStatePoint(state, w, window_stack_sizes(w)...)
+end
+
 # ImGui's recovery, without its asserts, log lines and tooltip: the caller reports the error.
+# Then the item widths and text wraps that the failed code pushed in the window are popped.
+function recover_imgui_state(point::ImGuiStatePoint)
+    recover_imgui_state(point.state)
+    w = point.window
+    if w != C_NULL && lib.igGetCurrentWindowRead() == w
+        while window_stack_sizes(w)[1] > point.item_widths
+            ig.PopItemWidth()
+        end
+        while window_stack_sizes(w)[2] > point.text_wraps
+            ig.PopTextWrapPos()
+        end
+    end
+    return nothing
+end
+
 function recover_imgui_state(state::Ref{lib.ImGuiErrorRecoveryState})
     io = Ptr{lib.ImGuiIO}(ig.GetIO())
     old = (unsafe_load(io.ConfigErrorRecoveryEnableAssert), unsafe_load(io.ConfigErrorRecoveryEnableDebugLog),

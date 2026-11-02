@@ -265,6 +265,32 @@ window_testset("backstage") do
         end
     end
 
+    @testset "Quit while a script runs: the question sits over the busy overlay and takes the click" begin
+        with_project_app(kangaroo()) do ctx, app
+            quits = Ref(0)
+            app.quit_hook = a -> (quits[] += 1; nothing)
+            flag = joinpath(mktempdir(), "go")
+            script = joinpath(mktempdir(), "wait.jl")
+            write(script, "while !isfile($(repr(flag))); sleep(0.02); end\n")
+            try
+                UI.run_script!(app, script)
+                ctx.wait_until(() -> app.ui.bs.running; timeout = 20)
+                ctx.frames(2)
+                close_window(ctx)
+                ctx.wait_until(() -> bs_dialog(app) isa ConfirmDialog; timeout = 5)
+                ctx.frames(3)
+                ctx.shot(joinpath(BACKSTAGE_SHOTS, "quit-script-light.png"))
+                @test bs_dialog(app).text == "A script is still running. Quit anyway?"
+                ctx.click(dialog_button("Quit"))
+                ctx.wait_until(() -> quits[] == 1; timeout = 5)
+                @test isempty(app.ui.dialogs)
+            finally
+                touch(flag)   # let the script end, so the worker can stop
+            end
+            ctx.wait_until(() -> !app.ui.bs.running; timeout = 20)
+        end
+    end
+
     @testset "a close warning is shown before the app quits" begin
         s = kangaroo()
         Core.push_undo!(s, Core.UndoStep("test step", () -> nothing, () -> nothing, () -> nothing,
@@ -384,6 +410,37 @@ window_testset("backstage") do
             ctx.click("JuliaMag/ribbon/About JuliaMag")
             ctx.frames(2)
             @test app.ui.backstage && app.ui.backstage_page === :about
+        end
+    end
+
+    @testset "the Getting Started names start after the widest badge (T15-P3)" begin
+        r = with_test_app() do ctx
+            out = Ref{Any}(nothing)
+            ctx.on_render(w -> (out[] = (
+                nine = UI.widest_badge(1, 9) == maximum(k -> UI.badge_width(1, string(k)), 1:9),
+                twelve = UI.widest_badge(1.5, 12) >= UI.badge_width(1.5, "10"),
+                steps = UI.widest_badge(1, length(UI.GETTING_STARTED)) ==
+                        maximum(k -> UI.badge_width(1, string(k)), 1:length(UI.GETTING_STARTED)))))
+            out[]
+        end
+        @test r.nine && r.twelve && r.steps
+    end
+
+    @testset "toast actions wait while a project opens or closes" begin
+        with_project_app(kangaroo()) do ctx, app
+            ran = Ref(0)
+            t = UI.toast!(app, :info, "With an action"; actions = ["Act" => a -> (ran[] += 1)])
+            ctx.frames(3)
+            app.switching = "Opening..."
+            ctx.frames(2)
+            ctx.click(UI.toast_ref(t) * "/Act##action1")
+            ctx.frames(2)
+            @test ran[] == 0 && t in app.toasts
+            app.switching = nothing
+            ctx.frames(2)
+            ctx.click(UI.toast_ref(t) * "/Act##action1")
+            ctx.frames(2)
+            @test ran[] == 1 && !(t in app.toasts)
         end
     end
 

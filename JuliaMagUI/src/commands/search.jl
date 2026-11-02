@@ -24,6 +24,10 @@ const SEARCH_KEYS_W = 54     # the shortcut column is at least this wide
 "The command's name without the `...` of a command that opens a dialog."
 plain_name(c::Command) = replace(c.name, r"\.\.\.$" => "")
 
+"The name to show for `c` now: its `checked_name` while it is checked, else `plain_name`."
+shown_name(app, c::Command)::String =
+    !isempty(c.checked_name) && c.checked(app) === true ? c.checked_name : plain_name(c)
+
 """
     search_score(c, q) -> Int
 
@@ -400,7 +404,7 @@ function draw_search_row(app, dl, row::Box, c::Command)
     x = row.x0 + f(8)
     draw_icon(dl, c.icon, (rnd(x), rnd(mid - f(8))), 16; style = enabled ? :normal : :disabled)
     x += f(16 + 8)
-    x += draw_text_mid(dl, FONT_REGULAR, 13, x, mid, u32(enabled ? t.text : t.text_disabled), plain_name(c))
+    x += draw_text_mid(dl, FONT_REGULAR, 13, x, mid, u32(enabled ? t.text : t.text_disabled), shown_name(app, c))
     keys_w = max(f(SEARCH_KEYS_W), text_width(FONT_REGULAR, 11, c.shortcut))
     keys_x1 = row.x1 - f(8)
     isempty(c.shortcut) || draw_text_mid(dl, FONT_REGULAR, 11,

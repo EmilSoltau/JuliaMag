@@ -252,7 +252,7 @@ function wrap_lines(role::FontRole, size::Real, text::AbstractString, max_width:
     with_font(role, size) do
         for para in split(text, '\n')
             line = ""
-            for word in split(para, ' '; keepempty = false)
+            for word in wrap_units(para)
                 trial = isempty(line) ? String(word) : line * " " * word
                 if isempty(line) || ig.CalcTextSize(trial).x <= max_width
                     line = trial
@@ -265,6 +265,33 @@ function wrap_lines(role::FontRole, size::Real, text::AbstractString, max_width:
         end
     end
     return lines
+end
+
+# An operator standing alone between two words, as in `MAG_IGRF = MAG - IGRF`.
+const WRAP_OPERATORS = ("=", "-", "+", "*", "/", "^", "<", ">", "<=", ">=", "==", "!=")
+
+"""
+    wrap_units(text) -> Vector{String}
+
+The words of `text` for `wrap_lines`. An operator that stands alone between two words
+keeps them together, so an expression such as `MAG_IGRF = MAG - IGRF` never breaks in
+its middle and no line starts with "= MAG". A unit that is wider than the line still
+gets a line of its own.
+"""
+function wrap_units(text::AbstractString)::Vector{String}
+    words = split(text, ' '; keepempty = false)
+    units = String[]
+    glue = false   # the last word was an operator: the next word joins its unit
+    for (k, w) in enumerate(words)
+        op = w in WRAP_OPERATORS && 1 < k < length(words)
+        if !isempty(units) && (op || glue)
+            units[end] *= " " * w
+        else
+            push!(units, String(w))
+        end
+        glue = op
+    end
+    return units
 end
 
 """

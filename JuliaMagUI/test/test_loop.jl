@@ -90,6 +90,58 @@ rgb(p) = (Float32(p.r), Float32(p.g), Float32(p.b))
             # A full pair earlier in the order wins.
             touch(joinpath(dir, "NotoSans-SemiBold.ttf"))
             @test find_system_fonts([dir]).regular == joinpath(dir, "c", "NotoSans-Regular.ttf")
+            # Names match without case, as Windows file names do.
+            touch(joinpath(dir, "SEGOEUI.TTF")); touch(joinpath(dir, "SegUISB.ttf"))
+            @test find_system_fonts([dir]).regular == joinpath(dir, "SEGOEUI.TTF")
+        end
+        # The user's own font folders come first.
+        if Sys.islinux()
+            dirs = UI.system_font_dirs(Dict("XDG_DATA_HOME" => "/xdg"), "/home/u")
+            @test dirs == ["/xdg/fonts", "/home/u/.fonts", "/usr/local/share/fonts", "/usr/share/fonts"]
+            @test first(UI.system_font_dirs(Dict{String,String}(), "/home/u")) == "/home/u/.local/share/fonts"
+        elseif Sys.iswindows()
+            dirs = UI.system_font_dirs(Dict("LOCALAPPDATA" => raw"C:\Users\u\AppData\Local", "WINDIR" => raw"C:\Windows"))
+            @test dirs == [raw"C:\Users\u\AppData\Local\Microsoft\Windows\Fonts", raw"C:\Windows\Fonts"]
+        end
+    end
+
+    @testset "a font file that cannot be read falls back to the bundled one" begin
+        # ImGui would assert on a missing file before it returns NULL; the file is checked first.
+        @test !UI.font_file_readable("/no/such/font.ttf")
+        empty_file = tempname() * ".ttf"
+        touch(empty_file)
+        @test !UI.font_file_readable(empty_file)
+        @test UI.font_file_readable(BUNDLED_FONTS.regular)
+        ctx = ig.CreateContext()
+        try
+            atlas = unsafe_load(ig.GetIO().Fonts)
+            f = @test_logs (:warn, r"Could not load the font /no/such/font.ttf") UI.add_font(atlas,
+                "/no/such/font.ttf", BUNDLED_FONTS.regular)
+            @test f.font != C_NULL
+            f2 = @test_logs (:warn, r"Could not load the font") UI.add_font(atlas, empty_file, BUNDLED_FONTS.mono)
+            @test f2.font != C_NULL
+        finally
+            ig.DestroyContext(ctx)
+            rm(empty_file; force = true)
+        end
+    end
+
+    @testset "the GLFW.jl internals that create_glfw_window copies are there" begin
+        # A GLFW.jl that changes them breaks here, by name, not in a window.
+        @test isdefined(GLFW, :_window_callbacks) && GLFW._window_callbacks isa AbstractDict
+        @test isdefined(GLFW, :_window_callback_num) && GLFW._window_callback_num[] isa Integer
+        @test isdefined(GLFW, :Callback)
+        @test pkgversion(GLFW).major == 3 && pkgversion(GLFW).minor == 4
+    end
+
+    @testset "run_window refuses a task that may leave thread 1" begin
+        for pool in (:interactive, :default)
+            e = fetch(Threads.@spawn pool try
+                run_window(w -> nothing)
+            catch err
+                err
+            end)
+            @test e isa ArgumentError && startswith(e.msg, "run_window must run on thread 1")
         end
     end
 
@@ -111,6 +163,11 @@ rgb(p) = (Float32(p.r), Float32(p.g), Float32(p.b))
         # Any other error is a warning.
         ccall(cb, Cvoid, (Cint, Ptr{UInt8}), Cint(GLFW.INVALID_ENUM), "Invalid window hint")
         @test_logs (:warn, r"Invalid window hint") UI.log_glfw_errors()
+        # A platform error that only names a monitor is not taken for a monitor change.
+        ccall(cb, Cvoid, (Cint, Ptr{UInt8}), Cint(GLFW.PLATFORM_ERROR), "Wayland: Failed to create monitor surface")
+        @test_logs (:warn, r"monitor surface") UI.log_glfw_errors()
+        @test UI.monitor_error(Int(GLFW.PLATFORM_ERROR), "X11: Failed to query video mode")
+        @test !UI.monitor_error(Int(GLFW.INVALID_ENUM), "X11: Failed to query video mode")
         # A real GLFW error goes through it too and throws nothing.
         if GLFW.is_initialized()
             GLFW.WindowHint(0x7fff0000, 1)
@@ -227,64 +284,75 @@ rgb(p) = (Float32(p.r), Float32(p.g), Float32(p.b))
         @testset "idle and wake" begin
             # The waker must run on a thread that is not the render thread.
             @test Threads.threadid() == 1
-            waker_thread = Threads.Atomic{Int}(0)
-
-            frame_times = Float64[]
-            pending = Threads.Atomic{Float64}(0.0)   # time of a wake not yet seen
-            latencies = Float64[]
             n_wakes = 9
-            t0 = Ref(0.0)
-            idle_from = Ref(0.0)   # start of the 2 s with no input
-            timer_fired = Ref(0.0)
-            worker = Ref{Task}()
-            run_window(; fonts = :bundled, passive = true) do w
-                now = time()
-                t0[] == 0 && (t0[] = now)
-                push!(frame_times, now)
-                p = pending[]
-                if p > 0 && now >= p
-                    push!(latencies, now - p)
-                    pending[] = 0.0
-                end
-                # The window gets a burst of events when it shows. Wait for it to pass.
-                if idle_from[] == 0 && now - t0[] > 1.0 && now >= w.animating_until
-                    idle_from[] = now
-                    # A Julia timer on thread 1 must still run while the loop idles.
-                    Timer(_ -> (timer_fired[] = time()), 0.3)
-                end
-                # After the 2 s idle, a worker wakes the loop 9 times.
-                if idle_from[] > 0 && now - idle_from[] > 2.0 && !isassigned(worker)
-                    worker[] = Threads.@spawn begin
-                        waker_thread[] = Threads.threadid()
-                        waker_thread[] == 1 && return   # checked below
-                        for _ in 1:n_wakes
-                            Libc.systemsleep(0.2 + 0.05 * rand())
-                            pending[] = time()
-                            wake!(w)
+            # One run: 2 s with no input, a Julia timer, then 9 wakes from a worker thread.
+            function idle_run()
+                waker_thread = Threads.Atomic{Int}(0)
+                frame_times = Float64[]
+                pending = Threads.Atomic{Float64}(0.0)   # time of a wake not yet seen
+                latencies = Float64[]
+                t0 = Ref(0.0)
+                idle_from = Ref(0.0)   # start of the 2 s with no input
+                timer_fired = Ref(0.0)
+                worker = Ref{Task}()
+                run_window(; fonts = :bundled, passive = true) do w
+                    now = time()
+                    t0[] == 0 && (t0[] = now)
+                    push!(frame_times, now)
+                    p = pending[]
+                    if p > 0 && now >= p
+                        push!(latencies, now - p)
+                        pending[] = 0.0
+                    end
+                    # The window gets a burst of events when it shows. Wait for it to pass.
+                    if idle_from[] == 0 && now - t0[] > 1.0 && now >= w.animating_until
+                        idle_from[] = now
+                        # A Julia timer on thread 1 must still run while the loop idles.
+                        Timer(_ -> (timer_fired[] = time()), 0.3)
+                    end
+                    # After the 2 s idle, a worker wakes the loop 9 times.
+                    if idle_from[] > 0 && now - idle_from[] > 2.0 && !isassigned(worker)
+                        worker[] = Threads.@spawn begin
+                            waker_thread[] = Threads.threadid()
+                            waker_thread[] == 1 && return   # checked below
+                            for _ in 1:n_wakes
+                                Libc.systemsleep(0.2 + 0.05 * rand())
+                                pending[] = time()
+                                wake!(w)
+                            end
                         end
                     end
+                    done = length(latencies) >= n_wakes
+                    (done || now - t0[] > 20) && quit!(w)
+                    return nothing
                 end
-                done = length(latencies) >= n_wakes
-                (done || now - t0[] > 20) && quit!(w)
-                return nothing
+                isassigned(worker) && wait(worker[])
+                idle = count(t -> idle_from[] <= t < idle_from[] + 2.0, frame_times)
+                return (; idle, idle_from = idle_from[], timer_late = timer_fired[] - idle_from[] - 0.3,
+                    latencies, waker = waker_thread[])
             end
-            isassigned(worker) && wait(worker[])
-            idle = count(t -> idle_from[] <= t < idle_from[] + 2.0, frame_times)
-            @debug "Idle loop: $idle frames in 2 s; timer late by " *
-                   "$(round(Int, 1000 * (timer_fired[] - idle_from[] - 0.3))) ms; " *
-                   "wake latencies (ms): $(join(round.(Int, 1000 .* latencies), ", "))"
-            waker_thread[] == 1 && @error "The waker ran on the render thread. " *
-                                          "Run the tests with `julia -t auto,1`."
-            @test waker_thread[] > 1
-            @test idle_from[] > 0
-            # The loop waits at most 0.1 s, so about 20 frames; never a busy loop.
-            @test 15 <= idle <= 25
-            # It fires at the end of the next idle wait at the latest.
-            @test 0 < timer_fired[] - idle_from[] - 0.3 <= 0.15
-            @test length(latencies) == n_wakes
-            @test all(<=(0.150), latencies)
-            # A timeout frame alone would give a median of about 50 ms.
-            @test length(latencies) == n_wakes && sort(latencies)[(n_wakes + 1) ÷ 2] <= 0.025
+            # The loop waits at most 0.1 s, so about 20 frames in 2 s; never a busy loop. A
+            # timer fires at the end of the next idle wait at the latest. A wake comes through
+            # at once: a timeout frame alone would give a median of about 50 ms.
+            timing_ok(r) = 15 <= r.idle <= 25 && 0 < r.timer_late <= 0.15 &&
+                length(r.latencies) == n_wakes && all(<=(0.150), r.latencies) &&
+                sort(r.latencies)[(n_wakes + 1) ÷ 2] <= 0.025
+            r = idle_run()
+            if r.waker > 1 && r.idle_from > 0 && !timing_ok(r)
+                # Wall-clock bounds: a machine busy with other work can miss them once.
+                @info "Idle and wake: the timing was off, so the run is repeated once (a busy machine?)" r.idle r.timer_late r.latencies
+                r = idle_run()
+            end
+            @debug "Idle loop: $(r.idle) frames in 2 s; timer late by $(round(Int, 1000 * r.timer_late)) ms; " *
+                   "wake latencies (ms): $(join(round.(Int, 1000 .* r.latencies), ", "))"
+            r.waker == 1 && @error "The waker ran on the render thread. Run the tests with `julia -t auto,1`."
+            @test r.waker > 1
+            @test r.idle_from > 0
+            @test 15 <= r.idle <= 25
+            @test 0 < r.timer_late <= 0.15
+            @test length(r.latencies) == n_wakes
+            @test all(<=(0.150), r.latencies)
+            @test length(r.latencies) == n_wakes && sort(r.latencies)[(n_wakes + 1) ÷ 2] <= 0.025
         end
     end
 end

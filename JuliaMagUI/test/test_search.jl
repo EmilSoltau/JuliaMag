@@ -55,7 +55,14 @@ ids(cmds) = [c.id for c in cmds]
             r = ids(search_commands(UI.commands(app), ""))
             @test r[1:7] == ["project.backstage", "project.new", "project.open", "project.close",
                 "project.run_script", "session.undo", "session.redo"]
-            @test findfirst(==("ui.command_search"), r) < findfirst(==("database.channel_math"), r)
+            # The search does not list itself, as in the prototype (T14-P1).
+            @test !("ui.command_search" in r)
+            # A toggle shows the name of what it does now (T8: Collapse or Expand Ribbon).
+            rib = UI.find_command(app, "ui.ribbon")
+            @test UI.shown_name(app, rib) == "Collapse Ribbon"
+            app.config.ribbon_collapsed = true
+            @test UI.shown_name(app, rib) == "Expand Ribbon"
+            app.config.ribbon_collapsed = false
             # A query still ranks by score first.
             @test first(search_commands(UI.commands(app), "channel m")).id == "database.channel_math"
         end
@@ -121,10 +128,10 @@ ids(cmds) = [c.id for c in cmds]
             # Run from the search, Undo only says why.
             UI.run_search_hit!(app, find("session.undo"))
             @test last(app.toasts).text == "Close the dialog first." && app.queue.pending == 0
-            # They sort after the commands that can run: the list opens on Command Search.
+            # They sort after the commands that can run: the list opens on one that can.
             UI.open_search!(app)
             r = ids(UI.search_hits!(app))
-            @test first(r) == "ui.command_search"
+            @test UI.search_reason(app, find(first(r))) === nothing
             @test findfirst(==("session.undo"), r) > findfirst(==("database.channel_math"), r)
         end
     end

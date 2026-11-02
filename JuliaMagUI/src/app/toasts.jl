@@ -57,15 +57,22 @@ toast_ref(t::Toast) = "//###toast$(t.id)"
 "True when toast `t` has been shown for its full time at `now`."
 toast_expired(t::Toast, now::Real = time())::Bool = now - t.born >= t.ms / 1000
 
+"True for a toast that stays until the app takes it away, such as a draw error's."
+is_sticky(t::Toast)::Bool = t.ms == typemax(Int)
+
 """
     add_toast!(toasts, t)
 
-Add `t` to the list. With more than $(MAX_TOASTS), the oldest are dropped.
+Add `t` to the list. With more than $(MAX_TOASTS), the oldest ordinary toasts are dropped
+first: an ordinary toast never pushes out a sticky one (a draw error's). When `t` is
+sticky and every toast is sticky, the oldest goes.
 """
 function add_toast!(toasts::Vector{Toast}, t::Toast)
     push!(toasts, t)
     while length(toasts) > MAX_TOASTS
-        popfirst!(toasts)
+        k = findfirst(!is_sticky, toasts)
+        k === nothing && (k = 1)
+        deleteat!(toasts, k)
     end
     return t
 end

@@ -95,12 +95,29 @@ function job_summary(r::JobRow)::String
     st = r.status
     st == Core.JOB_RUNNING && return percent_text(r.job.progress[])
     st == Core.JOB_CANCELLED && return "Cancelled at $(percent_text(r.job.progress[])). Nothing was written."
-    st == Core.JOB_FAILED && return r.error
+    st == Core.JOB_FAILED && return job_text(r, r.error)
     st == Core.JOB_UNDONE && return "Undone."
     sec = elapsed(r.started, r.finished)
     head = isfinite(sec) && sec >= 0 ? "Done in $(duration_text(sec))." : "Done."
     made = made_text(r)
     return isempty(made) ? head : head * " " * made
+end
+
+"""
+    job_text(row, text) -> String
+
+A core error or warning of a job as a sentence (`sentence`), as the toasts show them. The
+names the job knows (its items, and the text of its settings, such as a channel) keep
+their case at the start.
+"""
+job_text(r::JobRow, text::AbstractString)::String = sentence(text; names = job_names(r))
+
+function job_names(r::JobRow)::Set{String}
+    names = Set{String}(values(r.names))
+    for v in values(r.args)
+        v isa AbstractString && push!(names, String(v))
+    end
+    return names
 end
 
 # "Made A, B and C." for the job's outputs, or `""`.
@@ -182,8 +199,8 @@ some C libraries return nothing useful for those.
 """
 function local_offset(t::Real, localtime = Libc.TmStruct)::Int
     (isfinite(t) && t >= 0) || return 0
-    whole = floor(Int, t)
     offset = try
+        whole = floor(Int, t)   # inside: a time past what an Int holds throws here
         tm = localtime(whole)
         wall = days_from_civil(Int(tm.year) + 1900, Int(tm.month) + 1, Int(tm.mday)) * 86400 +
             Int(tm.hour) * 3600 + Int(tm.min) * 60 + Int(tm.sec)
@@ -309,14 +326,16 @@ end
     show_report!(app, row)
 
 Read the job's report, warnings and error on the worker (the report is a copy of a
-buffer), then open the Job Report dialog.
+buffer), then open the Job Report dialog, unless the project changed meanwhile.
 """
 function show_report!(app, r::JobRow)
     job = r.job
+    session = app.session
     read_report = s -> (Core.report_text(job), Core.job_warnings(job),
         Core.status(job) == Core.JOB_FAILED ? job.error : "")
     submit!(app, "Read the report of $(job.id)", read_report;
         done = (app, res) -> begin
+            app.session === session || return nothing   # it was for the old project
             push_dialog!(app, job_report_dialog(r, res[1], res[2]; failure = res[3]))
             nothing
         end)
@@ -413,7 +432,7 @@ function job_ended_toast!(app, r::JobRow)
     elseif r.status == Core.JOB_FAILED
         actions = Pair{String,Function}["Report" => same(a -> show_report!(a, r))]
         job_owner(r.command) === nothing || push!(actions, "Run Again..." => same(a -> run_again!(a, r)))
-        toast!(app, :error, "$title failed."; sub = first(r.error, 300), actions, ms = TOAST_JOB_FAILED_MS,
+        toast!(app, :error, "$title failed."; sub = first(job_text(r, r.error), 300), actions, ms = TOAST_JOB_FAILED_MS,
             job = r.id)
     elseif r.status == Core.JOB_CANCELLED
         toast!(app, :info, "$title cancelled."; sub = "Nothing was written.", job = r.id)
@@ -430,6 +449,8 @@ end
 const CARD_WARNINGS = 3   # a card shows at most this many warnings; Report shows all
 
 "The warnings a card shows: the first $(CARD_WARNINGS), then \"And N more warnings. See Report.\"."
+card_warnings(r::JobRow)::Vector{String} = card_warnings([job_text(r, w) for w in r.warnings])
+
 function card_warnings(warnings::Vector{String})::Vector{String}
     length(warnings) <= CARD_WARNINGS && return copy(warnings)
     n = length(warnings) - CARD_WARNINGS
@@ -533,7 +554,7 @@ function estimated_entry(r::JobRow, key::UInt64, width::Float32, scale::Float32)
     text_w = card_text_w(width, scale)
     summary = r.status == Core.JOB_RUNNING ? 0 :
         r.status == Core.JOB_FAILED ? min(ERROR_LINES, estimate_lines(job_summary(r), text_w, scale)) : 1
-    warnings = sum((estimate_lines(w, text_w, scale) for w in card_warnings(r.warnings)); init = 0)
+    warnings = sum((estimate_lines(w, text_w, scale) for w in card_warnings(r)); init = 0)
     has_target = !isempty(job_target(r))
     return CardEntry(key, width, scale, has_target, summary, warnings,
         card_height(r, has_target, summary, warnings, scale), nothing)
@@ -565,7 +586,7 @@ function card_text(r::JobRow, width::Real, scale::Real, measure, wrap)::CardText
         summary = [elide(measure, job_summary(r), text_w; size = SUB_SIZE)]
     end
     warnings = String[]
-    for w in card_warnings(r.warnings)
+    for w in card_warnings(r)
         append!(warnings, wrap(FONT_REGULAR, SUB_SIZE, w, text_w))
     end
     return CardText(title, target, time, summary, warnings, job_owner(r.command) !== nothing)
@@ -574,9 +595,16 @@ end
 # The card of `r` (whose `card_key` is `key`) at `width`: the cached one when nothing
 # changed, else a new estimate.
 function fit_card!(v::JobsView, r::JobRow, key::UInt64, width::Float32, scale::Float32)::CardEntry
-    e = get(v.entries, r.id, nothing)
-    (e !== nothing && e.key == key && e.width == width && e.scale == scale) && return e
+    old = get(v.entries, r.id, nothing)
+    (old !== nothing && old.key == key && old.width == width && old.scale == scale) && return old
     e = estimated_entry(r, key, width, scale)
+    # A card measured at another width bounds the estimate: a narrower card is never
+    # shorter, a wider one never taller. So a switch of the scrollbar cannot make the list
+    # look shorter or longer than it is (T12-P4).
+    if old !== nothing && old.text !== nothing && old.key == key && old.scale == scale
+        h = width < old.width ? max(e.height, old.height) : min(e.height, old.height)
+        e = CardEntry(e.key, e.width, e.scale, e.has_target, e.summary_lines, e.warning_lines, h, nothing)
+    end
     v.entries[r.id] = e
     return e
 end
@@ -644,12 +672,17 @@ end
 Make the scrollbar choice agree with the cards' height, as `scroll_area!` will see it:
 when the list overflows without the bar, or fits with it, lay the cards out once at the
 other width and measure the ones in view. One switch is enough: wider cards are never
-taller. Returns the scroll.
+taller, and `fit_card!` keeps the estimates of measured cards on that side. The card at the
+top of the view keeps its place. Returns the scroll.
 """
 function settle_bar!(app, v::JobsView, rows::Vector{JobRow}, scroll::Float32)::Float32
     (v.total > v.height) == v.bar && return scroll
+    # The card at the top of the view stays there, so the visible cards do not jump.
+    k = first(cards_in_view(v, scroll, v.height))
+    into = k <= length(v.tops) ? scroll - v.tops[k] : 0f0
     v.bar = !v.bar
     lay_out!(v, rows)
+    k <= length(v.tops) && (scroll = v.tops[k] + into)
     scroll = clamp(scroll, 0f0, max(v.total - v.height, 0f0))
     return measure_cards!(app, v, rows, scroll, v.height)
 end

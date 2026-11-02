@@ -191,11 +191,14 @@ function (a::AppFrame)(w::Window)
     drain!(app)
     refresh!(app)
     settle_draw_errors!(app)
-    guarded_frame(app) do
-        t = time_ns()
-        draw_app(app)
-        app.draw_ns = Int(time_ns() - t)
-        a.extra_ui === nothing || a.extra_ui(w)
+    # A bug that `user_message` meets in this frame is noted at the next `drain!`.
+    with_bug_reports(app.queue.results) do
+        guarded_frame(app) do
+            t = time_ns()
+            draw_app(app)
+            app.draw_ns = Int(time_ns() - t)
+            a.extra_ui === nothing || a.extra_ui(w)
+        end
     end
     return nothing
 end
@@ -208,8 +211,7 @@ fonts, styles) go back to how they were before `f`, so the frame ends cleanly, a
 error is noted with `note_draw_error!`.
 """
 function guarded_frame(f, app)
-    state = Ref{lib.ImGuiErrorRecoveryState}()
-    lib.igErrorRecoveryStoreState(state)
+    state = store_imgui_state()
     try
         f()
     catch e
@@ -225,36 +227,62 @@ const MAX_DRAW_ERRORS = 100   # different error sources kept; more are only logg
 const DRAW_ERROR_QUIET = 3.0  # s without the error before its sticky toast goes
 
 """
-    note_draw_error!(app, e, backtrace; now = time())
+    note_draw_error!(app, e, backtrace; now = time(), log = "An error cut a frame short; the app goes on",
+                     reported = false)
 
-Note an error that cut a frame short. Errors are told apart by their type and the place
-in JuliaMagUI they came from (`draw_error_key`), not by their message, so a message that
-changes in every frame is still one error.
+Note an unexpected error: one that cut a frame short, or a bug in a request handler, a
+worker action or its `done` (`report_error!`). The tests fail on any noted error.
+Errors are told apart by their type and the place in JuliaMagUI they came from
+(`draw_error_key`), not by their message, so a message that changes in every frame is
+still one error. A backtrace seen before reuses its key without reading the stack again.
 
-The first time, the error is logged with its backtrace and shown as a sticky error toast.
-While it keeps coming it is only counted and its toast stays. When it has not come for
-$(DRAW_ERROR_QUIET) s, `settle_draw_errors!` takes the toast away; if it comes back after
-that, it is logged and shown again.
+The first time, the error is logged (with `log` and its backtrace) and shown as a sticky
+error toast. While it keeps coming it is only counted and its toast stays. When it has not
+come for $(DRAW_ERROR_QUIET) s, `settle_draw_errors!` takes the toast away; if it comes back after
+that, it is logged and shown again. With `reported`, the caller has logged and shown the
+error already, so it is only counted.
 """
-function note_draw_error!(app, @nospecialize(e), bt; now::Real = time())
-    key = draw_error_key(e, bt)
-    k = findfirst(d -> d.key == key, app.draw_errors)
+function note_draw_error!(app, @nospecialize(e), bt; now::Real = time(),
+        log::AbstractString = "An error cut a frame short; the app goes on", reported::Bool = false)
+    trace = hash(bt, hash(typeof(e)))
+    k = findfirst(d -> d.trace == trace, app.draw_errors)
+    key = k === nothing ? draw_error_key(e, bt) : ""
+    k === nothing && (k = findfirst(d -> d.key == key, app.draw_errors))
     if k === nothing
         if length(app.draw_errors) >= MAX_DRAW_ERRORS
-            @debug "Another error while drawing" key
+            @debug "Another unexpected error" key
             return nothing
         end
-        push!(app.draw_errors, DrawError(key, "", 0, 0, now, nothing))
+        push!(app.draw_errors, DrawError(key, "", 0, 0, now, nothing, trace))
         k = length(app.draw_errors)
     end
     d = app.draw_errors[k]
+    d.trace = trace
     d.count += 1
     d.last_seen = Float64(now)
-    d.toast === nothing || return nothing   # still being reported
+    isempty(d.text) && (d.text = draw_error_text(e))
+    (reported || d.toast !== nothing) && return nothing   # shown already, or still being reported
     d.text = draw_error_text(e)
     d.reports += 1
-    @error "An error cut a frame short; the app goes on" exception = (e, bt)
+    @error log exception = (e, bt)
     d.toast = toast!(app, :error, d.text; ms = typemax(Int))
+    return nothing
+end
+
+"""
+    report_error!(app, e, backtrace)
+
+Show an error from a request handler, a worker action or its `done` callback. A user
+error (`is_user_error`) becomes an error toast with its message. Any other error is a
+bug: it is noted with `note_draw_error!` (logged, toasted, and failed by the tests), as
+an error in drawing is. Call it on the render thread.
+"""
+function report_error!(app, @nospecialize(e), bt)
+    if is_user_error(e, bt)
+        toast!(app, :error, safe_plain_message(e))
+    else
+        note_draw_error!(app, e, bt; log = "Unexpected error")
+    end
     return nothing
 end
 
@@ -283,7 +311,7 @@ The exception type and the first place of the backtrace in JuliaMagUI's source, 
 function draw_error_key(@nospecialize(e), bt)::String
     place = "unknown place"
     try
-        frames = stacktrace(bt)
+        frames = stack_frames(bt)
         src = SOURCE_DIR
         k = findfirst(f -> startswith(String(f.file), src), frames)
         k === nothing && !isempty(frames) && (k = 1)
@@ -293,12 +321,21 @@ function draw_error_key(@nospecialize(e), bt)::String
     return string(typeof(e), " at ", place)
 end
 
+# The frames of a backtrace: a raw one (`catch_backtrace`), or one that
+# `CapturedException` has processed already (pairs of a frame and a count).
+stack_frames(::Nothing) = Base.StackTraces.StackFrame[]
+function stack_frames(bt)::Vector{Base.StackTraces.StackFrame}
+    isempty(bt) && return Base.StackTraces.StackFrame[]
+    first(bt) isa Tuple && return Base.StackTraces.StackFrame[x[1] for x in bt]
+    return stacktrace(convert(Vector{Union{Ptr{Cvoid},Base.InterpreterIP}}, bt))
+end
+
 const SOURCE_DIR = @__DIR__
 
 # The toast text of a draw error, as `user_message` gives it but without logging.
 function draw_error_text(@nospecialize(e))::String
     try
-        e isa USER_ERRORS && return plain_message(e)
+        e isa Union{CORE_ERRORS,ArgumentError} && return plain_message(e)
         return "Something went wrong: " * sprint(showerror, e)
     catch
         return "Something went wrong."

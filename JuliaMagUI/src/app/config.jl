@@ -66,6 +66,16 @@ function field_or(obj, key::Symbol, ::Type{T}, default::T) where {T}
     return v
 end
 
+# Read `key` as a width in logical pixels: a finite number above 0, not `true` or `false`
+# (in Julia a `Bool` is a number). Absent, it is `default`.
+function width_or(obj, key::Symbol, default::Float32)::Float32
+    haskey(obj, key) || return default
+    v = obj[key]
+    (v isa Real && !(v isa Bool) && isfinite(v) && v > 0) ||
+        throw(ArgumentError("\"$key\" must be a width above 0, got $(repr(v))"))
+    return Float32(v)
+end
+
 function string_list(obj, key::Symbol)::Vector{String}
     haskey(obj, key) || return String[]
     v = obj[key]
@@ -76,32 +86,32 @@ end
 
 function config_from_json(obj)::AppConfig
     obj isa JSON3.Object || throw(ArgumentError("the settings file must hold one JSON object"))
-    d = AppConfig()
-    c = AppConfig()
+    c = AppConfig()   # the defaults; each key that is there replaces one
     haskey(obj, :theme) && (c.theme = theme_from_name(obj[:theme]))
     c.recent = first(string_list(obj, :recent), MAX_RECENT)
-    c.open_last = field_or(obj, :open_last, Bool, d.open_last)
+    c.open_last = field_or(obj, :open_last, Bool, c.open_last)
     c.hidden_tabs = string_list(obj, :hidden_tabs)
-    units = field_or(obj, :distance_units, String, d.distance_units)
+    units = field_or(obj, :distance_units, String, c.distance_units)
     units in DISTANCE_UNITS ||
         throw(ArgumentError("distance_units must be \"m\", \"km\" or \"ft\", got $(repr(units))"))
     c.distance_units = units
-    c.grid_colours = field_or(obj, :grid_colours, String, d.grid_colours)
-    c.temp_folder = field_or(obj, :temp_folder, String, d.temp_folder)
-    c.software_rendering = field_or(obj, :software_rendering, Bool, d.software_rendering)
+    c.grid_colours = field_or(obj, :grid_colours, String, c.grid_colours)
+    c.temp_folder = field_or(obj, :temp_folder, String, c.temp_folder)
+    c.software_rendering = field_or(obj, :software_rendering, Bool, c.software_rendering)
     if haskey(obj, :window)
+        # x and y may be below 0 (a screen left of the main one); the size is above 0.
+        bad = ArgumentError("\"window\" must be a list of 4 whole numbers, its width and height above 0")
         w = obj[:window]
-        count = w isa AbstractVector ? length(w) : -1
-        vals = w isa AbstractVector ? Int[x for x in w if x isa Integer] : Int[]
-        length(vals) == 4 && count == 4 ||
-            throw(ArgumentError("\"window\" must be a list of 4 whole numbers"))
-        c.window = (vals[1], vals[2], vals[3], vals[4])
+        w isa AbstractVector && length(w) == 4 || throw(bad)
+        v = Int[x for x in w if x isa Integer && !(x isa Bool)]
+        length(v) == 4 && v[3] > 0 && v[4] > 0 || throw(bad)
+        c.window = (v[1], v[2], v[3], v[4])
     end
-    c.left_width = Float32(field_or(obj, :left_width, Real, d.left_width))
-    c.right_width = Float32(field_or(obj, :right_width, Real, d.right_width))
-    c.ribbon_collapsed = field_or(obj, :ribbon_collapsed, Bool, d.ribbon_collapsed)
+    c.left_width = width_or(obj, :left_width, c.left_width)
+    c.right_width = width_or(obj, :right_width, c.right_width)
+    c.ribbon_collapsed = field_or(obj, :ribbon_collapsed, Bool, c.ribbon_collapsed)
     c.advanced_open = string_list(obj, :advanced_open)
-    c.last_folder = field_or(obj, :last_folder, String, d.last_folder)
+    c.last_folder = field_or(obj, :last_folder, String, c.last_folder)
     return c
 end
 
@@ -182,12 +192,16 @@ end
 
 Run `cmd`, give its output to `is_dark`, and return the answer.
 A missing command, a non-zero exit and a timeout all give `false`.
+A command that runs out of time is stopped and waited for, so no process is left behind.
 """
 function command_says_dark(cmd::Cmd, is_dark::Function; timeout::Real = 2.0)::Bool
     try
         proc = open(pipeline(ignorestatus(cmd); stderr = devnull))
         if timedwait(() -> process_exited(proc), Float64(timeout); pollint = 0.02) != :ok
             kill(proc)
+            # One that ignores the request to stop is killed.
+            timedwait(() -> process_exited(proc), 1.0; pollint = 0.02) == :ok || kill(proc, Base.SIGKILL)
+            wait(proc)
             return false
         end
         out = read(proc, String)
@@ -199,19 +213,20 @@ function command_says_dark(cmd::Cmd, is_dark::Function; timeout::Real = 2.0)::Bo
 end
 
 """
-    system_dark() -> Bool
+    system_dark(ask = command_says_dark) -> Bool
 
 Does the operating system use a dark app theme? Any failure means `false`.
-Call it once at start. It waits at most 2 s.
+Call it once at start. It waits at most 2 s. `ask(cmd, is_dark)` runs the command; the
+tests give their own, so they do not depend on the machine's theme.
 """
-function system_dark()::Bool
+function system_dark(ask = command_says_dark)::Bool
     if Sys.iswindows()
         key = raw"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
         cmd = `reg query $key /v AppsUseLightTheme`
-        return command_says_dark(cmd, out -> occursin(r"REG_DWORD\s+0x0+\s*$"m, out))
+        return ask(cmd, out -> occursin(r"REG_DWORD\s+0x0+\s*$"m, out))::Bool
     elseif Sys.islinux()
         cmd = `gsettings get org.gnome.desktop.interface color-scheme`
-        return command_says_dark(cmd, out -> occursin("prefer-dark", out))
+        return ask(cmd, out -> occursin("prefer-dark", out))::Bool
     end
     return false
 end

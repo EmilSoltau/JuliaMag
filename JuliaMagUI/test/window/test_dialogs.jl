@@ -1,5 +1,6 @@
 using Test
 import CImGui as ig
+import GLFW
 import ImGuiTestEngine as te
 import PNGFiles
 import JuliaMagCore as Core
@@ -447,6 +448,125 @@ window_testset("tool dialogs") do
             ctx.key("Enter")
             ctx.frames(2)
             @test d.form.values["channel"] == "C300" && d in app.ui.dialogs
+        end
+    end
+
+    @testset "a long menu: its thumb drags, a jitter keeps the keyboard row, a still mouse too" begin
+        many = session_with(lines = 3, channels = 300, name = "Wide")
+        with_project_app(many) do ctx, app
+            UI.request!(app, UI.OpenToolDialog("database.statistics"; item = app.ui.current_db))
+            ctx.wait_until(() -> tool_dialog(app) !== nothing; timeout = 5)
+            d = tool_dialog(app)
+            ctx.frames(2)
+            ctx.click(D1 * "channel")
+            ctx.frames(2)
+            m = app.ui.menu
+            # T13-P1: grab the thumb and drag it down; the rows follow.
+            geom = Ref{Any}(nothing)
+            ctx.on_render(w -> begin
+                vp = unsafe_load(ig.GetMainViewport())
+                l = UI.menu_layout(m.anchor, m.items, UI.Box(0, 0, vp.Size.x, vp.Size.y), w.scale,
+                    (t, sz) -> UI.text_width(UI.FONT_REGULAR, sz, t); min_width = m.min_width,
+                    gap = m.gap, scroll = m.scroll)
+                hl = UI.hairline(w.scale)
+                track = UI.menu_track(l.box, hl, w.scale)
+                view = UI.inset(l.box, hl, hl)
+                top, th = UI.menu_thumb(track, view, l.scroll, l.scroll_max, w.scale)
+                geom[] = (; x = (track.x0 + track.x1) / 2, y = top + th / 2, h = UI.height(track), l.scroll_max)
+            end)
+            g = geom[]
+            @test m.scroll == 0 && g.scroll_max > 0
+            te.MouseMoveToPos((g.x, g.y))
+            te.MouseDown(0)
+            te.MouseMoveToPos((g.x, g.y + g.h / 2))
+            te.MouseUp(0)
+            ctx.frames(2)
+            @test 0.3 * g.scroll_max < m.scroll < 0.8 * g.scroll_max
+            @test app.ui.menu === m   # a drag picks no row and keeps the menu open
+            ctx.key("Escape")
+            ctx.frames(2)
+            # T13-P3: the keyboard picks a row; the mouse jitters outside the menu; Enter
+            # still picks that row.
+            ctx.click(D1 * "channel")
+            ctx.frames(2)
+            m = app.ui.menu
+            for _ in 1:3
+                ctx.key("Down")
+            end
+            ctx.frames(1)
+            picked = m.items[m.key].label
+            te.MouseMoveToPos((m.box.x0 - 40, m.box.y0 - 30))
+            te.MouseMoveToPos((m.box.x0 - 42, m.box.y0 - 31))
+            ctx.frames(2)
+            @test m.key > 0 && m.items[m.key].label == picked
+            # T13-P5: a mouse resting over another row does not take the highlight from Down.
+            rest = m.items[m.key + 5].label
+            te.MouseMove(menu_row(app, rest))
+            ctx.frames(2)
+            @test m.items[m.key].label == rest
+            ctx.key("Down")
+            ctx.frames(2)
+            @test m.items[m.key].label == m.items[findfirst(it -> it.label == rest, m.items) + 1].label
+            ctx.key("Enter")
+            ctx.frames(2)
+            @test d.form.values["channel"] == m.items[m.key].label
+        end
+    end
+
+    @testset "a smaller window pulls an open dialog back inside (T13-P4)" begin
+        with_project_app(kangaroo()) do ctx, app
+            UI.request!(app, UI.OpenToolDialog("database.statistics"; item = app.ui.current_db))
+            ctx.wait_until(() -> tool_dialog(app) !== nothing; timeout = 5)
+            ctx.frames(4)
+            @test item_box(D1 * "Run").x1 > 900   # centred in 1480 px, it reaches past 900
+            ctx.on_render(w -> GLFW.SetWindowSize(w.handle, 900, 560))
+            ctx.wait_until(timeout = 5) do
+                vp = unsafe_load(ig.GetMainViewport())
+                vp.Size.x == 900 && vp.Size.y == 560
+            end
+            ctx.frames(3)
+            run = item_box(D1 * "Run")
+            @test run.x1 <= 900 && run.y1 <= 560
+        end
+    end
+
+    @testset "a dialog over a dialog is centred; the Advanced toggle centres again (T13-P5)" begin
+        with_project_app(kangaroo()) do ctx, app
+            UI.request!(app, UI.OpenToolDialog("database.statistics"; item = app.ui.current_db))
+            ctx.wait_until(() -> tool_dialog(app) !== nothing; timeout = 5)
+            ctx.frames(4)
+            # The dialog's window box, and where `keep_on_screen!` centres a box of its size.
+            function placed(name)
+                r = Ref{Any}(nothing)
+                ctx.on_render(w -> begin
+                    win = ig.lib.igFindWindowByName(name)
+                    pos, size = unsafe_load(win.Pos), unsafe_load(win.Size)
+                    vp = unsafe_load(ig.GetMainViewport())
+                    top = max(20f0, round((vp.Size.y - size.y) / 2 - 30))
+                    left = floor(vp.Size.x / 2 + 0.5f0 - size.x / 2)
+                    r[] = (; x = pos.x, y = pos.y, h = size.y, left, top)
+                end)
+                return r[]
+            end
+            before = placed("###dialog1")
+            @test before.x == before.left && before.y == before.top
+            # Advanced opens: the dialog grows and is centred again, top and across.
+            ctx.click(D1 * "Advanced")
+            ctx.frames(5)
+            after = placed("###dialog1")
+            @test after.h > before.h && after.x == after.left && after.y == after.top
+            # A dialog on top of it opens centred too.
+            UI.request!(app, UI.OpenDialog(:shortcuts))
+            ctx.wait_until(() -> length(app.ui.dialogs) == 2; timeout = 5)
+            ctx.frames(4)
+            pl = app.ui.dialog_places[2]
+            @test pl.dialog === last(app.ui.dialogs) && pl.height > 0
+            top = placed("###dialog2")
+            @test top.x == top.left && top.y == top.top
+            ctx.key("Escape")
+            ctx.frames(2)
+            ctx.key("Escape")
+            ctx.wait_until(() -> isempty(app.ui.dialogs))
         end
     end
 

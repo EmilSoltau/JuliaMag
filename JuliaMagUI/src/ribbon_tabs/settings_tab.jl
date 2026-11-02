@@ -68,13 +68,17 @@ function set_distance_units!(app, u::AbstractString)
     return nothing
 end
 
-"Use colour table `name` for new grids and save the settings."
+"""
+Keep colour table `name` for grids and save the settings. Nothing draws grids yet (the
+grid views come in plan 4), so the toast says only that it is saved.
+"""
 function set_grid_colours!(app, name::AbstractString)
     k = findfirst(p -> first(p) == name, Core.colour_tables())
     k === nothing && throw(ArgumentError("there is no colour table $(repr(name))"))
     app.config.grid_colours = String(name)
     save_settings!(app)
-    toast!(app, :info, "New grids will use the $(last(Core.colour_tables()[k])) colour table.")
+    toast!(app, :info, "Saved: $(last(Core.colour_tables()[k])) for grids.";
+        sub = "Grid views use it once JuliaMag has them.")
     return nothing
 end
 
@@ -349,7 +353,7 @@ function draw_modal(app, d::GettingStartedDialog)
                 f(4), hl)
             draw_text_mid(dl, FONT_REGULAR, 10, tag_box.x0 + hl + f(4), centre_y(tag_box), u32(tag_col), tag;
                 line = 1.4)
-            tx = bx + badge_width(s, string(n)) + f(12)   # one column for every name
+            tx = bx + widest_badge(s, n) + f(12)   # one column for every name
             lines_top = mid - f(12.5 * 1.25 + 2 + 11.5 * 1.25) / 2
             draw_text_mid(dl, FONT_SEMIBOLD, BODY_FONT_SIZE, tx, lines_top + f(12.5 * 1.25) / 2, u32(t.text), step.name)
             draw_text_mid(dl, FONT_REGULAR, 11.5, tx, lines_top + f(12.5 * 1.25 + 2) + f(11.5 * 1.25) / 2,
@@ -375,3 +379,6 @@ function handle_request!(app, r::OpenDialog)
     end
     return true
 end
+
+"The width of the widest step badge, \"1\" to \"n\": the names start in one column after it."
+widest_badge(scale::Real, n::Integer)::Float32 = maximum(k -> badge_width(scale, string(k)), 1:n)

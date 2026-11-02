@@ -1,7 +1,10 @@
 # Screenshots for pixel reviews: run a script of UI actions against the real app.
 #
 # Usage, from the repo root (needs a display):
-#   julia -t auto,1 --project=JuliaMagUI JuliaMagUI/tools/shot.jl script.jsonl out_dir
+#   julia -t auto,1 --project=JuliaMagUI JuliaMagUI/tools/shot.jl [--timeout=SECONDS] script.jsonl out_dir
+#
+# The whole script has 120 s unless --timeout gives more, such as --timeout=600 for a long
+# pixel review.
 #
 # The script has one JSON object per line, each with one action. Blank lines and lines
 # that start with # are skipped. The actions run in order:
@@ -116,14 +119,15 @@ function run_action(ctx::TestContext, action::String, arg, out_dir::AbstractStri
 end
 
 """
-    run_script(script, out_dir)
+    run_script(script, out_dir; timeout = 120)
 
-Run every action of `script` in one app window. Throws on the first action that fails.
+Run every action of `script` in one app window, within `timeout` seconds in all.
+Throws on the first action that fails.
 """
-function run_script(script::AbstractString, out_dir::AbstractString)
+function run_script(script::AbstractString, out_dir::AbstractString; timeout::Real = 120)
     actions = read_script(script)
     mkpath(out_dir)
-    with_test_app() do ctx
+    with_test_app(; timeout) do ctx
         for (n, (action, arg)) in actions
             try
                 run_action(ctx, action, arg, out_dir)
@@ -136,14 +140,21 @@ function run_script(script::AbstractString, out_dir::AbstractString)
 end
 
 function shot_main(args)
+    args = collect(String, args)
+    timeout = 120.0
+    k = findfirst(a -> startswith(a, "--timeout="), args)
+    if k !== nothing
+        t = tryparse(Float64, args[k][length("--timeout=")+1:end])
+        t === nothing || t <= 0 ? (args = String[]) : (timeout = t; deleteat!(args, k))
+    end
     if length(args) != 2
         println(stderr, "usage: julia -t auto,1 --project=JuliaMagUI JuliaMagUI/tools/shot.jl ",
-            "script.jsonl out_dir")
+            "[--timeout=SECONDS] script.jsonl out_dir")
         return 2
     end
     has_display() || (println(stderr, "shot.jl: there is no display"); return 1)
     try
-        run_script(args[1], args[2])
+        run_script(args[1], args[2]; timeout)
     catch e
         msg = e isa CapturedException ? sprint(showerror, e.ex) : sprint(showerror, e)
         println(stderr, "shot.jl: ", msg)

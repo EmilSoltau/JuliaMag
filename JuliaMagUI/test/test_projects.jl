@@ -167,6 +167,11 @@ toast_texts(app) = [t.text for t in app.toasts]
             refresh_now!(app)
             UI.sync_current_db!(app)
             @test app.ui.current_db == only(app.snap.items).id
+            # Another spelling of the open folder is the open project (T15-P4).
+            @test UI.is_open_project(app, folder * "/")
+            @test UI.is_open_project(app, joinpath(folder, "x", ".."))
+            Sys.iswindows() && @test UI.is_open_project(app, uppercase(folder))
+            @test !UI.is_open_project(app, folder * "-other")
         end
     end
 
@@ -222,10 +227,36 @@ toast_texts(app) = [t.text for t in app.toasts]
         end
     end
 
+    @testset "a recent folder that was not found says so after one space" begin
+        @test UI.recent_path_text("/data/p", true) == "/data/p"
+        @test UI.recent_path_text("/data/p", false) == "/data/p (folder not found)"
+    end
+
+    @testset "a close that fails is toasted and goes to the log file" begin
+        dir = mktempdir()
+        with_test_session(session_with(project = "Closing")) do s
+        with_app(test_app_state(s)) do app
+            next = Ref(false)
+            with_app_log(dir; console = Base.CoreLogging.NullLogger()) do
+                UI.closed!(app, s, 0, UI.CloseResult(String[], Core.ProjectError("the disk is full")),
+                    a -> (next[] = true))
+            end
+            @test app.session === nothing && next[]
+            @test last(app.toasts).kind == :error && last(app.toasts).text == "The disk is full."
+            @test occursin("The project did not close cleanly", read(joinpath(dir, UI.LOG_FILE), String))
+        end
+        end
+    end
+
     @testset "lock_time_text" begin
         @test lock_time_text("2026-10-31T09:15:02+0000"; offset = 0) == "09:15 on 31 October 2026"
         @test lock_time_text("2026-10-31T23:15:02Z"; offset = 3600) == "00:15 on 1 November 2026"
         @test lock_time_text("not a time") == "not a time"
+        # Older locks: an offset, or on Windows the zone's name (read as the local clock).
+        @test lock_time_text("2026-10-31T09:15:02+0100"; offset = 0) == "08:15 on 31 October 2026"
+        @test lock_time_text("2026-10-31T09:15:02W. Europe Standard Time"; offset = 7200) ==
+              "09:15 on 31 October 2026"
+        @test lock_time_text(Core.now_text(1_793_438_102.0); offset = -18000) == "04:15 on 31 October 2026"
     end
 
     @testset "close_project! closes, then runs `then`" begin
@@ -414,6 +445,23 @@ toast_texts(app) = [t.text for t in app.toasts]
         @test only(Core.open_project(folder).items).name == "Renamed"
     end
 
+    @testset "run_script_file closes a project the script left open" begin
+        folder = project_folder("Left")
+        path = joinpath(mktempdir(), "left.jl")
+        write(path, """
+            using JuliaMagCore
+            s = open_session($(repr(folder)))
+            error("the script broke before close_session!")
+            """)
+        r = run_script_file(path)
+        @test r.error !== nothing && occursin("the script broke", r.error)
+        @test occursin("The script left the project in $folder open. JuliaMag closed it.", r.output)
+        # The lock is gone: the project opens without "open somewhere else" (final review M4).
+        s = Core.open_session(folder)
+        @test isempty(Core.warnings(s))
+        Core.close_session!(s)
+    end
+
     @testset "the log file: cut to the last 1 MB at start, errors go in" begin
         dir = mktempdir()
         path = joinpath(dir, "juliamag.log")
@@ -535,6 +583,9 @@ toast_texts(app) = [t.text for t in app.toasts]
             @test c.open_last && c.software_rendering
             @test c.distance_units == "km" && c.grid_colours == "viridis"
             @test "viridis" in first.(Core.colour_tables())
+            # Nothing draws grids yet: the toast does not claim an effect (final review M1).
+            @test any(t -> t.text == "Saved: Viridis for grids." &&
+                           t.sub == "Grid views use it once JuliaMag has them.", app.toasts)
         end
     end
 
@@ -600,6 +651,31 @@ toast_texts(app) = [t.text for t in app.toasts]
             pump!(app, () -> app.switching === nothing)
             advance_quit!(app)
             @test quits[] == 0
+        end
+    end
+
+    @testset "a script that ends while the quit question is open: Cancel opens the project again" begin
+        folder = project_folder("Reopen")
+        with_app(empty_app()) do app
+            quits = Ref(0)
+            app.quit_hook = a -> (quits[] += 1; nothing)
+            open_project!(app, folder)
+            pump!(app, () -> (UI.refresh!(app); app.snap !== nothing && app.switching === nothing))
+            flag = joinpath(mktempdir(), "go")
+            script = joinpath(mktempdir(), "wait.jl")
+            write(script, "while !isfile($(repr(flag))); sleep(0.02); end\n")
+            UI.run_script!(app, script)
+            pump!(app, () -> app.session === nothing && app.ui.bs.running)
+            request_quit!(app)
+            d = only(app.ui.dialogs)
+            touch(flag)                         # the script ends while the question is open
+            pump!(app, () -> !app.ui.bs.running)
+            @test app.session === nothing && only(app.ui.dialogs) === d
+            filter!(x -> x !== d, app.ui.dialogs)
+            d.on_no(app)                        # Cancel: no quit, the project opens again
+            pump!(app, () -> app.session !== nothing && app.switching === nothing)
+            @test !app.quit_pending && quits[] == 0
+            @test app.session.project.folder == folder && app.ui.bs.reopen === nothing
         end
     end
 

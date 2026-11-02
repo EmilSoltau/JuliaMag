@@ -26,6 +26,31 @@ row(rows, key) = rows[findfirst(r -> r.key == key, rows)]
         end
     end
 
+    @testset "a new snapshot reads again only the items that changed (T7)" begin
+        s = session_with(lines = 3, channels = 2)
+        try
+            a = snapshot(s)
+            id = only(keys(a.databases))
+            b = snapshot(s)
+            @test b.databases[id] === a.databases[id]   # same bytes: the same view
+            # A change rewrites database.json: the view is read again. One line off and one
+            # on gives a file of the same size, so a size or time check could miss it.
+            ls = [l.id for l in a.databases[id].lines]
+            Core.set_line_selected!(s, id, ls[1], false)
+            c = snapshot(s)
+            @test c.databases[id] !== a.databases[id] && !c.databases[id].lines[1].selected
+            Core.set_lines_selected!(s, id, ls[1:2], true)
+            Core.set_line_selected!(s, id, ls[2], false)
+            d = snapshot(s)
+            @test d.databases[id].lines[1].selected && !d.databases[id].lines[2].selected
+            # A removed item leaves the cache.
+            Core.remove_item!(s, id)
+            @test isempty(snapshot(s).databases) && isempty(UI.view_cache(s).views)
+        finally
+            Core.close_session!(s)
+        end
+    end
+
     s = kangaroo_data()
     try
     snap = snapshot(s)
@@ -123,11 +148,16 @@ row(rows, key) = rows[findfirst(r -> r.key == key, rows)]
         @test fmt_num(Float64(Float32(1.70141e38)), 1) == "1.70141e38"
         @test fmt_num(NaN, 1) == "NaN" && fmt_num(Inf, 0) == "Inf" && fmt_num(-Inf, 1) == "-Inf"
         # A fraction that rounds up carries into the whole part, never ".100".
-        @test fmt_num(99999999999999.995, 2) == "100,000,000,000,000.00"
+        # 9999.9999 is not 10000 as a Float64, so rounding the fraction alone would give
+        # "9,999.100"; one rounding of the whole value carries (T11-P2).
+        @test 9999.9999 != 10000 && fmt_num(9999.9999, 2) == "10,000.00"
         @test fmt_num(99999999999999.9, 2) == "99,999,999,999,999.90"
         @test fmt_num(0.999, 2) == "1.00" && fmt_num(-1.995, 2) == "-2.00" && fmt_num(1.005, 3) == "1.005"
         @test fmt_num(5e-324, 2) == "0.00" && fmt_num(-5e-324, 2) == "0.00" && short_num(5e-324) == "5.0e-324"
         @test fmt_num(123.456, 40) == "123.456"   # more digits than fit: as `exp_num`
+        # A small value with very many digits: at most 38, never a wrapped Int128 (T11-P4).
+        @test fmt_num(1e-10, 45) == fmt_num(1e-10, 38) && fmt_num(1e-10, 200) == fmt_num(1e-10, 38)
+        @test fmt_num(2.5, -3) == fmt_num(2.5, 0)
         @test short_num(25.0) == "25" && short_num(12.5) == "12.5" && short_num(1e20) == "1.0e20" &&
               short_num(-3e38) == "-3.0e38" && short_num(Float64(typemax(Int))) == "9.22337e18" &&
               short_num(NaN) == "NaN" && short_num(Inf) == "Inf"

@@ -310,6 +310,10 @@ end
 
 const CARD_H = 1 + 12 + 86 + 12 + 13.5 * 1.25 + 5 + 11.5 * 1.25 + 12 + 1   # 160.25: more than its min-height 160
 
+"The path line of a recent project: the folder, and \" (folder not found)\" when it was not found."
+recent_path_text(folder::AbstractString, found::Bool)::String =
+    found ? String(folder) : string(folder, " (folder not found)")
+
 """
     draw_recent(app, dl, x, y, w) -> Float32
 
@@ -362,7 +366,7 @@ function draw_recent(app, dl, x::Float32, y::Float32, w::Real)::Float32
         name = elide(text_width, info.name, right - tx; role = FONT_SEMIBOLD)
         draw_text_mid(dl, FONT_SEMIBOLD, BODY_FONT_SIZE, tx, lines_top + f(12.5 * 1.25) / 2,
             u32(info.found ? t.text : t.text_disabled), name)
-        path = info.found ? folder : folder * " (folder not found)"
+        path = recent_path_text(folder, info.found)
         draw_text_mid(dl, FONT_REGULAR, 11.5, tx, lines_top + f(12.5 * 1.25 + 2) + f(11.5 * 1.25) / 2,
             u32(t.text_dim), elide(text_width, path, right - tx; size = 11.5))
         if clicked
@@ -525,7 +529,7 @@ function script_or_problem(s::Core.Session)::String
         return Core.script_text(s)
     catch e
         e isa InterruptException && rethrow()
-        return "# The script cannot be written: " * plain_message(e)
+        return "# The script cannot be written: " * safe_user_message(e, catch_backtrace())
     end
 end
 

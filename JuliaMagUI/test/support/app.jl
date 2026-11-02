@@ -22,15 +22,8 @@ rgb255(c::NTuple{4,Float32}) = (round(Int, 255 * c[1]), round(Int, 255 * c[2]),
 "Are two 0-255 RGB colours within `tol` in every channel?"
 near(a, b; tol = 3) = all(abs(a[i] - b[i]) <= tol for i in 1:3)
 
-"""
-    has_display() -> Bool
-
-Can a window open here? Always on Windows; on Linux when `DISPLAY` or `WAYLAND_DISPLAY` is set.
-"""
-function has_display()::Bool
-    Sys.iswindows() && return true
-    return !isempty(get(ENV, "DISPLAY", "")) || !isempty(get(ENV, "WAYLAND_DISPLAY", ""))
-end
+# Can a window open here? See `JuliaMagUI.has_display`.
+has_display() = UI.has_display()
 
 const NO_DISPLAY_NOTED = Ref(false)
 
@@ -220,6 +213,9 @@ the one-thread warning shows only in the test that asks for it.
 The whole test, start and close included, has `timeout` seconds.
 After that, the next action throws `TestTimeout`, and the test engine's watchdog stops an
 action that hangs; the app then closes and the error reaches the caller.
+A test that hangs outside the harness (it waits on something that never comes, and calls
+no action) cannot be stopped from inside: `HANG_GRACE` (30) s after the timeout, a watchdog on
+another thread says so and ends the test process, so a test run never hangs for good.
 """
 function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGHT,
         size::Tuple{Integer,Integer} = (1480, 920), scale::Real = 1f0,
@@ -246,6 +242,8 @@ function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGH
 
     result = Ref{Any}(nothing)
     failure = Ref{Any}(nothing)
+    finished = Threads.Atomic{Bool}(false)
+    watch_hang(finished, timeout)
     engine = te.CreateContext(; exit_on_completion = true, show_test_window = false)
     try
         io = te.GetIO(engine)
@@ -281,6 +279,7 @@ function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGH
                   "(tested $(summary.CountTested), passed $(summary.CountSuccess))")
         end
     finally
+        finished[] = true
         te.DestroyContext(engine)
     end
     failure[] === nothing || throw(failure[])
@@ -289,6 +288,27 @@ function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGH
         error("the app had errors while drawing: " * join((e.text for e in a.draw_errors), "; "))
     end
     return result[]
+end
+
+const HANG_GRACE = 30   # s after the timeout before the watchdog ends a hung test process
+
+# End the process when a `with_test_app` test is still running `HANG_GRACE` s after its
+# timeout. It runs on the default pool: the render thread waits for the test function then.
+function watch_hang(finished::Threads.Atomic{Bool}, timeout::Real; grace::Real = HANG_GRACE,
+        stop = () -> ccall(:_exit, Cvoid, (Cint,), 1))
+    Threads.@spawn :default begin
+        deadline = time() + timeout + grace
+        while !finished[] && time() < deadline
+            sleep(0.5)
+        end
+        if !finished[]
+            println(stderr, "with_test_app: the app test is still running $(round(Int, timeout + grace)) s ",
+                "after it started, stuck outside the test harness. The test process stops.")
+            flush(stderr)
+            stop()
+        end
+    end
+    return nothing
 end
 
 """

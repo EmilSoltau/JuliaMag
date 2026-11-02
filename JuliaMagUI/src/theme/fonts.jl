@@ -32,27 +32,39 @@ const SYSTEM_BODY_FONTS = (
 const SYSTEM_MONO_FONTS = ("CascadiaMono.ttf", "consola.ttf", "DejaVuSansMono.ttf")
 
 """
-    system_font_dirs() -> Vector{String}
+    system_font_dirs(env = ENV, home = homedir()) -> Vector{String}
 
-The folders that hold the system fonts on this platform.
+The folders that hold the fonts on this platform, the user's own first:
+- Windows: the per-user fonts (`%LOCALAPPDATA%\\Microsoft\\Windows\\Fonts`, where Cascadia
+  Mono often is), then `%WINDIR%\\Fonts`;
+- Linux: `\$XDG_DATA_HOME/fonts` (else `~/.local/share/fonts`), `~/.fonts`,
+  `/usr/local/share/fonts`, then `/usr/share/fonts`.
 """
-function system_font_dirs()::Vector{String}
+function system_font_dirs(env = ENV, home::AbstractString = homedir())::Vector{String}
     if Sys.iswindows()
-        return [joinpath(get(ENV, "WINDIR", raw"C:\Windows"), "Fonts")]
+        dirs = String[]
+        haskey(env, "LOCALAPPDATA") && push!(dirs, joinpath(env["LOCALAPPDATA"], "Microsoft", "Windows", "Fonts"))
+        push!(dirs, joinpath(get(env, "WINDIR", raw"C:\Windows"), "Fonts"))
+        return dirs
     elseif Sys.islinux()
-        return ["/usr/share/fonts"]
+        data = get(env, "XDG_DATA_HOME", "")
+        isempty(data) && (data = joinpath(home, ".local", "share"))
+        return [joinpath(data, "fonts"), joinpath(home, ".fonts"), "/usr/local/share/fonts", "/usr/share/fonts"]
     end
     return String[]
 end
 
-# Map each wanted file name to the first path found for it under `dirs`.
+# Map each wanted file name to the first path found for it under `dirs`. Names are
+# compared without case: Windows file names have no case, and installers vary it.
 function index_font_files(dirs, wanted)::Dict{String,String}
+    by_lower = Dict{String,String}(lowercase(w) => w for w in wanted)
     found = Dict{String,String}()
     for dir in dirs
         isdir(dir) || continue
         for (root, _, files) in walkdir(dir; onerror = _ -> nothing)
             for f in files
-                f in wanted && !haskey(found, f) && (found[f] = joinpath(root, f))
+                w = get(by_lower, lowercase(f), nothing)
+                w === nothing || haskey(found, w) || (found[w] = joinpath(root, f))
             end
         end
     end
@@ -165,9 +177,22 @@ LoadedFont(font::Ptr{ig.lib.ImFont}, path::AbstractString) = LoadedFont(font, fo
 # The loaded fonts of each ImGui context, in `FontRole` order. Only the render thread uses it.
 const LOADED_FONTS = Dict{Ptr{ig.lib.ImGuiContext},NTuple{3,LoadedFont}}()
 
-# Add one font file to the atlas. A file that does not load falls back to `fallback`.
+# Can the font file at `path` be read? ImGui asserts on a file it cannot read before it
+# returns NULL, and an assert ends the app, so the file is checked first.
+function font_file_readable(path::AbstractString)::Bool
+    try
+        return isfile(path) && filesize(path) > 0 && open(io -> !eof(io), path)
+    catch e
+        e isa InterruptException && rethrow()
+        return false
+    end
+end
+
+# Add one font file to the atlas. A file that cannot be read or does not load falls back
+# to `fallback`.
 function add_font(atlas, path::AbstractString, fallback::AbstractString)::LoadedFont
-    font = ig.AddFontFromFileTTF(atlas, path, BODY_FONT_SIZE)
+    font = font_file_readable(path) ? ig.AddFontFromFileTTF(atlas, path, BODY_FONT_SIZE) :
+        Ptr{ig.lib.ImFont}(C_NULL)
     font != C_NULL && return LoadedFont(font, path)
     @warn "Could not load the font $path. Using $fallback."
     font = ig.AddFontFromFileTTF(atlas, fallback, BODY_FONT_SIZE)

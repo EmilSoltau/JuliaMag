@@ -1,7 +1,7 @@
 # Keyboard chords. `parse_chord` and `shortcut_command` are pure; `chord_pressed` and
 # `handle_shortcuts!` read the ImGui key state.
 
-const Chord = NamedTuple{(:ctrl, :shift, :alt, :key),Tuple{Bool,Bool,Bool,Symbol}}
+# `Chord` is defined in commands.jl, which caches the chords of the commands.
 
 # Shortcuts that are not the one in `Command.shortcut`.
 const SHORTCUT_ALIASES = ["Ctrl+Shift+Z" => "session.redo"]
@@ -38,10 +38,16 @@ function parse_chord(text::AbstractString)::Chord
     return (; ctrl, shift, alt, key)
 end
 
-"True when the chord's key went down in this frame and exactly its modifiers are held."
-function chord_pressed(chord::Chord)::Bool
-    io = unsafe_load(ig.GetIO())
-    (io.KeyCtrl == chord.ctrl && io.KeyShift == chord.shift && io.KeyAlt == chord.alt) || return false
+# The modifier keys held now, as (ctrl, shift, alt). Reads the three fields through the
+# pointer, without copying the whole `ImGuiIO`.
+function held_modifiers()::NTuple{3,Bool}
+    io = Ptr{lib.ImGuiIO}(ig.GetIO())
+    return (unsafe_load(io.KeyCtrl), unsafe_load(io.KeyShift), unsafe_load(io.KeyAlt))
+end
+
+"True when the chord's key went down in this frame and exactly its modifiers (`held`) are held."
+function chord_pressed(chord::Chord, held::NTuple{3,Bool} = held_modifiers())::Bool
+    held == (chord.ctrl, chord.shift, chord.alt) || return false
     return ig.IsKeyPressed(getproperty(lib, imgui_key_name(chord.key)), false)
 end
 
@@ -65,7 +71,8 @@ While a modal dialog or the command search is open only `Ctrl+K` and `Esc` pass.
 While a text field is active only chords with `Ctrl` pass, and never `Ctrl+Z` or `Ctrl+Y`
 (the text field undoes its own text).
 """
-function shortcut_command(cmds, chord::Chord, modal_open::Bool, text_active::Bool)::Union{Nothing,Command}
+function shortcut_command(cmds, chord::Chord, modal_open::Bool, text_active::Bool;
+        table = chord_table(cmds))::Union{Nothing,Command}
     if modal_open
         search = chord.ctrl && !chord.shift && !chord.alt && chord.key === :K
         search || chord.key === :Escape || return nothing
@@ -74,7 +81,7 @@ function shortcut_command(cmds, chord::Chord, modal_open::Bool, text_active::Boo
         chord.ctrl || return nothing
         chord.key in TEXT_UNDO_KEYS && return nothing
     end
-    for (c, id) in chord_table(cmds)
+    for (c, id) in table
         c == chord || continue
         i = findfirst(x -> x.id == id, cmds)
         return i === nothing ? nothing : cmds[i]
@@ -91,11 +98,13 @@ thread, after the frame's widgets, so `WantTextInput` is current.
 """
 function handle_shortcuts!(app)
     cmds = commands(app)
+    table = command_chords(app)   # parsed once per command list, not per frame
     modal = blocks_shortcuts(app)   # a dialog or the command search is open
-    text = unsafe_load(ig.GetIO()).WantTextInput
-    for (chord, id) in chord_table(cmds)
-        chord_pressed(chord) || continue
-        cmd = shortcut_command(cmds, chord, modal, text)
+    text = unsafe_load(Ptr{lib.ImGuiIO}(ig.GetIO()).WantTextInput)
+    held = held_modifiers()
+    for (chord, id) in table
+        chord_pressed(chord, held) || continue
+        cmd = shortcut_command(cmds, chord, modal, text; table)
         cmd === nothing && continue
         cmd.enabled(app) === nothing && guarded(app, cmd.run)
         return nothing

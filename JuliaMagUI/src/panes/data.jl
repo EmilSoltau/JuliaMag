@@ -126,10 +126,12 @@ exp_num(x::Real) = isfinite(x) ? string(round(Float64(x); sigdigits = 6)) : stri
 
 `x` with `digits` decimals and commas between thousands, as the prototype's `fmtNum`.
 A value of 1e15 or more, NaN, Inf, and a value whose digits do not fit an `Int128` are
-written as `exp_num` does (`"1.0e20"`, `"NaN"`).
+written as `exp_num` does (`"1.0e20"`, `"NaN"`). `digits` is taken as 0 to 38.
 """
 function fmt_num(x::Real, digits::Integer)::String
     (isfinite(x) && abs(x) < HUGE_NUMBER) || return exp_num(x)
+    # 10^38 is the biggest power of ten an Int128 holds; more digits would wrap.
+    digits = clamp(digits, 0, 38)
     digits == 0 && return fmt_int(round(Int, x))
     scaled = abs(Float64(x)) * 10.0^digits
     scaled < 1e38 || return exp_num(x)

@@ -68,6 +68,7 @@ menu of the dialog at level k. `ref` is the ImGui name of its window, where test
 references to its rows start (`"###menu"` for the shell's menu).
 A menu taller than the window scrolls: `scroll` is how far, in device px. `key` is the row
 the keyboard highlights (0 for none); `reveal` scrolls the checked row into view once.
+`mouse_lit`: the mouse, not the keyboard, lit the row `key`.
 """
 mutable struct OpenMenu
     owner::String
@@ -83,6 +84,7 @@ mutable struct OpenMenu
     scroll::Float32
     key::Int
     reveal::Bool
+    mouse_lit::Bool
 end
 
 """
@@ -156,7 +158,7 @@ any open menu. Opened while a dialog is open, it belongs to the top dialog.
 function open_menu!(app, owner::AbstractString, anchor::Box, items::Vector{MenuItem};
         min_width::Real = MENU_MIN_WIDTH, gap::Real = 2)
     app.ui.menu = OpenMenu(String(owner), anchor, items, Float32(min_width), Float32(gap), true,
-        true, anchor, length(app.ui.dialogs), "###menu", 0f0, 0, true)
+        true, anchor, length(app.ui.dialogs), "###menu", 0f0, 0, true, false)
     return nothing
 end
 
@@ -337,9 +339,14 @@ function draw_menu_rows(app, m::OpenMenu, l::MenuLayout)
     view = inset(b, hl, hl)
     io = unsafe_load(ig.GetIO())
     moved = io.MouseDelta.x != 0 || io.MouseDelta.y != 0
-    # The last input wins: a mouse that moves takes the highlight from the keyboard, so
-    # one row is lit at a time; moved out of the menu, it lights none.
-    moved && !inside(view, io.MousePos.x, io.MousePos.y) && (m.key = 0)
+    # The last input wins: a mouse that moves over the menu takes the highlight from the
+    # keyboard, so one row is lit at a time. A row the mouse lit goes dark when the mouse
+    # leaves; a row the keyboard picked stays lit while the mouse moves outside (a jitter
+    # must not lose the row Enter picks).
+    moved && !inside(view, io.MousePos.x, io.MousePos.y) && m.mouse_lit && (m.key = 0)
+    # The scrollbar's thumb is dragged like the panes' (`scroll_area!`). Its button comes
+    # before the rows, so it takes the mouse where it covers them.
+    l.scroll_max > 0 && drag_menu_thumb!(app, m, l, menu_track(b, hl, s), view)
     ig.PushClipRect((view.x0, view.y0), (view.x1, view.y1), true)
     for (k, (it, row)) in enumerate(zip(m.items, l.rows))
         (row.y1 <= view.y0 || row.y0 >= view.y1) && continue
@@ -357,7 +364,7 @@ function draw_menu_rows(app, m::OpenMenu, l::MenuLayout)
         id = it.label in seen_ids ? it.label * "##" * string(k) : it.label
         push!(seen_ids, it.label)
         clicked, hovered, held = hit(id, row)
-        hovered && moved && enabled && (m.key = k)
+        hovered && moved && enabled && (m.key = k; m.mouse_lit = true)
         enabled && (k == m.key || (hovered && m.key == 0)) && ig.AddRectFilled(dl,
             (row.x0, row.y0), (row.x1, row.y1), u32(held ? t.pressed : t.hover), p(5))
         x = row.x0 + p(6)
@@ -378,13 +385,44 @@ function draw_menu_rows(app, m::OpenMenu, l::MenuLayout)
     end
     ig.PopClipRect()
     if l.scroll_max > 0   # a 6 px thumb in a 10 px bar, as the panes' scrollbars
-        track = inset(Box(b.x1 - hl - p(10), b.y0 + hl, b.x1 - hl, b.y1 - hl), p(2), p(4))
-        total = height(view) + l.scroll_max
-        th = max(height(track) * height(view) / total, p(20))
-        ty = track.y0 + (height(track) - th) * l.scroll / l.scroll_max
+        track = menu_track(b, hl, s)
+        ty, th = menu_thumb(track, view, l.scroll, l.scroll_max, s)
         ig.AddRectFilled(dl, (track.x0, ty), (track.x1, ty + th), u32(t.border_strong), p(3))
     end
     return chosen
+end
+
+# The track of the menu's scrollbar: 6 px wide in the 10 px bar on the right of box `b`.
+menu_track(b::Box, hl::Real, s::Real)::Box =
+    inset(Box(b.x1 - hl - px(s, 10), b.y0 + hl, b.x1 - hl, b.y1 - hl), px(s, 2), px(s, 4))
+
+# The top and the height of the thumb in `track` at `scroll`.
+function menu_thumb(track::Box, view::Box, scroll::Real, scroll_max::Real, s::Real)::NTuple{2,Float32}
+    th = max(height(track) * height(view) / (height(view) + scroll_max), px(s, 20))
+    return (track.y0 + (height(track) - th) * scroll / scroll_max, th)
+end
+
+# A press on the thumb grabs it and the rows follow the mouse; a press on the track
+# above or below it scrolls one page. Sets `m.scroll`; the rows move at the next frame.
+function drag_menu_thumb!(app, m::OpenMenu, l::MenuLayout, track::Box, view::Box)
+    s = app.window.scale
+    mouse = unsafe_load(ig.GetIO()).MousePos
+    bar = Box(track.x0 - px(s, 2), view.y0, track.x1 + px(s, 2), view.y1)
+    _, _, held = hit("##menu_scrollbar", bar)
+    id = ig.GetItemID()
+    top, th = menu_thumb(track, view, m.scroll, l.scroll_max, s)
+    if ig.IsItemActivated()
+        on_thumb = top <= mouse.y < top + th
+        app.ui.drag = ScrollDrag(id, on_thumb ? mouse.y - top : NaN32)
+        on_thumb || (m.scroll = clamp(m.scroll + (mouse.y < top ? -1 : 1) * height(view), 0f0, l.scroll_max))
+    end
+    d = app.ui.drag
+    travel = height(track) - th
+    if held && d isa ScrollDrag && d.id == id && !isnan(d.grab) && travel > 0
+        m.scroll = clamp((mouse.y - d.grab - track.y0) / travel * l.scroll_max, 0f0, l.scroll_max)
+    end
+    ig.IsItemDeactivated() && d isa ScrollDrag && d.id == id && (app.ui.drag = nothing)
+    return nothing
 end
 
 # Run the row clicked, or the row the keyboard picked with Enter; scroll with the wheel
@@ -400,6 +438,7 @@ function act_on_menu!(app, m::OpenMenu, chosen, l::MenuLayout)
         k = menu_key(m, l, s)
         if k != m.key && k != 0
             m.key = k
+            m.mouse_lit = false
             reveal_row!(m, l, k, s)
         end
         enter = ig.IsKeyPressed(lib.ImGuiKey_Enter, false) || ig.IsKeyPressed(lib.ImGuiKey_KeypadEnter, false)

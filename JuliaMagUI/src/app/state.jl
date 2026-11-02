@@ -186,6 +186,7 @@ function snapshot(s::Core.Session)::Snapshot
     warns = Core.warnings(s)
 
     relock = f -> lock(f, s.lock)
+    cache = view_cache(s)
     rows = ItemRow[]
     databases = Dict{String,DatabaseView}()
     grids = Dict{String,GridView}()
@@ -193,11 +194,17 @@ function snapshot(s::Core.Session)::Snapshot
         gone = Core.item_missing(p, it)
         push!(rows, ItemRow(it.id, it.kind, it.name, it.path, gone, it.made_by, get(busy, it.id, "")))
         if it.kind == Core.ITEM_DATABASE
-            databases[it.id] = database_view(p, it, gone, relock)
+            databases[it.id] = cached_view(cache, p, it, gone, Core.META_FILE) do
+                database_view(p, it, gone, relock)
+            end
         elseif it.kind == Core.ITEM_GRID
-            grids[it.id] = grid_view(p, it, gone, relock)
+            grids[it.id] = cached_view(cache, p, it, gone, Core.GRID_META_FILE) do
+                grid_view(p, it, gone, relock)
+            end
         end
     end
+    ids = Set(it.id for it in items)
+    lock(() -> filter!(kv -> first(kv) in ids, cache.views), cache.lock)   # items that went
     names = Dict{String,String}(it.id => it.name for it in items)
     infos = command_infos()
     job_rows = JobRow[job_row(j, args, infos, names) for (j, args) in jobs]
@@ -242,8 +249,50 @@ missing_text(it::Core.ProjectItem) = "The folder of $(it.name) is missing."
 # The message for an item that cannot be read. Unlike `user_message` it does not log:
 # a broken item stays broken, and the snapshot is built again after every change.
 function read_error(@nospecialize(e))::String
-    e isa USER_ERRORS && return plain_message(e)
+    e isa Union{CORE_ERRORS,ArgumentError} && return plain_message(e)
     return "It cannot be read: " * sprint(showerror, e)
+end
+
+"""
+    ViewCache
+
+The item views of the last snapshot of a session, so a new snapshot reads again only the
+items that changed. A view is kept with the folder of its item and a hash of the bytes of
+its metadata file (`database.json` or `grid.json`). Every change to an item writes that
+file, so equal bytes mean an equal view. The hash is of the content, not of the file
+time: two writes in the same second (a coarse clock on some drives) are still told apart.
+Reading the bytes is much cheaper than reading the JSON and building the view.
+"""
+struct ViewCache
+    lock::ReentrantLock
+    views::Dict{String,Tuple{String,UInt64,Any}}   # item id => (folder, hash, view)
+end
+
+# One cache for each open session; it goes with the session.
+const VIEW_CACHES = WeakKeyDict{Core.Session,ViewCache}()
+const VIEW_CACHES_LOCK = ReentrantLock()
+
+view_cache(s::Core.Session)::ViewCache =
+    lock(() -> get!(() -> ViewCache(ReentrantLock(), Dict{String,Tuple{String,UInt64,Any}}()), VIEW_CACHES, s),
+        VIEW_CACHES_LOCK)
+
+# The view of item `it` from the cache when its metadata file `meta` has the same bytes,
+# else `build()`, kept for next time when it has no error.
+function cached_view(build::Function, cache::ViewCache, p::Core.Project, it::Core.ProjectItem, gone::Bool,
+        meta::String)
+    gone && return build()
+    folder = Core.item_path(p, it)
+    h = try
+        hash(read(joinpath(folder, meta)))
+    catch e
+        e isa InterruptException && rethrow()
+        return build()   # it says what is wrong
+    end
+    hit = lock(() -> get(cache.views, it.id, nothing), cache.lock)
+    hit !== nothing && hit[1] == folder && hit[2] == h && return hit[3]
+    v = build()
+    isempty(v.error) && lock(() -> (cache.views[it.id] = (folder, h, v)), cache.lock)
+    return v
 end
 
 """
@@ -357,6 +406,8 @@ What the backstage pages keep while the app runs. Changed on the render thread o
   which the last `output_errors` are the error; `output_failed`: the run threw;
   `output_scroll`: how far its box is scrolled.
 - `running`: a script runs now (a quit then asks first).
+- `reopen`: the project folder to open again when the user cancels a quit that was asked
+  while a script ran, and the script ended meanwhile; else `nothing`.
 """
 Base.@kwdef mutable struct BackstageState
     scroll::Float32 = 0f0
@@ -378,6 +429,7 @@ Base.@kwdef mutable struct BackstageState
     output_errors::Int = 0
     output_scroll::Float32 = 0f0
     running::Bool = false
+    reopen::Union{Nothing,String} = nothing
 end
 
 """
@@ -503,6 +555,7 @@ An error that cut frames short (see `note_draw_error!`).
 - `count`: how many frames it cut; `reports`: how often it was logged and toasted.
 - `last_seen`: the `time()` it last cut a frame.
 - `toast`: its sticky toast while it keeps coming, else `nothing`.
+- `trace`: the hash of the backtrace it last came with.
 """
 mutable struct DrawError
     key::String
@@ -511,6 +564,7 @@ mutable struct DrawError
     reports::Int
     last_seen::Float64
     toast::Union{Nothing,Toast}
+    trace::UInt64   # the hash of its last backtrace, so a repeat skips reading the stack
 end
 
 """
@@ -619,11 +673,11 @@ function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     empty!(ui.job_bars)
     ui.jobs_seen = nothing
     ui.jobs_watched = nothing
+    drop_job_toasts!(app)   # they are about the jobs of the project that went
     ui.bs.open_path = ""
     ui.bs.script = nothing
     ui.bs.script_of = nothing
     ui.bs.script_wrap = nothing
-    drop_job_toasts!(app)   # they are about the jobs of the project that went
     ui.bs.script_scroll = 0f0
     return nothing
 end

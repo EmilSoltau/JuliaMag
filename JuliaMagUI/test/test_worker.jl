@@ -45,6 +45,7 @@ Base.showerror(::IO, ::UnprintableError) = error("cannot print this error")
             end
             @test startswith(last(app.toasts).text, "Something went wrong")
             @test occursin("x", last(app.toasts).text)
+            @test length(app.draw_errors) == 1   # a bug: the window tests fail on it
 
             # The worker lives on after an error.
             result = Ref{Any}(nothing)
@@ -81,12 +82,60 @@ Base.showerror(::IO, ::UnprintableError) = error("cannot print this error")
         end
     end
 
-    @testset "an error in done becomes a toast" begin
+    @testset "a user error in done becomes a toast" begin
         with_app(test_app_state(fresh_session())) do app
-            submit!(app, "ok", s -> 1; done = (app, r) -> throw(ArgumentError("no such channel")))
+            # The core throws this `ArgumentError` on purpose: a user error.
+            submit!(app, "ok", s -> 1; done = (app, r) -> Core.tool("no.such.tool"))
             wait_drained(app)
-            @test last(app.toasts).kind == :error && last(app.toasts).text == "No such channel."
+            @test last(app.toasts).kind == :error && last(app.toasts).text == "There is no tool \"no.such.tool\"."
+            @test isempty(app.draw_errors)
         end
+    end
+
+    # A bug in an action, in `done`, or one that an action turns into a message is noted
+    # as a draw error, so the window tests fail on it (final review I3).
+    @testset "a bug in done, in an action, or made a message is a draw error" begin
+        # The worker logs from its own task, so the logger is set before the app starts.
+        logger = Test.TestLogger()
+        Base.CoreLogging.with_logger(logger) do
+            with_app(test_app_state(fresh_session())) do app
+                submit!(app, "ok", s -> 1; done = (app, r) -> [1][2])
+                wait_drained(app)
+                e = only(app.draw_errors)
+                @test startswith(e.key, "BoundsError at ") && e.count == 1 && e.reports == 1
+                @test startswith(last(app.toasts).text, "Something went wrong: BoundsError")
+                # Base throws `ArgumentError` for bugs too: it is not a user error.
+                submit!(app, "parse", s -> parse(Int, "x"))
+                wait_drained(app)
+                @test length(app.draw_errors) == 2 && startswith(app.draw_errors[2].key, "ArgumentError at ")
+                # An action that turns a bug into a message: shown once, and noted.
+                n = length(app.toasts)
+                submit!(app, "message", s -> UI.safe_user_message(KeyError("k"), backtrace());
+                    done = (app, r) -> toast!(app, :error, r))
+                wait_drained(app)
+                @test length(app.toasts) == n + 1 &&
+                      last(app.toasts).text == "Something went wrong: KeyError: key \"k\" not found"
+                @test length(app.draw_errors) == 3 && app.draw_errors[3].reports == 0 &&
+                      app.draw_errors[3].count == 1
+            end
+        end
+        # Each bug is logged once.
+        @test count(r -> r.level == Base.CoreLogging.Error && r.message == "Unexpected error", logger.logs) == 3
+    end
+
+    @testset "is_user_error" begin
+        caught(f) = try
+            f(); nothing
+        catch e
+            (e, catch_backtrace())
+        end
+        @test UI.is_user_error(caught(() -> Core.tool("no.such.tool"))...)
+        @test !UI.is_user_error(caught(() -> parse(Int, "x"))...)
+        @test UI.is_user_error(Core.ToolError("Pick a channel."))
+        @test !UI.is_user_error(KeyError("k"))
+        @test UI.is_user_error(ArgumentError("no backtrace: as before"))
+        t = Threads.@spawn Core.tool("no.such.tool")
+        @test UI.is_user_error(caught(() -> wait(t))...)
     end
 
     @testset "an error that cannot print itself" begin
@@ -248,6 +297,24 @@ Base.showerror(::IO, ::UnprintableError) = error("cannot print this error")
             toast!(app, :warn, "Stays"; actions = ["Open" => app -> nothing])
             prune_toasts!(app, time() + 4.3)
             @test length(app.toasts) == 1
+        end
+    end
+
+    @testset "a sticky toast is not pushed out by ordinary toasts" begin
+        with_app(test_app_state(nothing)) do app
+            sticky = toast!(app, :error, "A bug."; ms = typemax(Int))
+            for k in 1:4
+                toast!(app, :info, "Toast $k")
+            end
+            @test [t.text for t in app.toasts] == ["A bug.", "Toast 3", "Toast 4"]
+            # Three sticky toasts: a new ordinary one does not push them out.
+            toast!(app, :error, "Bug 2."; ms = typemax(Int))
+            toast!(app, :error, "Bug 3."; ms = typemax(Int))
+            toast!(app, :info, "Toast 5")
+            @test [t.text for t in app.toasts] == ["A bug.", "Bug 2.", "Bug 3."]
+            # A fourth sticky one pushes out the oldest sticky one.
+            toast!(app, :error, "Bug 4."; ms = typemax(Int))
+            @test [t.text for t in app.toasts] == ["Bug 2.", "Bug 3.", "Bug 4."] && sticky ∉ app.toasts
         end
     end
 end

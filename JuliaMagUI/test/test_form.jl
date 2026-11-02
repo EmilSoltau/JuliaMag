@@ -392,8 +392,9 @@ top_dialog(app) = last(app.ui.dialogs)
 
     @testset "fix round 2: guarded sends bugs to the draw errors, user errors to a toast" begin
         with_app(app_with_database()) do app
-            UI.guarded(app, a -> throw(ArgumentError("the name is taken")))
-            @test isempty(app.draw_errors) && app.toasts[end].text == "The name is taken."
+            # An `ArgumentError` that the core throws on purpose is a user error.
+            UI.guarded(app, a -> Core.tool("no.such.tool"))
+            @test isempty(app.draw_errors) && app.toasts[end].text == "There is no tool \"no.such.tool\"."
             logger = Test.TestLogger(min_level = Base.CoreLogging.Error)
             Base.CoreLogging.with_logger(logger) do
                 UI.guarded(app, a -> error("a bug"))
@@ -401,6 +402,11 @@ top_dialog(app) = last(app.ui.dialogs)
             @test length(app.draw_errors) == 1 && only(app.draw_errors).count == 1
             @test app.toasts[end].kind == :error && occursin("a bug", app.toasts[end].text)
             @test count(r -> r.level == Base.CoreLogging.Error, logger.logs) == 1
+            # One that Base throws is a bug (final review M5).
+            Base.CoreLogging.with_logger(logger) do
+                UI.guarded(app, a -> parse(Int, "x"))
+            end
+            @test length(app.draw_errors) == 2 && startswith(app.draw_errors[2].key, "ArgumentError at ")
         end
     end
 

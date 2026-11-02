@@ -135,7 +135,8 @@ Every icon in every style at the sizes of `ICON_STYLE_SIZES`, for one theme and 
 packed into one straight RGBA image. `upload!` makes it an OpenGL texture.
 
 - `names`: icon names, sorted; `index` maps a name to its position.
-- `rects[style, size, icon]`: `(x, y, w, h)` in pixels, `w == h == px(scale, size)`;
+- `rects[style, size, icon]`: `(x, y, w, h)` in pixels, `w == h == px(scale, size)`; the
+  `icon_pad(w)` pixels around it hold what the icon draws past its box;
   `size` indexes `ICON_SIZES`. A size the style does not hold is all zeros.
 - `pixels`: RGBA bytes, rows from the top. Emptied by `upload!`.
 - `texture`: the OpenGL texture, or 0.
@@ -155,13 +156,19 @@ end
 const ICON_ATLAS_WIDTH = 4096
 const ICON_GAP = 1   # empty pixels around each icon, so linear filtering takes nothing from a neighbour
 
+# The margin around an icon of `d` pixels that is drawn too: 1 px per 24. Some icons reach
+# past their 24 by 24 box, such as a badge's halo (r 6.2 at 18, 18), and the prototype
+# shows that part (`overflow: visible`), so the atlas keeps it.
+icon_pad(d::Integer)::Int = cld(Int(d), 24)
+
 # Place every icon cell in rows, biggest size first. Returns the rects and the atlas height.
 function pack_icons(n_icons::Int, scale::Float32)
     rects = fill(NTuple{4,Int32}((0, 0, 0, 0)), length(ICON_STYLES), length(ICON_SIZES), n_icons)
     x = y = row_h = 0
     for k in reverse(eachindex(ICON_SIZES))
         d = Int(px(scale, ICON_SIZES[k]))
-        cell = d + ICON_GAP
+        pad = icon_pad(d)
+        cell = d + 2pad + ICON_GAP
         for s in eachindex(ICON_STYLES), i in 1:n_icons
             ICON_SIZES[k] in ICON_STYLE_SIZES[s] || continue
             if x + cell > ICON_ATLAS_WIDTH
@@ -169,7 +176,7 @@ function pack_icons(n_icons::Int, scale::Float32)
                 y += row_h
                 row_h = 0
             end
-            rects[s, k, i] = (x, y, d, d)
+            rects[s, k, i] = (x + pad, y + pad, d, d)
             x += cell
             row_h = max(row_h, cell)
         end
@@ -199,9 +206,10 @@ function build_icon_atlas(tokens::Tokens, scale::Real)::IconAtlas
                     for k in eachindex(ICON_SIZES)
                         x, y, d, _ = rects[s, k, i]
                         d == 0 && continue
+                        pad = icon_pad(d)
                         Cairo.save(cr)
                         Cairo.translate(cr, x, y)
-                        Cairo.rectangle(cr, 0, 0, d, d)
+                        Cairo.rectangle(cr, -pad, -pad, d + 2pad, d + 2pad)
                         Cairo.clip(cr)
                         Cairo.scale(cr, d / 24, d / 24)
                         Rsvg.handle_render_cairo(cr, handle) ||
@@ -258,21 +266,32 @@ end
 
 unpremultiply(c::UInt32, a::UInt32)::UInt8 = min((c * 255 + a ÷ 2) ÷ a, 0xff) % UInt8
 
-"""
-    upload!(atlas) -> Bool
-
-Make the atlas an OpenGL texture of the current context and drop the CPU copy.
-Returns false, with an `@error`, when the card does not take it; the atlas then has no texture.
-"""
-function upload!(atlas::IconAtlas)::Bool
+"The biggest texture side the current OpenGL context takes."
+function gl_max_texture_size()::Int
     max_size = Ref{GL.GLint}(0)
     GL.glGetIntegerv(GL.GL_MAX_TEXTURE_SIZE, max_size)
-    if max(atlas.width, atlas.height) > max_size[]
+    return Int(max_size[])
+end
+
+const GL_ERROR_CLEAR_MAX = 32   # OpenGL keeps one flag per error kind; more means no context
+
+"""
+    upload!(atlas; max_size = gl_max_texture_size()) -> Bool
+
+Make the atlas an OpenGL texture of the current context and drop the CPU copy.
+Returns false, with an `@error`, when the card does not take it (bigger than `max_size`,
+or an OpenGL error); the atlas then has no texture.
+"""
+function upload!(atlas::IconAtlas; max_size::Integer = gl_max_texture_size())::Bool
+    if max(atlas.width, atlas.height) > max_size
         @error "The icon atlas is $(atlas.width) by $(atlas.height) pixels at scale " *
-               "$(atlas.scale); this graphics card allows at most $(max_size[]). Icons are not drawn."
+               "$(atlas.scale); this graphics card allows at most $(max_size). Icons are not drawn."
         return false
     end
-    while GL.glGetError() != GL.GL_NO_ERROR   # clear errors from earlier calls
+    # Clear errors from earlier calls. Bounded: without a context glGetError may never
+    # return GL_NO_ERROR.
+    for _ in 1:GL_ERROR_CLEAR_MAX
+        GL.glGetError() == GL.GL_NO_ERROR && break
     end
     id = Ref{GL.GLuint}(0)
     GL.glGenTextures(1, id)
@@ -396,9 +415,13 @@ function draw_icon(dl, name::AbstractString, pos, size::Integer; style::Symbol =
     d = px(atlas.scale, size)
     p = pos isa ig.ImVec2 ? (pos.x, pos.y) : pos
     x0, y0 = round(Float32(p[1])), round(Float32(p[2]))
+    # The margin past the box (`icon_pad`), scaled as the icon is.
+    pad = icon_pad(w)
+    e = pad * d / w
     tex = ig.ImTextureRef(ig.ImTextureID(atlas.texture))
-    ig.AddImage(dl, tex, (x0, y0), (x0 + d, y0 + d),
-        (x / atlas.width, y / atlas.height), ((x + w) / atlas.width, (y + h) / atlas.height),
+    ig.AddImage(dl, tex, (x0 - e, y0 - e), (x0 + d + e, y0 + d + e),
+        ((x - pad) / atlas.width, (y - pad) / atlas.height),
+        ((x + w + pad) / atlas.width, (y + h + pad) / atlas.height),
         0x00ffffff | (round(UInt32, 255 * clamp(Float32(alpha), 0f0, 1f0)) << 24))
     return nothing
 end

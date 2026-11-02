@@ -107,13 +107,16 @@ function open_project!(app, folder::AbstractString; force::Bool = false, stay::B
     return nothing
 end
 
-# Is `folder` the folder of the open project? Compares paths only (no file access).
+# Is `folder` the folder of the open project? Compares paths only, with no file access
+# (it runs on the render thread), as `Core.folder_key` does: made absolute and normal, and
+# without case on Windows. A link to the folder is not seen; that project only opens again.
 function is_open_project(app, folder::String)::Bool
     app.session === nothing && return false
-    f = normpath(rstrip(folder, ('/', '\\')))
-    f == app.ui.bs.open_path && return true
+    f = Core.folder_key(folder)
+    opened = app.ui.bs.open_path
+    !isempty(opened) && f == Core.folder_key(opened) && return true
     snap = app.snap
-    return snap !== nothing && f == normpath(rstrip(snap.folder, ('/', '\\')))
+    return snap !== nothing && f == Core.folder_key(snap.folder)
 end
 
 """
@@ -390,9 +393,19 @@ function request_quit!(app)::Bool
     if app.ui.bs.running   # a script may never end: ask, and quit without waiting for it
         confirm!(app, "Quit JuliaMag?", SCRIPT_RUNNING; action = "Quit", danger = true,
             on_yes = a -> (a.quit_pending = false; a.quit_hook(a); nothing),
-            on_no = a -> (a.quit_pending = false; nothing))
+            on_no = cancel_script_quit!)
     end
     return false
+end
+
+# Cancel on "A script is still running. Quit anyway?": no quit. When the script ended
+# while the question was open, its project was not opened again; open it now.
+function cancel_script_quit!(app)
+    app.quit_pending = false
+    folder = app.ui.bs.reopen
+    app.ui.bs.reopen = nothing
+    folder === nothing || open_project!(app, folder; stay = true)
+    return nothing
 end
 
 """
@@ -439,10 +452,15 @@ so a chatty script cannot fill the memory. Runs on the worker.
 The redirect is for the whole process, so anything another thread prints to the console
 while the script runs lands in the output too. The app's own log messages do not: they go
 through its logger, not through `stdout`.
+
+A project that the script opened and left open (it threw before `close_session!`, or never
+called it) is closed afterwards (`Core.close_left_open`), and the output says so. Else this
+process would keep it locked, and opening it again would say it is open somewhere else.
 """
 function run_script_file(path::AbstractString)::ScriptRun
     tmp, io = mktemp()
     failure = nothing
+    closed = String[]
     try
         m = Module(:JuliaMagScript)
         # What `module ... end` gives a module: its own `include` and `eval`.
@@ -451,7 +469,9 @@ function run_script_file(path::AbstractString)::ScriptRun
         logger = Logging.ConsoleLogger(io, Logging.Info)
         redirect_stdout(io) do
             redirect_stderr(io) do
-                Logging.with_logger(() -> Base.include(m, String(path)), logger)
+                Logging.with_logger(logger) do
+                    Core.close_left_open(() -> Base.include(m, String(path)), closed)
+                end
             end
         end
     catch e
@@ -464,6 +484,9 @@ function run_script_file(path::AbstractString)::ScriptRun
         last_lines(tmp, OUTPUT_MAX_LINES)
     finally
         rm(tmp; force = true)
+    end
+    for folder in closed
+        out *= "The script left the project in $folder open. JuliaMag closed it.\n"
     end
     return ScriptRun(out, failure)
 end
@@ -528,6 +551,7 @@ function start_script!(app, path::String, folder::Union{Nothing,String})
     bs.output_errors = 0
     bs.running = true
     bs.output_scroll = 0f0
+    bs.reopen = nothing
     label = "Running $(basename(path))..."
     app.switching = label
     submit!(app, label, _ -> run_script_file(path); done = (a, r) -> script_done!(a, r, folder))
@@ -547,7 +571,10 @@ function script_done!(app, r::ScriptRun, folder::Union{Nothing,String})
     # Split once here, not in every frame; the error lines are the last ones.
     bs.output_lines = String.(split(rstrip(bs.output, '\n'), '\n'))
     bs.output_errors = r.error === nothing ? 0 : length(split(rstrip(r.error, '\n'), '\n'))
-    folder === nothing || app.quit_pending || open_project!(app, folder; stay = true)
+    if folder !== nothing
+        # During a quit the project stays closed; a Cancel on the quit question opens it.
+        app.quit_pending ? (bs.reopen = folder) : open_project!(app, folder; stay = true)
+    end
     return nothing
 end
 

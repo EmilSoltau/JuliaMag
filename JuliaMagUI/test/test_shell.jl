@@ -24,6 +24,13 @@ fake_wrap(role, size, text, max_width) = begin
 end
 
 @testset "shell" begin
+    @testset "wrapping keeps an expression together" begin
+        @test UI.wrap_units("such as MAG_IGRF = MAG - IGRF. Names") ==
+              ["such", "as", "MAG_IGRF = MAG - IGRF.", "Names"]
+        @test UI.wrap_units("- leading and trailing -") == ["-", "leading", "and", "trailing", "-"]
+        @test UI.wrap_units("a  b") == ["a", "b"]
+    end
+
     @testset "pane widths from the settings are clamped" begin
         @test pane_width(300, (200, 480), 272) == 300f0
         @test pane_width(-5, (200, 480), 272) == 200f0

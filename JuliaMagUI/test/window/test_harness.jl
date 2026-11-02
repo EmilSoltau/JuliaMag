@@ -104,7 +104,8 @@ window_testset("harness") do
     end
 
     @testset "a failed icon build keeps the old atlas and the app running" begin
-        result = with_test_app(; theme = THEME_LIGHT) do ctx
+        result = try
+        with_test_app(; theme = THEME_LIGHT) do ctx
             state = Ref{Any}(nothing)
             ctx.on_render(w -> begin
                 old = ICON_ATLASES[w.ctx].texture
@@ -132,10 +133,55 @@ window_testset("harness") do
             ctx.on_render(w -> (state[] = (; state[]..., retried = ICON_ATLASES[w.ctx].tokens)))
             state[]
         end
+        finally
+            UI.ICON_SVGS[] = nothing   # also when the test failed, so later tests get the real icons
+        end
         @test result.failed == (DARK, 1f0)
         @test result.texture == result.old && result.tokens == LIGHT
         @test !result.after
         @test result.retried == DARK
+    end
+
+    @testset "a failed body leaves no pushed item width or text wrap behind (T9-P2)" begin
+        r = with_test_app(; draw_errors_ok = true) do ctx
+            app = ctx.app_state()
+            out = Ref{Any}(nothing)
+            ctx.on_render(w -> begin
+                ig.Begin("stacks test")
+                win = ig.lib.igGetCurrentWindowRead()
+                sizes() = UI.window_stack_sizes(win)
+                before = sizes()
+                failed = with_logger(NullLogger()) do
+                    UI.run_body(() -> (ig.PushItemWidth(10); ig.PushTextWrapPos(5); error("the body broke")), app)
+                end
+                out[] = (; failed, before, after = sizes())
+                ig.End()
+            end)
+            ctx.frames(2)
+            (; out[]..., errors = length(app.draw_errors))
+        end
+        @test r.failed && r.after == r.before && r.errors == 1
+    end
+
+    @testset "an atlas the card does not take: no texture, an error, the app runs on" begin
+        result = with_test_app() do ctx
+            r = Ref{Any}(nothing)
+            ctx.on_render(w -> begin
+                big = UI.build_icon_atlas(LIGHT, 1f0)
+                logger = Test.TestLogger()
+                too_big = with_logger(() -> UI.upload!(big; max_size = 16), logger)
+                # A size OpenGL refuses gives an OpenGL error, which is reported too.
+                bad = UI.build_icon_atlas(LIGHT, 1f0)
+                bad.width = -1
+                gl_error = with_logger(() -> UI.upload!(bad), logger)
+                r[] = (; too_big, gl_error, big = big.texture, bad = bad.texture,
+                    messages = [l.message for l in logger.logs])
+            end)
+            r[]
+        end
+        @test !result.too_big && !result.gl_error && result.big == 0 && result.bad == 0
+        @test occursin("allows at most 16", result.messages[1])
+        @test occursin("OpenGL error 0x501", result.messages[2])   # GL_INVALID_VALUE
     end
 
     @testset "the overall timeout ends a test that hangs" begin
@@ -149,6 +195,25 @@ window_testset("harness") do
         @test err isa CapturedException && err.ex isa TestTimeout
         @test time() - t0 < 30
         @test isempty(ICON_ATLASES)
+    end
+
+    @testset "a test stuck outside the harness: the watchdog stops it" begin
+        # The real `stop` ends the process; this one only notes the call.
+        stopped = Threads.Atomic{Bool}(false)
+        finished = Threads.Atomic{Bool}(false)
+        out = Pipe()
+        redirect_stderr(out) do
+            watch_hang(finished, 0.2; grace = 0.3, stop = () -> (stopped[] = true))
+            @test timedwait(() -> stopped[], 10) === :ok
+        end
+        close(out.in)
+        @test occursin("stuck outside the test harness", read(out, String))
+        # A test that ends in time is left alone.
+        stopped[] = false
+        watch_hang(finished, 0.2; grace = 0.3, stop = () -> (stopped[] = true))
+        finished[] = true
+        sleep(1.5)
+        @test !stopped[]
     end
 
     @testset "errors in the test function reach the caller" begin
@@ -221,5 +286,12 @@ window_testset("shot tool") do
         @test near(rgb255(img[300, 400]), rgb255(DARK.canvas); tol = 1)
         @test !isfile(joinpath(out, "never.png"))
         @test redirect_stdio(() -> shot_main(["only-one-argument"]); stderr = devnull) == 2
+        @test redirect_stdio(() -> shot_main(["--timeout=soon", script, out]); stderr = devnull) == 2
+        # A long review gets more time; the run of this script is short.
+        write(script, "{\"shot\": \"timed\"}\n")
+        status = redirect_stdio(stdout = devnull, stderr = devnull) do
+            shot_main(["--timeout=600", script, out])
+        end
+        @test status == 0 && isfile(joinpath(out, "timed.png")) && TEST_TIMEOUT[] == 600
     end
 end

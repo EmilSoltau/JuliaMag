@@ -1,5 +1,6 @@
 using Test
 import Rsvg
+import JuliaMagUI as UI
 using JuliaMagUI: icon_for, ICON_DIR, ICON_SIZES, ICON_STYLES, ICON_PLACEHOLDERS, LIGHT, DARK,
     build_icon_atlas, px, CORE_ICONS, ICON_STYLE_SIZES, icon_size_index
 import JuliaMagCore as JMCore
@@ -18,7 +19,7 @@ const PROTOTYPE_HTML = joinpath(@__DIR__, "..", "..", "prototype", "juliamag-ui.
         for f in files
             svg = read(joinpath(ICON_DIR, f), String)
             @test occursin("viewBox=\"0 0 24 24\"", svg)
-            handle = Rsvg.handle_new_from_data(svg)
+            handle = UI.svg_handle(svg)   # Rsvg.handle_new_from_data leaks its input stream
             d = Rsvg.handle_get_dimensions(handle)
             @test (d.width, d.height) == (24, 24)
             Rsvg.destroy(handle)
@@ -57,8 +58,10 @@ const PROTOTYPE_HTML = joinpath(@__DIR__, "..", "..", "prototype", "juliamag-ui.
                 @test all(r -> r[3] == 0 || r[3] == r[4] == px(scale, ICON_SIZES[k]),
                     a.rects[:, k, :])
             end
-            cells = filter(r -> r[3] > 0, vec(a.rects))
-            @test all(r -> r[1] + r[3] <= a.width && r[2] + r[4] <= a.height, cells)
+            # Each cell with its margin (`icon_pad`) fits, and no two overlap.
+            cells = [(x - p, y - p, w + 2p, h + 2p) for (x, y, w, h) in filter(r -> r[3] > 0, vec(a.rects))
+                     for p in (UI.icon_pad(w),)]
+            @test all(r -> r[1] >= 0 && r[2] >= 0 && r[1] + r[3] <= a.width && r[2] + r[4] <= a.height, cells)
             used = falses(a.width, a.height)
             overlaps = 0
             for (x, y, w, h) in cells
@@ -99,6 +102,12 @@ const PROTOTYPE_HTML = joinpath(@__DIR__, "..", "..", "prototype", "juliamag-ui.
                  a.pixels[4*((y+j)*a.width+x+i)+3], a.pixels[4*((y+j)*a.width+x+i)+4])
                 for j in 0:d-1, i in 0:d-1)
         end
+        # A badge's halo reaches past the 24 box (r 6.2 at 18, 18): the margin keeps it (T6).
+        nw = a.index["new"]
+        x, y, d, _ = a.rects[1, icon_size_index(1, 48), nw]
+        @test UI.icon_pad(d) == 2
+        alpha(i, j) = a.pixels[4*((y+j)*a.width+x+i)+4]
+        @test any(j -> alpha(d, j) > 0, 0:d-1) && any(i -> alpha(i, d) > 0, 0:d-1)
         byte(c) = round(Int, c * 255)
         # Straight colours from premultiplied ones lose precision at low alpha.
         near(p, c, alpha) = abs(Int(p[4]) - byte(alpha)) <= 1 &&

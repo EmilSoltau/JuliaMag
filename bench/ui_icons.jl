@@ -24,7 +24,7 @@ function main(runs::Int)
             "atlas $(a.width) x $(a.height)")
     end
 
-    Sys.iswindows() || haskey(ENV, "DISPLAY") || haskey(ENV, "WAYLAND_DISPLAY") || return
+    UI.has_display() || return
     times = Float64[]
     mktempdir() do config_dir
         UI.main(; config_dir, fonts = :bundled, passive = true, extra_ui = w -> begin

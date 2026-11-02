@@ -29,7 +29,14 @@ watch_now!(app) = (refresh_now!(app); UI.watch_jobs!(app); nothing)
         cancelled = fake_job_row(status = Core.JOB_CANCELLED, progress = 0.4, error = "the job was cancelled")
         @test job_summary(cancelled) == "Cancelled at 40 %. Nothing was written."
         failed = fake_job_row(status = Core.JOB_FAILED, error = "the file is bad")
-        @test job_summary(failed) == "the file is bad"
+        # A core error reads as a sentence, as in its toast (final review M10).
+        @test job_summary(failed) == "The file is bad."
+        # A name the job knows keeps its case at the start (T7: sentence and names).
+        named = fake_job_row(status = Core.JOB_FAILED, error = "kangaroo is busy", outputs = ["db-1"],
+            names = Dict("db-1" => "kangaroo"))
+        @test job_summary(named) == "kangaroo is busy."
+        @test UI.sentence("kangaroo is busy"; names = ["kangaroo"]) == "kangaroo is busy."
+        @test UI.sentence("kangaroo is busy") == "Kangaroo is busy."
         @test job_summary(fake_job_row(status = Core.JOB_UNDONE, outputs = ["db-1"], names = names)) == "Undone."
     end
 
@@ -80,6 +87,7 @@ watch_now!(app) = (refresh_now!(app); UI.watch_jobs!(app); nothing)
         # Before 1970, not a number, or a local time that makes no sense: UTC.
         @test UI.local_offset(-86400.0, fake(sydney)) == 0
         @test UI.local_offset(NaN) == 0 && UI.local_offset(Inf) == 0
+        @test UI.local_offset(1e30) == 0   # past what an Int holds: UTC, no InexactError (T12-P5)
         @test UI.local_offset(after, t -> (year = 0, month = 0, mday = 0, hour = 0, min = 0, sec = 0)) == 0
         @test UI.local_offset(after, t -> error("no local time")) == 0
         @test UI.clock_text("1969-12-31T23:30:00Z") == "23:30"
@@ -99,6 +107,27 @@ watch_now!(app) = (refresh_now!(app); UI.watch_jobs!(app); nothing)
         @test UI.card_warnings(["a", "b", "c"]) == ["a", "b", "c"]
         @test UI.card_warnings(["a", "b", "c", "d"]) == ["a", "b", "c", "And 1 more warning. See Report."]
         @test UI.card_warnings(["w$k" for k in 1:200])[end] == "And 197 more warnings. See Report."
+        @test UI.card_warnings(fake_job_row(warnings = ["check the input file", "MAG has gaps"])) ==
+              ["Check the input file.", "MAG has gaps."]
+    end
+
+    @testset "a measured card bounds its estimate at another width (T12-P4)" begin
+        r = fake_job_row(status = Core.JOB_FAILED, error = "W"^400)   # wide letters: the estimate is low
+        v = UI.JobsView()
+        key = UI.card_key(r)
+        e = UI.fit_card!(v, r, key, 300f0, 1f0)
+        e.text = UI.CardText("t", "", "", ["a"], String[], false)   # as measured
+        e.height = 500f0                                            # taller than the estimate
+        narrow = UI.fit_card!(v, r, key, 290f0, 1f0)
+        @test narrow.height >= 500f0 && narrow.text === nothing     # narrower: never shorter
+        narrow.text = UI.CardText("t", "", "", ["a"], String[], false)
+        narrow.height = 520f0
+        wide = UI.fit_card!(v, r, key, 400f0, 1f0)
+        @test wide.height <= 520f0                                  # wider: never taller
+        # Not measured: the plain estimate.
+        v2 = UI.JobsView()
+        plain = UI.fit_card!(v2, r, key, 290f0, 1f0)
+        @test plain.height == UI.estimated_entry(r, key, 290f0, 1f0).height
     end
 
     @testset "Cancel says Cancelling... once asked" begin
@@ -183,7 +212,7 @@ watch_now!(app) = (refresh_now!(app); UI.watch_jobs!(app); nothing)
                 watch_now!(app)
                 t = app.toasts[end]
                 @test t.kind == :error && t.text == "Fail failed." && t.ms == UI.TOAST_JOB_FAILED_MS
-                @test occursin("the input file is bad", t.sub)
+                @test t.sub == "The input file is bad."
                 @test first.(t.actions) == ["Report", "Run Again..."]
 
                 stopped = Core.run_tool(s, "test.gate")
@@ -256,6 +285,24 @@ watch_now!(app) = (refresh_now!(app); UI.watch_jobs!(app); nothing)
         # An empty report says so.
         d = UI.job_report_dialog(fake_job_row(), "", String[])
         @test d.lines[1] == "The job wrote no report."
+    end
+
+    @testset "a report read for the old project does not open over a new one" begin
+        gate = Channel{Int}(10)
+        with_tools([gate_tool(gate)]) do
+            with_test_session(fresh_session()) do s
+                with_app(test_app_state(s)) do app
+                    job = Core.run_tool(s, "test.gate")
+                    put!(gate, 10)
+                    Core.wait_job(job)
+                    refresh_now!(app)
+                    UI.show_report!(app, row_of(app, job))
+                    UI.set_session!(app, fresh_session())   # a switch before the report comes
+                    wait_drained(app)
+                    @test isempty(app.ui.dialogs)
+                end
+            end
+        end
     end
 
     @testset "Report, Cancel and Run Again go through the worker" begin

@@ -14,7 +14,10 @@ const GLFW_LAST_TEXT = Ref{Ptr{UInt8}}(C_NULL) # the text of the last one; mallo
 const GLFW_LOGGED = Ref(0)
 const GLFW_CALLBACK = Ref{Ptr{Cvoid}}(C_NULL)  # the installed callback
 
-# Called by GLFW. It throws nothing and allocates nothing.
+# Called by GLFW. It throws nothing and allocates nothing. GLFW may call it while the
+# render thread waits in a GC-safe `ccall` (`glfwWaitEventsTimeout`); the `@cfunction`
+# entry moves the thread back to GC-unsafe before any Julia code runs, and nothing here
+# allocates or yields, so a GC that runs meanwhile on another thread is not disturbed.
 function glfw_error_callback(code::Cint, description::Ptr{UInt8})::Cvoid
     buf = GLFW_LAST_TEXT[]
     if buf != C_NULL
@@ -68,10 +71,12 @@ function glfw_failure(what::AbstractString, before::Integer)::ErrorException
     return ErrorException("$what: $text (GLFW error 0x$(string(code; base = 16)))")
 end
 
-# Errors that only mean a monitor changed or went away while GLFW asked about it.
+# Errors that only mean a monitor changed or went away while GLFW asked about it: the
+# video mode query failed ("X11: Failed to query video mode", GLFW's only such text on
+# Linux; on Windows the display settings query). Any other error is a warning.
 monitor_error(code::Integer, text::AbstractString)::Bool =
     code == Int(GLFW.PLATFORM_ERROR) &&
-    (occursin("video mode", text) || occursin("monitor", lowercase(text)))
+    (occursin("Failed to query video mode", text) || occursin("Failed to query display settings", text))
 
 """
     log_glfw_errors()

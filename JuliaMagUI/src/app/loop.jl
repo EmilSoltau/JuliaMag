@@ -298,7 +298,8 @@ function create_glfw_window(title::AbstractString, size::Tuple{Int,Int}, passive
     handle.handle == C_NULL &&
         throw(glfw_failure("could not open a window with OpenGL 3.3", before))
     # What `GLFW.CreateWindow` does after a window opens, so GLFW.jl's window
-    # callbacks and `GLFW.DestroyWindow` work as usual.
+    # callbacks and `GLFW.DestroyWindow` work as usual. These are GLFW.jl internals, so
+    # Project.toml pins GLFW to 3.4.x, and test_loop.jl checks they are there.
     callbacks = Ref{Vector{GLFW.Callback}}(fill(nothing, GLFW._window_callback_num[]))
     GLFW._window_callbacks[handle] = callbacks
     ccall((:glfwSetWindowUserPointer, GLFW.libglfw), Cvoid,
@@ -331,8 +332,13 @@ function run_window(ui; title::AbstractString = APP_NAME,
         scale::Union{Nothing,Real} = nothing, fonts::Symbol = :system,
         on_close = () -> true, engine = nothing, tokens::Tokens = LIGHT,
         passive::Bool = false)
-    Threads.threadid() == 1 ||
-        throw(ArgumentError("run_window must run on thread 1, not thread $(Threads.threadid())"))
+    # GLFW and OpenGL need one thread for the whole run. A task that is not sticky (one
+    # from `Threads.@spawn`) may move to another thread at any wait, so it is refused too:
+    # the main task and tasks from `@async` stay where they start.
+    (Threads.threadid() == 1 && current_task().sticky) ||
+        throw(ArgumentError("run_window must run on thread 1, in a task that stays there " *
+                            "(the main task), not thread $(Threads.threadid())" *
+                            (current_task().sticky ? "" : " in a task that may move")))
     font_paths(fonts)   # fail on a bad source before a window opens
     open_and_run(ui, String(title), (Int(size[1]), Int(size[2])),
         (Int(min_size[1]), Int(min_size[2])), scale === nothing ? 0f0 : Float32(scale),
@@ -426,4 +432,15 @@ function run_loop!(w::Window, @nospecialize(ui), @nospecialize(on_close),
         yield()
     end
     return nothing
+end
+
+"""
+    has_display() -> Bool
+
+Can a window open here? Always on Windows; on Linux when `DISPLAY` or `WAYLAND_DISPLAY`
+is set. The window tests and the benchmarks ask it.
+"""
+function has_display()::Bool
+    Sys.iswindows() && return true
+    return !isempty(get(ENV, "DISPLAY", "")) || !isempty(get(ENV, "WAYLAND_DISPLAY", ""))
 end

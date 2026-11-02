@@ -38,6 +38,14 @@ struct WorkerProblem
     failure::CapturedException
 end
 
+# A bug that `user_message` turned into a message, off the render thread or inside a
+# `done`. The caller has logged and shown it; the render thread notes it as a draw
+# error (`note_draw_error!`), so the tests see it.
+struct BugReport
+    exception::Any
+    backtrace::Any
+end
+
 """
     Worker()
 
@@ -104,7 +112,10 @@ function run_action(a::WorkerAction, results::Channel{Any})
         notify_window(a.window, results)
         msg = try
             # The worker task keeps the world of its start; an action may be newer code.
-            ActionDone(a, Base.invokelatest(a.f, a.session), nothing)
+            # An action that turns an error into a message reports a bug through `results`.
+            with_bug_reports(results) do
+                ActionDone(a, Base.invokelatest(a.f, a.session), nothing)
+            end
         catch e
             ActionDone(a, nothing, CapturedException(e, catch_backtrace()))
         end
@@ -148,7 +159,7 @@ end
 Run `f(session)` on the worker, after the actions submitted before it.
 `session` is `app.session` at the time of the call. While `f` runs, `app.busy` is `label`.
 On the render thread, `drain!` then calls `done(app, result)` with what `f` returned,
-or shows an error toast with `user_message` of what `f` threw.
+or hands what `f` threw to `report_error!`: a user error is a toast, a bug a draw error.
 Call it on the render thread.
 """
 function submit!(app, label::AbstractString, f::Function; done::Function = (app, result) -> nothing)
@@ -166,8 +177,10 @@ Call it on the render thread once per frame. It never blocks.
 """
 function drain!(app)
     results = app.queue.results
-    while isready(results)
-        handle_result!(app, take!(results))
+    with_bug_reports(results) do
+        while isready(results)
+            handle_result!(app, take!(results))
+        end
     end
     return nothing
 end
@@ -181,16 +194,19 @@ function handle_result!(app, m::ActionDone)
         try
             Base.invokelatest(m.action.done, app, m.value)
         catch e
-            toast!(app, :error, safe_user_message(e, catch_backtrace()))
+            e isa InterruptException && rethrow()
+            report_error!(app, e, catch_backtrace())
         end
     else
-        toast!(app, :error, safe_user_message(m.failure.ex, m.failure.processed_bt))
+        report_error!(app, m.failure.ex, m.failure.processed_bt)
     end
     return nothing
 end
 
 handle_result!(app, m::WorkerProblem) =
     (@error m.what exception = (m.failure.ex, m.failure.processed_bt); nothing)
+
+handle_result!(app, m::BugReport) = note_draw_error!(app, m.exception, m.backtrace; reported = true)
 
 function handle_result!(app, m::SnapshotDone)
     # A build that started before `set_session!` is dropped. It does not touch
@@ -253,27 +269,73 @@ function build_snapshot(s::Core.Session, rev::Int, results::Channel{Any}, @nospe
 end
 
 # The core's errors that carry a message for the user.
-const USER_ERRORS = Union{Core.ToolError,Core.ProtectedError,Core.ItemBusyError,
+const CORE_ERRORS = Union{Core.ToolError,Core.ProtectedError,Core.ItemBusyError,
     Core.ProjectLockedError,Core.SessionClosedError,Core.ProjectError,Core.DatabaseError,
-    Core.GridError,ArgumentError}
+    Core.GridError}
+
+"""
+    is_user_error(e, backtrace = nothing) -> Bool
+
+Is `e` an error raised on purpose, with a message for the user to read? The core's own
+errors are. An `ArgumentError` is one only when JuliaMag's own code (the core or the app)
+threw it: Base and other packages throw it for bugs too. Any other error is a bug.
+Without a backtrace, an `ArgumentError` counts as a user error.
+"""
+function is_user_error(@nospecialize(e), bt = nothing)::Bool
+    e isa TaskFailedException && e.task.exception !== nothing &&
+        return is_user_error(e.task.exception, e.task.backtrace)
+    e isa CORE_ERRORS && return true
+    e isa ArgumentError || return false
+    bt === nothing && return true
+    return thrown_by_juliamag(bt)
+end
+
+# Did the first Julia frame of the backtrace (where the error was thrown) come from the
+# source of JuliaMagUI or JuliaMagCore?
+function thrown_by_juliamag(bt)::Bool
+    frames = try
+        stack_frames(bt)
+    catch
+        return false
+    end
+    isempty(frames) && return false
+    file = String(first(frames).file)
+    return startswith(file, SOURCE_DIR) || startswith(file, core_source_dir())
+end
+
+core_source_dir()::String = dirname(something(pathof(Core), "/nowhere/x.jl"))
+
+# Hand bugs that `user_message` meets inside `f` to `results`, for the render thread.
+with_bug_reports(f, results::Channel{Any}) = task_local_storage(f, :juliamag_bug_reports, results)
+
+function send_bug_report(@nospecialize(e), bt)
+    results = get(task_local_storage(), :juliamag_bug_reports, nothing)
+    results isa Channel{Any} || return nothing
+    try
+        put!(results, BugReport(e, bt))
+    catch
+    end
+    return nothing
+end
 
 """
     user_message(e, backtrace = nothing)::String
 
 The text a toast or dialog shows for the exception `e`.
 
-For the core's errors (`ToolError`, `ProtectedError`, `ItemBusyError`, `ProjectLockedError`,
-`SessionClosedError`, `ProjectError`, `DatabaseError`, `GridError`) and `ArgumentError`,
-it is the core's own message, without the type name in front.
-Any other exception gives "Something went wrong: <message>", and the error with its
-stack trace goes to the log.
+For a user error (`is_user_error`: the core's errors, such as `ToolError`, and an
+`ArgumentError` that JuliaMag threw), it is the message, without the type name in front.
+Any other exception is a bug. It gives "Something went wrong: <message>", the error with
+its stack trace goes to the log, and inside a worker action or a frame it is also noted
+as a draw error (a `BugReport`), so the tests fail on it.
 """
 function user_message(@nospecialize(e), backtrace = nothing)::String
     if e isa TaskFailedException && e.task.exception !== nothing
-        return user_message(e.task.exception, backtrace)
+        return user_message(e.task.exception, e.task.backtrace)
     end
-    e isa USER_ERRORS && return plain_message(e)
+    is_user_error(e, backtrace) && return plain_message(e)
     @error "Unexpected error" exception = (backtrace === nothing ? e : (e, backtrace))
+    send_bug_report(e, backtrace)
     return "Something went wrong: " * sprint(showerror, e)
 end
 
@@ -281,6 +343,16 @@ end
 function safe_user_message(@nospecialize(e), backtrace = nothing)::String
     try
         return user_message(e, backtrace)
+    catch
+        return "Something went wrong."
+    end
+end
+
+# `plain_message`, but it never throws.
+function safe_plain_message(@nospecialize(e))::String
+    e isa TaskFailedException && e.task.exception !== nothing && return safe_plain_message(e.task.exception)
+    try
+        return plain_message(e)
     catch
         return "Something went wrong."
     end
@@ -295,15 +367,16 @@ function plain_message(@nospecialize(e))::String
 end
 
 """
-    sentence(text)::String
+    sentence(text; names = ())::String
 
 `text` as a sentence: a capital first letter and a full stop at the end.
-A first word that is a name, such as `db-1` or `database.json`, keeps its case.
+A first word that is a name keeps its case: one that is not all lower-case letters, such
+as `db-1` or `database.json`, and one of `names`, such as an item called "kangaroo".
 """
-function sentence(text::AbstractString)::String
+function sentence(text::AbstractString; names = ())::String
     t = strip(text)
     isempty(t) && return "Something went wrong."
     word = rstrip(first(split(t, ' ')), (',', ':', ';'))
-    t = all(islowercase, word) ? uppercasefirst(t) : t
+    t = all(islowercase, word) && !(word in names) ? uppercasefirst(t) : t
     return last(t) in ('.', '!', '?') ? String(t) : string(t, ".")
 end

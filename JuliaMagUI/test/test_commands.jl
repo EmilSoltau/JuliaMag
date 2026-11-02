@@ -11,6 +11,8 @@ struct CountingRequest
     count::Base.RefValue{Int}
 end
 UI.handle_request!(app, ::FailingRequest) = error("the handler broke")
+struct UserErrorRequest end
+UI.handle_request!(app, ::UserErrorRequest) = (Core.tool("no.such.tool"); true)
 UI.handle_request!(app, r::CountingRequest) = (r.count[] += 1; true)
 struct SwitchProjectRequest end
 UI.handle_request!(app, ::SwitchProjectRequest) = (UI.set_session!(app, nothing); true)
@@ -45,6 +47,9 @@ UI.handle_request!(app, ::SwitchProjectRequest) = (UI.set_session!(app, nothing)
             @test !only(filter(c -> c.id == "database.choose", cmds)).searchable
             sel = only(filter(c -> c.id == "database.select_all_lines", cmds))
             @test only(sel.places).size == :small
+            # Each kind of item has its own tab for its importers and exporters (T8).
+            @test UI.kind_group(Core.ITEM_DATABASE) == "Database" && UI.kind_group(Core.ITEM_GRID) == "Grid and Image"
+            @test UI.kind_group(Core.ITEM_MAP) == "Map"
             @test UI.title_case("set coordinate system") == "Set Coordinate System"
             @test UI.title_case("Guess UTM zone") == "Guess UTM Zone"
             @test UI.ribbon_label("Set Coordinate System...") == "Set Coordinate\nSystem"
@@ -86,6 +91,13 @@ UI.handle_request!(app, ::SwitchProjectRequest) = (UI.set_session!(app, nothing)
                 @test t.name == "Lag Correction..."
                 t.run(app)
                 @test app.ui.requests == Any[UI.OpenToolDialog("magnetics.test", app.ui.current_db)]
+                # A replace keeps the count of tools, but the list is built again (T10-P1).
+                Core.register_tool!(Core.ToolSpec("magnetics.test", "Heading correction", "Test.", "math",
+                    [Core.Place("Magnetics", "Corrections")], ["database" => Core.ITEM_DATABASE],
+                    Core.SettingSpec[], :quick, (args...) -> nothing))
+                cmds3 = UI.commands(app)
+                @test cmds3 !== cmds2 && length(cmds3) == length(cmds2)
+                @test only(filter(c -> c.id == "magnetics.test", cmds3)).name == "Heading Correction..."
             finally
                 Core.unregister_tool!("magnetics.test")
             end
@@ -133,6 +145,12 @@ UI.handle_request!(app, ::SwitchProjectRequest) = (UI.set_session!(app, nothing)
             @test count[] == 2 && isempty(app.ui.requests)
             t = only(app.toasts)
             @test t.kind == :error && occursin("the handler broke", t.text)
+            # A bug in a handler is a draw error, so the window tests fail on it (I3).
+            @test startswith(only(app.draw_errors).key, "ErrorException at ")
+            # A user error is only a toast.
+            push!(app.ui.requests, UserErrorRequest())
+            UI.handle_requests!(app)
+            @test last(app.toasts).text == "There is no tool \"no.such.tool\"." && length(app.draw_errors) == 1
         end
     end
 
@@ -233,7 +251,17 @@ UI.handle_request!(app, ::SwitchProjectRequest) = (UI.set_session!(app, nothing)
             @test route("Ctrl+N"; modal = true) === nothing
             @test route("Ctrl+Z"; modal = true) === nothing
             @test route("Ctrl+K"; modal = true) == "ui.command_search"
-            @test route("Escape"; modal = true) === nothing   # passes, but no command has it
+            @test route("Escape"; modal = true) === nothing   # no command has it
+            # Esc passes a modal dialog: a command with Esc as its shortcut runs (T8).
+            esc = UI.Command("test.esc", "Escape Test", a -> nothing; shortcut = "Escape")
+            ctrl_n = UI.Command("test.n", "N Test", a -> nothing; shortcut = "Ctrl+N")
+            mine = [esc, ctrl_n]
+            @test UI.shortcut_command(mine, UI.parse_chord("Escape"), true, false) === esc
+            @test UI.shortcut_command(mine, UI.parse_chord("Ctrl+N"), true, false) === nothing
+            @test UI.shortcut_command(mine, UI.parse_chord("Ctrl+N"), false, false) === ctrl_n
+            # The chords are parsed once with the command list.
+            @test UI.command_chords(app) === UI.command_chords(app)
+            @test (UI.parse_chord("Ctrl+K") => "ui.command_search") in UI.command_chords(app)
             # A text field lets only Ctrl chords pass, and never text undo.
             @test route("Ctrl+K"; typing = true) == "ui.command_search"
             @test route("Ctrl+Z"; typing = true) === nothing

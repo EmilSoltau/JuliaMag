@@ -173,9 +173,11 @@ window_testset("shell") do
         with_project_app(kangaroo()) do ctx, app
             UI.commands(app)   # fills the cache
             cache = app.command_cache
-            broken = UI.Command("test.broken", "Broken", a -> throw(ArgumentError("the shortcut broke"));
+            # A user error from the core: a toast, not a draw error.
+            broken = UI.Command("test.broken", "Broken", a -> throw(Core.ToolError("the shortcut broke"));
                 shortcut = "Ctrl+F2")
-            app.command_cache = UI.CommandCache(cache.sizes, [cache.commands; broken])
+            cmds = [cache.commands; broken]
+            app.command_cache = UI.CommandCache(cache.generation, cmds, UI.chord_table(cmds))
             ctx.key("Ctrl+F2")
             ctx.wait_until(() -> !isempty(app.toasts))
             @test last(app.toasts).kind == :error && last(app.toasts).text == "The shortcut broke."
@@ -252,9 +254,9 @@ window_testset("shell") do
                 ctx.wait_until(() -> isempty(app.ui.dialogs))
                 @test d.ok[] == 1 && unsafe_string(pointer(d.buffer)) == "Survey A"
                 # An action that throws becomes an error toast; the app keeps running.
-                # (An ArgumentError is a user error: it shows its message and logs nothing.)
+                # (A core error is a user error: it shows its message and logs nothing.)
                 UI.confirm!(app, "Break?", "It throws."; action = "Break",
-                    on_yes = a -> throw(ArgumentError("the name is taken")))
+                    on_yes = a -> throw(Core.ToolError("the name is taken")))
                 ctx.frames(2)
                 ctx.click(ref * "/Break")
                 @test isempty(app.ui.dialogs) && last(app.toasts).text == "The name is taken."

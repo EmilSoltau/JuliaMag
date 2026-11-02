@@ -144,13 +144,15 @@ window_testset("command search") do
             @test app.ui.search_index == 1 && app.ui.search_scroll == 0
             first_hit = hits[1]
             @test UI.search_reason(app, first_hit) === nothing && te.ItemExists(search_ref(first_hit.id))
-            @test first_hit.id == "ui.command_search"
-            # Enter runs that row: Command Search opens the search again, empty, with no toast.
-            ctx.type("comm"); ctx.frames(2)
-            @test UI.search_hits!(app)[app.ui.search_index].id == "ui.command_search"
+            @test first_hit.id == "ui.ribbon"   # the search does not list itself
+            # Enter runs the lit row over the dialog, with no toast.
+            ctx.type("collapse"); ctx.frames(2)
+            @test UI.search_hits!(app)[app.ui.search_index].id == "ui.ribbon"
             toasts = length(app.toasts)
             ctx.key("Enter"); ctx.frames(3)
-            @test app.ui.search == "" && length(app.toasts) == toasts && last_dialog(app) isa ToolDialog
+            @test app.config.ribbon_collapsed && length(app.toasts) == toasts && last_dialog(app) isa ToolDialog
+            UI.run_command!(app, "ui.ribbon"); ctx.frames(2)
+            ctx.key("Ctrl+K"); ctx.frames(2)
             ctx.key("Escape"); ctx.frames(2)
             ctx.key("Escape")
             ctx.wait_until(() -> isempty(app.ui.dialogs))

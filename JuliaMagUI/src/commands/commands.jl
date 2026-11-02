@@ -70,7 +70,8 @@ handle_request!(app, @nospecialize(request)) = false
 
 Hand every request of `app.ui.requests` to `handle_request!` and empty the list.
 A request that no method handles is dropped with a `@debug` message.
-A handler that throws is logged and shown as an error toast; the other requests still run.
+A handler that throws goes to `report_error!`: a user error is a toast, a bug is noted as
+a draw error. The other requests still run.
 When a handler changes the project (`set_session!`), the rest of the batch is dropped:
 it was made for the old project.
 Requests that a handler pushes wait for the next frame.
@@ -91,7 +92,7 @@ function handle_requests!(app)
             handle_request!(app, r)
         catch e
             e isa InterruptException && rethrow()
-            toast!(app, :error, safe_user_message(e, catch_backtrace()))
+            report_error!(app, e, catch_backtrace())
             true
         end
         handled === true || @debug "No handler for this request, dropped" request = r
@@ -121,6 +122,8 @@ read this list.
   closes it. Such a command waits while a dialog is open (see `search_reason`).
 - `where`: where a command with no ribbon place lives, for the search's location column,
   such as `"Project"` or `"Quick Access"`, as the prototype's `where`.
+- `checked_name`: the name to show while `checked(app)` is true, such as "Expand Ribbon"
+  for "Collapse Ribbon"; `""` keeps `name`.
 """
 struct Command
     id::String
@@ -138,6 +141,7 @@ struct Command
     menu_label::String
     changes_project::Bool
     where::String
+    checked_name::String
 end
 
 function Command(id::AbstractString, name::AbstractString, run::Function;
@@ -146,10 +150,10 @@ function Command(id::AbstractString, name::AbstractString, run::Function;
         shortcut::AbstractString = "", enabled::Function = app -> nothing,
         checked::Function = app -> false, searchable::Bool = true,
         menu::AbstractVector{<:AbstractString} = String[], menu_label::AbstractString = name,
-        changes_project::Bool = false, where::AbstractString = "")
+        changes_project::Bool = false, where::AbstractString = "", checked_name::AbstractString = "")
     return Command(String(id), String(name), String(label), String(icon), String(help),
         Vector{Core.Place}(places), String(shortcut), enabled, run, checked, searchable,
-        Vector{String}(menu), String(menu_label), changes_project, String(where))
+        Vector{String}(menu), String(menu_label), changes_project, String(where), String(checked_name))
 end
 
 const SMALL_WORDS = ("and", "of", "to", "the", "a", "in", "on", "or", "for")
@@ -247,7 +251,9 @@ function tool_command(t::Core.ToolSpec)
         enabled = app -> needs(app, kinds))
 end
 
-kind_group(k::Core.ItemKind) = k == Core.ITEM_GRID ? "Grid and Image" : "Database"
+"The ribbon tab of the importers and exporters of items of kind `k`."
+kind_group(k::Core.ItemKind)::String =
+    k == Core.ITEM_DATABASE ? "Database" : k == Core.ITEM_GRID ? "Grid and Image" : "Map"
 
 function importer_command(i::Core.ImporterSpec)
     return Command(i.id, "Import " * title_case(i.name) * "...", app -> request!(app, OpenImport(i.id));
@@ -419,12 +425,13 @@ function shell_commands()::Vector{Command}
         icon = "redo", help = "Redo the change that was undone.", shortcut = "Ctrl+Y",
         enabled = app -> undo_enabled(app, true), where = "Quick Access",
         changes_project = true))
+    # Not listed in the search itself, as in the prototype: the search is open already.
     push!(c, Command("ui.command_search", "Command Search", app -> open_search!(app);
         icon = "search", help = "Find a command by name.", shortcut = "Ctrl+K",
-        places = [Core.Place("Help", "Help"; order = 1)]))
+        places = [Core.Place("Help", "Help"; order = 1)], searchable = false))
     push!(c, Command("ui.ribbon", "Collapse Ribbon", toggle_ribbon!;
         icon = "chevUp", help = "Hide or show the ribbon.", shortcut = "Ctrl+F1",
-        checked = app -> app.config.ribbon_collapsed, where = "Window"))
+        checked = app -> app.config.ribbon_collapsed, where = "Window", checked_name = "Expand Ribbon"))
     push!(c, theme_command("ui.theme.light", "Light Theme", "Light", THEME_LIGHT, "sun", "Use the light theme."))
     push!(c, theme_command("ui.theme.dark", "Dark Theme", "Dark", THEME_DARK, "moon", "Use the dark theme."))
     push!(c, theme_command("ui.theme.system", "System Theme", "System", THEME_SYSTEM, "monitor",
@@ -467,24 +474,31 @@ const SHELL_COMMAND_IDS = Set(c.id for c in shell_commands())
 
 # --- The list ---
 
-# What `commands` built, and the registry sizes it was built for.
+"A key chord: the modifiers and the key, such as `(ctrl = true, shift = false, alt = false, key = :K)`."
+const Chord = NamedTuple{(:ctrl, :shift, :alt, :key),Tuple{Bool,Bool,Bool,Symbol}}
+
+# What `commands` built, and the core's registry generation it was built for.
 struct CommandCache
-    sizes::NTuple{3,Int}
+    generation::Int
     commands::Vector{Command}
+    chords::Vector{Pair{Chord,String}}   # `chord_table` of the commands
 end
 
 """
     commands(app) -> Vector{Command}
 
 Every command: the core's tools, importers and exporters, the four split buttons, the
-shell's own and the Settings tab's (settings_tab.jl). The list is cached. It is built again when a project opens (`set_session!`
-clears the cache) and when the number of tools, importers or exporters changes.
+shell's own and the Settings tab's (settings_tab.jl). The list is cached. It is built
+again when a project opens (`set_session!` clears the cache) and when a tool, importer or
+exporter is registered, replaced or taken out (`Core.registry_generation`). A call with
+nothing changed is one atomic read, so the many calls in a frame cost next to nothing.
 """
 function commands(app)::Vector{Command}
-    tools, importers, exporters = Core.tools(), Core.importers(), Core.exporters()
-    sizes = (length(tools), length(importers), length(exporters))
+    # Read the generation first: a change while the list is built makes the next call build again.
+    generation = Core.registry_generation()
     cache = app.command_cache
-    cache isa CommandCache && cache.sizes == sizes && return cache.commands
+    cache isa CommandCache && cache.generation == generation && return cache.commands
+    tools, importers, exporters = Core.tools(), Core.importers(), Core.exporters()
     list = Command[]
     append!(list, tool_command.(tools))
     append!(list, importer_command.(importers))
@@ -494,8 +508,14 @@ function commands(app)::Vector{Command}
     end
     append!(list, shell_commands())
     append!(list, settings_commands())
-    app.command_cache = CommandCache(sizes, list)
+    app.command_cache = CommandCache(generation, list, chord_table(list))
     return list
+end
+
+"The shortcut chords of `commands(app)` with their command ids (`chord_table`), cached with them."
+function command_chords(app)::Vector{Pair{Chord,String}}
+    commands(app)
+    return (app.command_cache::CommandCache).chords
 end
 
 """

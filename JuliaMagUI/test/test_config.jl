@@ -83,14 +83,44 @@ using JuliaMagUI: AppConfig, load_config, save_config, add_recent!, config_dir,
         end
     end
 
-    @testset "system_dark never hangs or throws" begin
-        @test system_dark() isa Bool
+    @testset "system_dark reads the theme command's answer" begin
+        # A stand-in for the command, so the test does not depend on this machine's theme.
+        answer(out) = (cmd, is_dark) -> is_dark(out)
+        if Sys.islinux()
+            @test system_dark(answer("'prefer-dark'\n"))
+            @test !system_dark(answer("'default'\n"))
+        elseif Sys.iswindows()
+            @test system_dark(answer("    AppsUseLightTheme    REG_DWORD    0x0\n"))
+            @test !system_dark(answer("    AppsUseLightTheme    REG_DWORD    0x1\n"))
+        end
+        @test !system_dark((cmd, is_dark) -> false)
+    end
+
+    @testset "command_says_dark never hangs or throws" begin
         @test !command_says_dark(`juliamag-no-such-command-xyz`, _ -> true)
         if Sys.isunix()
             @test command_says_dark(`echo dark`, out -> occursin("dark", out))
             @test !command_says_dark(`false`, _ -> true)
             t = @elapsed r = command_says_dark(`sleep 20`, _ -> true; timeout = 0.5)
             @test !r && t < 5
+            # One that ignores the request to stop is killed and waited for.
+            t = @elapsed r = command_says_dark(`sh -c 'trap "" TERM; sleep 20'`, _ -> true; timeout = 0.5)
+            @test !r && t < 5
+        end
+    end
+
+    @testset "bad widths and window sizes are refused" begin
+        withenv("JULIAMAG_CONFIG_DIR" => mktempdir()) do
+            for bad in ("""{"left_width": true}""", """{"right_width": -5}""", """{"left_width": 0}""",
+                    """{"window": [0, 0, true, 700]}""", """{"window": [0, 0, 0, 700]}""",
+                    """{"window": [0, 0, 1200]}""", """{"window": [0, 0, 1200.5, 700]}""")
+                write(joinpath(config_dir(), "settings.json"), bad)
+                c, err = load_config()
+                @test err isa String && c.left_width == 272f0 && c.window == (0, 0, 1480, 920)
+            end
+            write(joinpath(config_dir(), "settings.json"), """{"window": [-1600, 20, 1200, 700], "left_width": 300.5}""")
+            c, err = load_config()
+            @test err === nothing && c.window == (-1600, 20, 1200, 700) && c.left_width == 300.5f0
         end
     end
 end
