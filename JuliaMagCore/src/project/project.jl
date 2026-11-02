@@ -6,6 +6,7 @@
 
 using JSON3, StructTypes
 
+"The file in a project folder that makes it a project: it lists the items."
 const PROJECT_FILE = "project.jmag.json"
 const PROJECT_VERSION = 1
 const PROJECT_SUBFOLDERS = ("databases", "grids", "jobs", "templates")

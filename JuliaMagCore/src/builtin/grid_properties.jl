@@ -73,9 +73,11 @@ Throws `ArgumentError` for a code PROJ does not know, and `ItemBusyError` while
 an import or an export uses the grid.
 """
 function set_grid_crs!(s::Session, id::AbstractString, crs::AbstractString)
+    check_open(s)
     code = String(strip(crs))
     isempty(code) || valid_crs(code) || throw(ArgumentError("coordinate system \"$code\" is not known"))
     lock(s.lock) do
+        check_open(s)
         change_grid_crs!(s, id, code)
         record!(s, "grid.set_grid_crs", Dict{String,Any}("item" => String(id), "crs" => code))
     end
@@ -99,6 +101,7 @@ not above 0, and `ItemBusyError` while an import or an export uses the grid.
 function set_grid_georef!(s::Session, id::AbstractString; x0::Union{Nothing,Real} = nothing,
                           y0::Union{Nothing,Real} = nothing, dx::Union{Nothing,Real} = nothing,
                           dy::Union{Nothing,Real} = nothing, rotation::Union{Nothing,Real} = nothing)
+    check_open(s)
     given = Dict{Symbol,Float64}()
     for (k, v) in zip(GEOREF_FIELDS, (x0, y0, dx, dy, rotation))
         v === nothing && continue
@@ -109,6 +112,7 @@ function set_grid_georef!(s::Session, id::AbstractString; x0::Union{Nothing,Real
     georef(g) = Tuple(getfield(g, k) for k in GEOREF_FIELDS)
     set_georef!(g, v) = foreach((k, x) -> setfield!(g, k, x), GEOREF_FIELDS, v)
     lock(s.lock) do
+        check_open(s)
         check_not_busy(s, id)
         old = georef(grid(s.project, id))
         new = Tuple(get(given, k, o) for (k, o) in zip(GEOREF_FIELDS, old))
@@ -135,6 +139,7 @@ Throws `ArgumentError` for an unknown method or a shading number that is not
 finite, and `ItemBusyError` while an import or an export uses the grid.
 """
 function set_grid_style!(s::Session, id::AbstractString, style::GridStyle)
+    check_open(s)
     style.method in STYLE_METHODS ||
         throw(ArgumentError("the colour method must be one of $(join(STYLE_METHODS, ", ")), not $(style.method)"))
     for (k, v) in (("azimuth", style.azimuth), ("altitude", style.altitude), ("zfactor", style.zfactor))
@@ -142,6 +147,7 @@ function set_grid_style!(s::Session, id::AbstractString, style::GridStyle)
     end
     new = copy_style(style)
     lock(s.lock) do
+        check_open(s)
         edit_grid_meta!(g -> copy_style(g.style), (g, v) -> (g.style = copy_style(v)), s, id,
                         "set the style of grid $id", new)
         args = Dict{String,Any}("item" => String(id))

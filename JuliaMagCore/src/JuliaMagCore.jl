@@ -56,13 +56,15 @@ export ItemKind, ITEM_DATABASE, ITEM_GRID, ITEM_MAP, ProjectItem, Project, Proje
 export create_project, open_project, save_project, add_item!, remove_item!, item, item_missing
 export new_item_id, database, grid
 export read_channel, write_value!, write_channel!
-export GridError, GridStyle, GridSource, Grid, GRID_BLOCK_BYTES, create_grid, open_grid, save_grid_meta
+export GridError, GridStyle, colour_tables, GridSource, Grid, GRID_BLOCK_BYTES, create_grid, open_grid, save_grid_meta
 export values_path, block_rows, read_rows, write_rows!, with_grid_values, cell_centre, grid_corners
 export UndoStep, HistoryEntry, Cursor, Session, ProtectedError, ItemBusyError
 export LOCK_FILE, ProjectLockedError
-export open_session, new_session, close_session!, check_not_busy, push_undo!, undo!, redo!, can_undo, can_redo
-export record!, set_cell!, set_line_selected!, set_cursor!, script_text
+export open_session, new_session, close_session!, close_left_open, check_not_busy, push_undo!, undo!, redo!, can_undo, can_redo
+export revision, warnings, SessionClosedError
+export record!, set_cell!, set_line_selected!, set_cursor!, script_text, script_call
 export rename_item!, set_marked!, set_channel_protected!, rename_channel!, delete_channel!, set_channel_info!
+export add_pair!, remove_pair!, set_lines_selected!
 export eachfileline, ImportWarning, ImportResult, Progress, report, is_cancelled, NO_PROGRESS
 export GridHeader, GridSink, put_rows!, put_columns!, import_grid
 export georef_from_affine, affine_from_grid, read_gdal_grid
@@ -75,14 +77,15 @@ export JobStatus, JOB_RUNNING, JOB_DONE, JOB_FAILED, JOB_CANCELLED, JOB_UNDONE, 
 export start_job!, cancel!, status, wait_job, jobs, rerun!, import_file, export_file
 export JobFailedError
 export JobReport, report_text, job_warning!, job_warnings
-export ExportResult, ExporterSpec, register_exporter!, exporters, exporter_for
+export ExportResult, ExporterSpec, register_exporter!, unregister_exporter!, exporters, exporter_for
 export export_xyz, export_csv, export_parquet, export_geosoft_grd, export_geotiff, export_ers
 export SettingSpec, NumberSetting, TextSetting, ExprSetting, ChoiceSetting, BoolSetting, FileSetting,
     ChannelSetting, ChannelListSetting, LinesSetting, CRSSetting, PairSetting, ExtentSetting, PointSetting,
     ItemSetting
-export Place, ToolSpec, ToolError, register_tool!, unregister_tool!, tools, tool, tabs
-export default_settings, validate, last_settings, reset_settings!, run_tool
+export Place, ToolSpec, ToolError, register_tool!, unregister_tool!, tools, tool, tabs, registry_generation
+export default_settings, validate, setting_problems, is_active, last_settings, reset_settings!, run_tool
 export valid_crs, crs_name, crs_from_wkt, crs_from_name, crs_wkt, guess_utm, reproject_xy
+public crs_axis_unit, deactivate_settings, PROJECT_FILE
 export parse_channel_expr, ChannelStats, channel_stats, grid_stats
 export set_grid_crs!, set_grid_georef!, set_grid_style!
 

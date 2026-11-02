@@ -5,10 +5,27 @@
 
 """
 One setting of a tool or importer. Every setting type has the fields
-`key`, `label`, `help` (a sentence for the dialog) and `advanced`
-(true puts it under "Advanced" in the dialog), and a `default` value.
+`key`, `label`, `help` (a sentence for the dialog), `advanced`
+(true puts it under "Advanced" in the dialog), `when` (see below) and a `default` value.
+
+`when = "mode" => ["append"]` means: this setting is used only when the setting
+`mode` has one of these values. The other setting must be in the same list and be
+a `ChoiceSetting` or a `BoolSetting` (its values are `"true"` and `"false"`).
+A setting that is not used is stored and recorded as its default (see `is_active`).
 """
 abstract type SettingSpec end
+
+"The type of the `when` field of a setting: no condition, or `key => values`."
+const SettingWhen = Union{Nothing,Pair{String,Vector{String}}}
+
+"The condition `when` of setting `key` in the form the field keeps. Throws `ArgumentError` for a bad one."
+function when_value(key, when)::SettingWhen
+    when === nothing && return nothing
+    (when isa Pair && first(when) isa AbstractString && last(when) isa AbstractVector &&
+     all(v -> v isa AbstractString, last(when)) && !isempty(last(when))) ||
+        throw(ArgumentError("setting \"$key\": when must be a setting key => a list of values, such as \"mode\" => [\"append\"]"))
+    return String(first(when)) => String[String(v) for v in last(when)]
+end
 
 """
 A problem the user should read, thrown by a tool or an importer for bad
@@ -22,7 +39,7 @@ Base.showerror(io::IO, e::ToolError) = print(io, e.msg)
 
 """
     NumberSetting(key, label; default, min = -Inf, max = Inf, auto = false, integer = false,
-                  unit = "", help = "", advanced = false)
+                  unit = "", help = "", advanced = false, when = nothing)
 
 A number. With `auto = true` the value may be `nothing`, which means
 "blank: the tool works out the value". The value is a `Float64`, or an `Int`
@@ -35,6 +52,7 @@ struct NumberSetting <: SettingSpec
     label::String
     help::String
     advanced::Bool
+    when::SettingWhen
     default::Union{Nothing,Int,Float64}
     min::Float64
     max::Float64
@@ -42,11 +60,11 @@ struct NumberSetting <: SettingSpec
     integer::Bool
     unit::String
     function NumberSetting(key, label; default, min::Real = -Inf, max::Real = Inf, auto::Bool = false,
-                           integer::Bool = false, unit = "", help = "", advanced::Bool = false)
+                           integer::Bool = false, unit = "", help = "", advanced::Bool = false, when = nothing)
         min <= max || throw(ArgumentError("setting \"$key\": min is above max"))
         d = default === nothing ? nothing : number_value(integer, default)
         integer && d isa Float64 && throw(ArgumentError("setting \"$key\": the default of a whole number setting must be whole"))
-        return new(String(key), String(label), String(help), advanced, d, Float64(min), Float64(max), auto,
+        return new(String(key), String(label), String(help), advanced, when_value(key, when), d, Float64(min), Float64(max), auto,
                    integer, String(unit))
     end
 end
@@ -67,9 +85,10 @@ struct TextSetting <: SettingSpec
     label::String
     help::String
     advanced::Bool
+    when::SettingWhen
     default::String
-    TextSetting(key, label; default = "", help = "", advanced::Bool = false) =
-        new(String(key), String(label), String(help), advanced, String(default))
+    TextSetting(key, label; default = "", help = "", advanced::Bool = false, when = nothing) =
+        new(String(key), String(label), String(help), advanced, when_value(key, when), String(default))
 end
 
 """
@@ -81,13 +100,14 @@ struct ExprSetting <: SettingSpec
     label::String
     help::String
     advanced::Bool
+    when::SettingWhen
     default::String
-    ExprSetting(key, label; default = "", help = "", advanced::Bool = false) =
-        new(String(key), String(label), String(help), advanced, String(default))
+    ExprSetting(key, label; default = "", help = "", advanced::Bool = false, when = nothing) =
+        new(String(key), String(label), String(help), advanced, when_value(key, when), String(default))
 end
 
 """
-    ChoiceSetting(key, label, choices; default = first(choices), labels = choices, help = "", advanced = false)
+    ChoiceSetting(key, label, choices; default = first(choices), labels = choices, help = "", advanced = false, when = nothing)
 
 One of a fixed list of words. The value is a `String` from `choices`.
 `labels` are the words the dialog shows for the choices, in the same order.
@@ -97,17 +117,18 @@ struct ChoiceSetting <: SettingSpec
     label::String
     help::String
     advanced::Bool
+    when::SettingWhen
     choices::Vector{String}
     labels::Vector{String}
     default::String
     function ChoiceSetting(key, label, choices::AbstractVector{<:AbstractString};
                            default = isempty(choices) ? "" : first(choices),
-                           labels::AbstractVector{<:AbstractString} = choices, help = "", advanced::Bool = false)
+                           labels::AbstractVector{<:AbstractString} = choices, help = "", advanced::Bool = false, when = nothing)
         isempty(choices) && throw(ArgumentError("setting \"$key\": a choice needs at least one choice"))
         default in choices || throw(ArgumentError("setting \"$key\": the default \"$default\" is not a choice"))
         length(labels) == length(choices) ||
             throw(ArgumentError("setting \"$key\": there must be one label for each choice"))
-        return new(String(key), String(label), String(help), advanced, String[c for c in choices],
+        return new(String(key), String(label), String(help), advanced, when_value(key, when), String[c for c in choices],
                    String[l for l in labels], String(default))
     end
 end
@@ -118,13 +139,14 @@ struct BoolSetting <: SettingSpec
     label::String
     help::String
     advanced::Bool
+    when::SettingWhen
     default::Bool
-    BoolSetting(key, label; default::Bool = false, help = "", advanced::Bool = false) =
-        new(String(key), String(label), String(help), advanced, default)
+    BoolSetting(key, label; default::Bool = false, help = "", advanced::Bool = false, when = nothing) =
+        new(String(key), String(label), String(help), advanced, when_value(key, when), default)
 end
 
 """
-    FileSetting(key, label; extensions = String[], save = false, default = "", help = "", advanced = false)
+    FileSetting(key, label; extensions = String[], save = false, default = "", help = "", advanced = false, when = nothing)
 
 A file path. `extensions` (lower case, with the dot, such as `".xyz"`) limit the
 file types; empty means any. `save = true` means a file to write, not to read.
@@ -134,18 +156,19 @@ struct FileSetting <: SettingSpec
     label::String
     help::String
     advanced::Bool
+    when::SettingWhen
     extensions::Vector{String}
     save::Bool
     default::String
     FileSetting(key, label; extensions::AbstractVector{<:AbstractString} = String[], save::Bool = false,
-                default = "", help = "", advanced::Bool = false) =
-        new(String(key), String(label), String(help), advanced, String[lowercase(e) for e in extensions],
+                default = "", help = "", advanced::Bool = false, when = nothing) =
+        new(String(key), String(label), String(help), advanced, when_value(key, when), String[lowercase(e) for e in extensions],
             save, String(default))
 end
 
 """
     ChannelSetting(key, label; input = "database", roles = ChannelRole[], allow_array = false,
-                   allow_new = false, default = "", help = "", advanced = false)
+                   allow_new = false, default = "", help = "", advanced = false, when = nothing)
 
 A channel name of the database given as tool input `input`. `roles` suggest
 channels to the UI; `allow_array` allows array channels; `allow_new` allows a
@@ -156,6 +179,7 @@ struct ChannelSetting <: SettingSpec
     label::String
     help::String
     advanced::Bool
+    when::SettingWhen
     input::String
     roles::Vector{ChannelRole}
     allow_array::Bool
@@ -163,14 +187,14 @@ struct ChannelSetting <: SettingSpec
     default::String
     ChannelSetting(key, label; input = "database", roles::AbstractVector{ChannelRole} = ChannelRole[],
                    allow_array::Bool = false, allow_new::Bool = false, default = "", help = "",
-                   advanced::Bool = false) =
-        new(String(key), String(label), String(help), advanced, String(input), collect(ChannelRole, roles),
+                   advanced::Bool = false, when = nothing) =
+        new(String(key), String(label), String(help), advanced, when_value(key, when), String(input), collect(ChannelRole, roles),
             allow_array, allow_new, String(default))
 end
 
 """
     ChannelListSetting(key, label; input = "database", allow_array = true, default = String[],
-                       help = "", advanced = false)
+                       help = "", advanced = false, when = nothing)
 
 A list of channel names of the database given as tool input `input`.
 An empty list means all channels. `allow_array` allows array channels.
@@ -181,12 +205,13 @@ struct ChannelListSetting <: SettingSpec
     label::String
     help::String
     advanced::Bool
+    when::SettingWhen
     input::String
     allow_array::Bool
     default::Vector{String}
     ChannelListSetting(key, label; input = "database", allow_array::Bool = true,
-                       default::AbstractVector{<:AbstractString} = String[], help = "", advanced::Bool = false) =
-        new(String(key), String(label), String(help), advanced, String(input), allow_array,
+                       default::AbstractVector{<:AbstractString} = String[], help = "", advanced::Bool = false, when = nothing) =
+        new(String(key), String(label), String(help), advanced, when_value(key, when), String(input), allow_array,
             String[d for d in default])
 end
 
@@ -199,10 +224,11 @@ struct LinesSetting <: SettingSpec
     label::String
     help::String
     advanced::Bool
+    when::SettingWhen
     default::String
-    function LinesSetting(key, label; default = "all", help = "", advanced::Bool = false)
+    function LinesSetting(key, label; default = "all", help = "", advanced::Bool = false, when = nothing)
         default in LINES_CHOICES || throw(ArgumentError("setting \"$key\": the default \"$default\" is not all, selected or current"))
-        return new(String(key), String(label), String(help), advanced, String(default))
+        return new(String(key), String(label), String(help), advanced, when_value(key, when), String(default))
     end
 end
 
@@ -212,13 +238,14 @@ struct CRSSetting <: SettingSpec
     label::String
     help::String
     advanced::Bool
+    when::SettingWhen
     default::String
-    CRSSetting(key, label; default = "", help = "", advanced::Bool = false) =
-        new(String(key), String(label), String(help), advanced, String(default))
+    CRSSetting(key, label; default = "", help = "", advanced::Bool = false, when = nothing) =
+        new(String(key), String(label), String(help), advanced, when_value(key, when), String(default))
 end
 
 """
-    PairSetting(key, label; input = "database", default = "", help = "", advanced = false)
+    PairSetting(key, label; input = "database", default = "", help = "", advanced = false, when = nothing)
 
 A position pair of the database given as tool input `input`, such as `\"X,Y\"`.
 Blank means the current pair.
@@ -228,10 +255,11 @@ struct PairSetting <: SettingSpec
     label::String
     help::String
     advanced::Bool
+    when::SettingWhen
     input::String
     default::String
-    PairSetting(key, label; input = "database", default = "", help = "", advanced::Bool = false) =
-        new(String(key), String(label), String(help), advanced, String(input), String(default))
+    PairSetting(key, label; input = "database", default = "", help = "", advanced::Bool = false, when = nothing) =
+        new(String(key), String(label), String(help), advanced, when_value(key, when), String(input), String(default))
 end
 
 "An area: `[west, south, east, north]`, or `nothing` for the whole data."
@@ -240,9 +268,10 @@ struct ExtentSetting <: SettingSpec
     label::String
     help::String
     advanced::Bool
+    when::SettingWhen
     default::Union{Nothing,Vector{Float64}}
-    ExtentSetting(key, label; default = nothing, help = "", advanced::Bool = false) =
-        new(String(key), String(label), String(help), advanced,
+    ExtentSetting(key, label; default = nothing, help = "", advanced::Bool = false, when = nothing) =
+        new(String(key), String(label), String(help), advanced, when_value(key, when),
             default === nothing ? nothing : collect(Float64, default))
 end
 
@@ -252,14 +281,15 @@ struct PointSetting <: SettingSpec
     label::String
     help::String
     advanced::Bool
+    when::SettingWhen
     default::Union{Nothing,Vector{Float64}}
-    PointSetting(key, label; default = nothing, help = "", advanced::Bool = false) =
-        new(String(key), String(label), String(help), advanced,
+    PointSetting(key, label; default = nothing, help = "", advanced::Bool = false, when = nothing) =
+        new(String(key), String(label), String(help), advanced, when_value(key, when),
             default === nothing ? nothing : collect(Float64, default))
 end
 
 """
-    ItemSetting(key, label, kind; optional = false, default = "", help = "", advanced = false)
+    ItemSetting(key, label, kind; optional = false, default = "", help = "", advanced = false, when = nothing)
 
 An item of the project of kind `kind`, such as `ITEM_DATABASE`, by its id,
 such as `"db-1"`. The UI shows a list of the project's items of that kind.
@@ -271,11 +301,12 @@ struct ItemSetting <: SettingSpec
     label::String
     help::String
     advanced::Bool
+    when::SettingWhen
     kind::ItemKind
     optional::Bool
     default::String
-    ItemSetting(key, label, kind::ItemKind; optional::Bool = false, default = "", help = "", advanced::Bool = false) =
-        new(String(key), String(label), String(help), advanced, kind, optional, String(default))
+    ItemSetting(key, label, kind::ItemKind; optional::Bool = false, default = "", help = "", advanced::Bool = false, when = nothing) =
+        new(String(key), String(label), String(help), advanced, when_value(key, when), kind, optional, String(default))
 end
 
 # ---- values ----------------------------------------------------------------
@@ -681,30 +712,113 @@ end
 setting_problem(st::PointSetting, x)::Union{Nothing,String} =
     (x === nothing || finite_numbers(x, 2)) ? nothing : "$(st.label) must be two numbers: x and y."
 
-"""
-    validate_settings(list, values, owner; session = nothing)::Vector{String}
+# The value of a controlling setting as the text that `when` lists:
+# a choice as it is, a bool as "true" or "false".
+when_text(v) = v isa Bool ? string(v) : v isa Union{AbstractString,Symbol} ? String(v) : nothing
 
-Check `values` against the settings in `list`. A missing key takes its default.
-A key that is not a setting is a problem too; `owner` names the tool in that message.
+"""
+    is_active(list, st, values)::Bool
+
+Whether setting `st` of `list` is used with `values`: it has no `when`, or the
+setting it names has one of the listed values (a missing value is the default).
+A setting that depends on one that is not used is not used either.
+"""
+function is_active(list::AbstractVector{<:SettingSpec}, st::SettingSpec, values::AbstractDict)::Bool
+    cur = st
+    for _ in 0:length(list)                        # a chain is not longer than the list
+        cur.when === nothing && return true
+        key, wanted = cur.when
+        k = findfirst(x -> x.key == key, list)
+        k === nothing && return false
+        ctl = list[k]
+        v = haskey(values, key) ? values[key] : setting_default(ctl)
+        when_text(v) in wanted || return false
+        cur = ctl
+    end
+    return false
+end
+
+"""
+Check the `when` of every setting in `list`: the setting it names is in the
+list, is a choice or a bool, lists only its values, and no chain loops.
+Throws `ArgumentError`.
+"""
+function check_when(list::AbstractVector{<:SettingSpec}, owner::AbstractString)
+    for st in list
+        st.when === nothing && continue
+        key, wanted = st.when
+        k = findfirst(x -> x.key == key, list)
+        k === nothing && throw(ArgumentError(
+            "$owner: setting \"$(st.key)\" depends on \"$key\", which is not one of its settings"))
+        ctl = list[k]
+        ctl isa Union{ChoiceSetting,BoolSetting} || throw(ArgumentError(
+            "$owner: setting \"$(st.key)\" depends on \"$key\", which is not a choice or a bool"))
+        allowed = ctl isa ChoiceSetting ? ctl.choices : ["true", "false"]
+        for w in wanted
+            w in allowed || throw(ArgumentError(
+                "$owner: setting \"$(st.key)\" waits for \"$w\", which \"$key\" cannot be"))
+        end
+        cur = ctl                                  # follow the chain: it must not come back to `st`
+        for _ in 1:length(list)
+            cur === st && throw(ArgumentError("$owner: setting \"$(st.key)\" depends on itself"))
+            cur.when === nothing && break
+            j = findfirst(x -> x.key == first(cur.when), list)
+            j === nothing && break
+            cur = list[j]
+        end
+    end
+    return nothing
+end
+
+"""
+    deactivate_settings(list, values)::Dict{String,Any}
+
+A copy of `values` where each setting that is not used (see `is_active`) has its
+default. Keys that are not settings stay. This is what jobs, the history and the
+remembered settings keep.
+
+It is public, not exported: the UI calls it as `JuliaMagCore.deactivate_settings` so the
+script call it shows matches what the history writes.
+"""
+function deactivate_settings(list::AbstractVector{<:SettingSpec}, values::AbstractDict)::Dict{String,Any}
+    out = Dict{String,Any}(String(k) => v for (k, v) in values)
+    for st in list
+        haskey(out, st.key) && !is_active(list, st, values) && (out[st.key] = setting_default(st))
+    end
+    return out
+end
+
+"""
+    settings_problems(list, values, owner; session = nothing)::Vector{Pair{String,String}}
+
+Check `values` against the settings in `list`: setting key => sentence, in setting order.
+A missing key takes its default. A setting that is not used (see `is_active`) is skipped.
+A key that is not a setting is a problem too, with the key as its key; `owner` names the tool in that message.
 With a `session`, settings that name project items are checked against its
 project too (see `session_problem`).
 """
-function validate_settings(list::AbstractVector{<:SettingSpec}, values::AbstractDict, owner::AbstractString;
-                           session::Union{Nothing,Session} = nothing)::Vector{String}
+function settings_problems(list::AbstractVector{<:SettingSpec}, values::AbstractDict, owner::AbstractString;
+                           session::Union{Nothing,Session} = nothing)::Vector{Pair{String,String}}
     given = Dict{String,Any}(String(k) => v for (k, v) in values)
-    problems = String[]
+    problems = Pair{String,String}[]
     for st in list
+        is_active(list, st, given) || continue
         v = haskey(given, st.key) ? setting_value(st, given[st.key]) : setting_default(st)
         p = setting_problem(st, v)
         p === nothing && session !== nothing && (p = session_problem(st, v, session))
-        p === nothing || push!(problems, p)
+        p === nothing || push!(problems, st.key => p)
     end
     known = Set(st.key for st in list)
     for k in sort!(collect(keys(given)))
-        k in known || push!(problems, "$owner has no setting \"$k\".")
+        k in known || push!(problems, k => "$owner has no setting \"$k\".")
     end
     return problems
 end
+
+"The sentences of `settings_problems`: what `validate` returns."
+validate_settings(list::AbstractVector{<:SettingSpec}, values::AbstractDict, owner::AbstractString;
+                  session::Union{Nothing,Session} = nothing)::Vector{String} =
+    last.(settings_problems(list, values, owner; session))
 
 "Check that the setting keys are not empty, not reserved and not used twice."
 function check_setting_keys(list::AbstractVector{<:SettingSpec}, owner::AbstractString)

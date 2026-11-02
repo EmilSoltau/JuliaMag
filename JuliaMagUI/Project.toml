@@ -1,0 +1,43 @@
+name = "JuliaMagUI"
+uuid = "3d3c709c-05d9-4465-82b6-3b33a2dc0c6b"
+version = "0.1.0"
+
+[deps]
+CImGui = "5d785b6c-b76f-510e-a07c-3070796c7e87"
+Cairo = "159f3aea-2a34-519c-b102-8c37f9878175"
+GLFW = "f7f18e0c-5ee9-5ccd-a5bf-e8befd85ed98"
+JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
+JuliaMagCore = "133f1fd6-5f53-418f-9a68-c205e5f9c1d6"
+Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
+ModernGL = "66fc600b-dfda-50eb-8b99-91cfa97b1301"
+NativeFileDialog = "e1fe445b-aa65-4df4-81c1-2041507f0fd4"
+PNGFiles = "f57f5aa1-a3ce-4bc8-8ab9-96f992907883"
+PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
+Rsvg = "c4c386cf-5103-5370-be45-f3a111cca3b8"
+
+[compat]
+Aqua = "0.8"
+CImGui = "10.1"
+Cairo = "1"
+GLFW = "~3.4"
+ImGuiTestEngine = "3"
+JET = "0.13"
+JSON3 = "1"
+JuliaMagCore = "0.1"
+Logging = "1"
+ModernGL = "1"
+NativeFileDialog = "0.2"
+PNGFiles = "0.4"
+PrecompileTools = "1"
+Rsvg = "1.1"
+Test = "1"
+julia = "1.12"
+
+[extras]
+Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
+ImGuiTestEngine = "464e2eba-0a11-4ed3-b274-413caa1a1cca"
+JET = "c3a54625-cd67-489e-a8e7-0a5a0ff4e31b"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test", "Aqua", "JET", "ImGuiTestEngine"]

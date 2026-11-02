@@ -7,6 +7,7 @@
 # `script_text` turns the history into a runnable Julia script.
 
 using JSON3
+import Dates
 
 """
 One step that can be undone. `undo`, `redo`, `drop` and `commit` take no arguments.
@@ -168,7 +169,51 @@ mutable struct Session
     the step, so they follow it. Else `nothing`. Guarded by `lock`.
     """
     held_edits::Union{Nothing,Vector{Union{UndoStep,HistoryEntry}}}
+    "Counts every change a UI shows (see `revision`). Read without a lock."
+    revision::Threads.Atomic{Int}
+    "0 open, 1 closing, 2 closed (see `isopen`)."
+    state::Threads.Atomic{Int}
 end
+
+"Thrown by an edit, `undo!`, `redo!` or `start_job!` on a session that is closing or closed."
+struct SessionClosedError <: Exception
+    folder::String
+end
+
+Base.showerror(io::IO, e::SessionClosedError) = print(io, "The project ", e.folder, " is closed.")
+
+const SESSION_OPEN = 0
+const SESSION_CLOSING = 1
+const SESSION_CLOSED = 2
+
+"""
+    revision(s)::Int
+
+A counter that goes up by at least one after every change a UI shows: an
+edit, an undo or redo, a cursor or marked range move, a warning, and a job
+starting or leaving `JOB_RUNNING`. Reading it takes no lock.
+"""
+revision(s::Session)::Int = s.revision[]
+
+bump!(s::Session) = (Threads.atomic_add!(s.revision, 1); nothing)
+
+"""
+    isopen(s)::Bool
+
+False from the moment `close_session!` starts.
+"""
+Base.isopen(s::Session)::Bool = s.state[] == SESSION_OPEN
+
+"Throw `SessionClosedError` unless the session is open. Call it before taking any lock."
+check_open(s::Session) = isopen(s) ? nothing : throw(SessionClosedError(s.project.folder))
+
+"""
+    warnings(s)::Vector{String}
+
+A copy of the session's warnings. It still works after `close_session!`,
+so a UI can show the warnings of the close.
+"""
+warnings(s::Session)::Vector{String} = lock(() -> copy(s.warnings), s.jobs_lock)
 
 const HISTORY_FILE = "history.jsonl"
 
@@ -179,7 +224,8 @@ function Session(p::Project)
     history = load_history(p, warnings)
     s = Session(p, UndoStep[], UndoStep[], history, nothing, nothing,
                 load_remembered(p, warnings), ReentrantLock(), warnings, Job[], 1,
-                ReentrantLock(), Dict{String,BusyMark}(), nothing, ReentrantLock(), nothing)
+                ReentrantLock(), Dict{String,BusyMark}(), nothing, ReentrantLock(), nothing,
+                Threads.Atomic{Int}(0), Threads.Atomic{Int}(SESSION_OPEN))
     load_jobs!(s)
     return s
 end
@@ -225,7 +271,43 @@ function locked_session(make::Function, folder::String, force::Bool)::Session
     s.held_lock = h
     prepend!(s.warnings, warnings)
     sweep_leftovers!(s, replaced !== nothing)
+    note_opened!(s)
     return s
+end
+
+# The sessions opened inside `close_left_open`, in its task or in tasks started from it.
+const OPENED_SESSIONS = Base.ScopedValues.ScopedValue{Any}(nothing)
+
+note_opened!(s::Session) =
+    (o = OPENED_SESSIONS[]; o === nothing || lock(() -> push!(o[2], s), o[1]); nothing)
+
+"""
+    close_left_open(f, closed = String[])
+
+Run `f()` and return what it returns. Then close every session that `f` opened (also in
+tasks it started) and left open, and push the folder of each one to `closed`. This also
+happens when `f` throws; the error is then thrown again.
+
+Use it to run a user's script: a script that throws before `close_session!`, or never
+calls it, would else keep its project locked by this process. A session that fails to
+close is logged.
+"""
+function close_left_open(f, closed::Vector{String} = String[])
+    opened = (ReentrantLock(), Session[])
+    try
+        return Base.ScopedValues.with(f, OPENED_SESSIONS => opened)
+    finally
+        for s in lock(() -> copy(opened[2]), opened[1])
+            isopen(s) || continue
+            try
+                close_session!(s)
+                push!(closed, s.project.folder)
+            catch e
+                e isa InterruptException && rethrow()
+                @error "A session that a script left open did not close" exception = (e, catch_backtrace())
+            end
+        end
+    end
 end
 
 """
@@ -325,8 +407,12 @@ The `commit` actions run only while the project lock is still ours. When
 another session opened the project with `force = true`, its project file may
 list those folders again, so they are kept, with a warning.
 The lock is removed also when ending the stacks is interrupted.
+Only the first call closes: a call while another close runs returns at once, and the
+state never goes back from closed to closing.
 """
 function close_session!(s::Session)
+    Threads.atomic_cas!(s.state, SESSION_OPEN, SESSION_CLOSING) == SESSION_OPEN || return nothing
+    bump!(s)
     running = filter(j -> status(j) == JOB_RUNNING, jobs(s))
     foreach(cancel!, running)
     foreach(wait_job, running)
@@ -336,6 +422,8 @@ function close_session!(s::Session)
     finally
         lock(() -> s.held_lock = nothing, s.jobs_lock)
         held === nothing || release_lock!(held)
+        s.state[] = SESSION_CLOSED
+        bump!(s)
     end
     return nothing
 end
@@ -426,7 +514,26 @@ function load_history(p::Project, warnings::Vector{String})::Vector{HistoryEntry
     return out
 end
 
-now_text() = Libc.strftime("%Y-%m-%dT%H:%M:%S%z", time())
+"""
+    now_text(t = time())
+
+The time `t` (seconds since 1970) in UTC, whole seconds, with a "Z", such as
+`"2026-10-31T09:15:02Z"`. History entries and project locks record their time with it.
+It does not depend on the machine's time zone or C library: on Windows, `strftime("%z")`
+gave the zone's name. Older records have `+hhmm` or that name; readers accept all forms.
+"""
+now_text(t::Real = time())::String =
+    Dates.format(Dates.unix2datetime(floor(t)), Dates.dateformat"yyyy-mm-ddTHH:MM:SS") * "Z"
+
+"""
+    job_time_text(t = time())
+
+The time `t` (seconds since 1970) in UTC with milliseconds and a "Z", such as
+`"2026-10-31T09:15:02.123Z"`. Jobs record their start and end with it, so a short job can
+show how long it took. It does not depend on the machine's time zone or C library.
+"""
+job_time_text(t::Real = time())::String =
+    Dates.format(Dates.unix2datetime(t), Dates.dateformat"yyyy-mm-ddTHH:MM:SS.sss") * "Z"
 
 """
     record!(s, command, args; job = "", outputs = String[], replaces = "", replaced = String[])
@@ -448,9 +555,11 @@ function record!(s::Session, command::String, args::AbstractDict; job::String = 
         held = s.held_edits
         if held !== nothing
             push!(held, e)
+            bump!(s)
             return e
         end
         write_history!(s, e, line)
+        bump!(s)
         return e
     end
 end
@@ -476,7 +585,7 @@ function write_history!(s::Session, e::HistoryEntry, line::String = history_line
 end
 
 "Add a line to `s.warnings`. Safe from any thread."
-session_warning!(s::Session, msg::String) = (lock(() -> push!(s.warnings, msg), s.jobs_lock); nothing)
+session_warning!(s::Session, msg::String) = (lock(() -> push!(s.warnings, msg), s.jobs_lock); bump!(s); nothing)
 
 # ---- busy items ------------------------------------------------------------
 
@@ -587,7 +696,9 @@ Write one value now, make it undoable and record `"database.set_cell"`.
 Throws `ProtectedError` before anything is written if the channel is protected.
 """
 function set_cell!(s::Session, item_id::AbstractString, id::LineId, name::AbstractString, row::Integer, x)
+    check_open(s)
     lock(s.lock) do
+        check_open(s)
         check_not_busy(s, item_id)
         db = database(s.project, item_id)
         channel(db, name).protected && throw(ProtectedError(String(name)))
@@ -610,7 +721,9 @@ end
 Select or deselect a line and save `database.json`. Undoable and recorded.
 """
 function set_line_selected!(s::Session, item_id::AbstractString, id::LineId, flag::Bool)
+    check_open(s)
     lock(s.lock) do
+        check_open(s)
         check_not_busy(s, item_id)
         old = line(database(s.project, item_id), id).selected
         put(v::Bool) = () -> lock(s.lock) do
@@ -627,10 +740,157 @@ function set_line_selected!(s::Session, item_id::AbstractString, id::LineId, fla
     end
 end
 
-"Move the cursor. Not undoable and not recorded."
-function set_cursor!(s::Session, c::Cursor)
+"""
+    set_lines_selected!(s, item_id, lines, flag)
+
+Select or deselect many lines at once and save `database.json`. One undo step and
+one history entry, `"database.set_lines_selected"`, for all of them. Lines that are
+in that state already are left out, and nothing is pushed when none is left.
+Throws `ItemBusyError` while a job or an export uses the database, and
+`DatabaseError` for a line that is not in it.
+"""
+function set_lines_selected!(s::Session, item_id::AbstractString, ids::AbstractVector{LineId}, flag::Bool)
+    check_open(s)
     lock(s.lock) do
+        check_open(s)
+        check_not_busy(s, item_id)
+        db = database(s.project, item_id)
+        changing = LineId[id for id in unique(ids) if line(db, id).selected != flag]
+        isempty(changing) && return nothing
+        put(v::Bool) = () -> lock(s.lock) do
+            d = database(s.project, item_id)
+            foreach(id -> line(d, id).selected = v, changing)
+            save_meta(d)
+            nothing
+        end
+        put(flag)()
+        n = length(changing)
+        push_undo!(s, UndoStep("select $n lines", put(!flag), put(flag), () -> nothing, [String(item_id)]))
+        record!(s, "database.set_lines_selected", Dict("item" => String(item_id),
+                                                       "lines" => [line_args(id) for id in changing],
+                                                       "selected" => flag))
+        return nothing
+    end
+end
+
+# ---- position pairs ----------------------------------------------------------
+
+"A copy of the position pairs, so that an undo step is not changed by later edits."
+copy_pairs(ps) = PositionPair[PositionPair(p.x, p.y, p.crs) for p in ps]
+
+"""
+Change the position pairs of database `key` to `pairs` and `current` now, as one undo step
+that goes back to the pairs and current pair as they are now. The caller holds `s.lock`.
+"""
+function change_pairs!(s::Session, key::String, label::String, pairs::Vector{PositionPair}, current::Int)
+    db = database(s.project, key)
+    before, was = copy_pairs(db.pairs), db.current_pair
+    apply(ps, cur) = () -> lock(s.lock) do      # `undo!` runs it without the lock
+        d = database(s.project, key)
+        empty!(d.pairs)
+        append!(d.pairs, copy_pairs(ps))
+        d.current_pair = cur
+        save_meta(d)
+        nothing
+    end
+    step = UndoStep(label, apply(before, was), apply(pairs, current), () -> nothing, [key])
+    step.redo()
+    push_undo!(s, step)
+    return nothing
+end
+
+"""
+    add_pair!(s, id, x, y; crs = "")
+
+Add the position pair of channels `x` and `y` of database `id`, with coordinate system
+`crs` (a code such as `"EPSG:7855"`, or `""` when unknown). It becomes the current pair
+when there was none. Undoable and recorded as `"database.add_pair"`.
+Throws `ArgumentError` when a channel is not a plain numeric channel (not text, not an
+array) or the pair is there already, `DatabaseError` when a channel is missing, and
+`ItemBusyError` while a job or an export uses the database.
+"""
+function add_pair!(s::Session, id::AbstractString, x::AbstractString, y::AbstractString; crs::AbstractString = "")
+    check_open(s)
+    key, xn, yn, code = String(id), String(x), String(y), String(crs)
+    lock(s.lock) do
+        check_open(s)
+        check_not_busy(s, key)
+        db = database(s.project, key)
+        for n in (xn, yn)
+            c = channel(db, n)
+            (c.eltype <: Number && c.arraylen == 1) ||
+                throw(ArgumentError("channel $n cannot be part of a position pair: it must be a numeric channel and not an array"))
+        end
+        any(p -> p.x == xn && p.y == yn, db.pairs) &&
+            throw(ArgumentError("database $key has the position pair $xn,$yn already"))
+        pairs = vcat(copy_pairs(db.pairs), PositionPair(xn, yn, code))
+        change_pairs!(s, key, "add position pair $xn,$yn", pairs, db.current_pair == 0 ? length(pairs) : db.current_pair)
+        record!(s, "database.add_pair", Dict{String,Any}("item" => key, "x" => xn, "y" => yn, "crs" => code))
+        return nothing
+    end
+end
+
+"""
+    remove_pair!(s, id, x, y)
+
+Remove the position pair of channels `x` and `y`. The channels stay. The current pair
+stays the same pair, or becomes 0 when the current pair is the one removed. Undoable and
+recorded as `"database.remove_pair"`.
+Throws `ArgumentError` when there is no such pair, and `ItemBusyError` while a job or
+an export uses the database.
+"""
+function remove_pair!(s::Session, id::AbstractString, x::AbstractString, y::AbstractString)
+    check_open(s)
+    key, xn, yn = String(id), String(x), String(y)
+    lock(s.lock) do
+        check_open(s)
+        check_not_busy(s, key)
+        db = database(s.project, key)
+        k = findfirst(p -> p.x == xn && p.y == yn, db.pairs)
+        k === nothing && throw(ArgumentError("database $key has no position pair $xn,$yn"))
+        cur = db.current_pair
+        current = cur == k ? 0 : cur > k ? cur - 1 : cur
+        pairs = copy_pairs(db.pairs)
+        deleteat!(pairs, k)
+        change_pairs!(s, key, "remove position pair $xn,$yn", pairs, current)
+        record!(s, "database.remove_pair", Dict{String,Any}("item" => key, "x" => xn, "y" => yn))
+        return nothing
+    end
+end
+
+# ---- cursor and marks --------------------------------------------------------
+
+"The number of rows of `line_id` in database `item_id`, or 0 when there is no such database or line."
+function line_rows(s::Session, item_id::AbstractString, line_id::LineId)::Int
+    k = findfirst(i -> i.id == item_id && i.kind == ITEM_DATABASE, s.project.items)
+    k === nothing && return 0
+    db = database(s.project, item_id)
+    p = line_position(db, line_id)
+    return p == 0 ? 0 : db.lines[p].nrows
+end
+
+"""
+    set_cursor!(s, c)
+
+Move the cursor. Not undoable and not recorded.
+Throws `ArgumentError` when the item is not a database of the project, the line is not
+in it, or the row is not between 1 and the number of rows of the line.
+"""
+function set_cursor!(s::Session, c::Cursor)
+    check_open(s)
+    lock(s.lock) do
+        check_open(s)
+        k = findfirst(i -> i.id == c.item, s.project.items)
+        (k !== nothing && s.project.items[k].kind == ITEM_DATABASE) ||
+            throw(ArgumentError("the cursor needs a database, and $(c.item) is not one"))
+        db = database(s.project, c.item)
+        p = line_position(db, c.line)
+        p == 0 && throw(ArgumentError("database $(c.item) has no line $(line_name(c.line))"))
+        n = db.lines[p].nrows
+        1 <= c.row <= n ||
+            throw(ArgumentError("row $(c.row) is not on line $(line_name(c.line)), which has rows 1 to $n"))
         s.cursor = c
+        bump!(s)
         return nothing
     end
 end
@@ -640,13 +900,24 @@ end
 
 Set the marked range, a stretch of rows on the current line, as `(first, last)`,
 or clear it with `nothing`. Not undoable and not recorded, like `set_cursor!`.
-Throws `ArgumentError` when `first` is above `last`.
+Throws `ArgumentError` when there is no cursor, or when the range is not
+`1 <= first <= last <= nrows` of the cursor line.
 """
 function set_marked!(s::Session, range::Union{Nothing,Tuple{Int,Int}})
-    range === nothing || range[1] <= range[2] ||
-        throw(ArgumentError("the marked range must not end before it starts: $(range[1]) to $(range[2])"))
+    check_open(s)
     lock(s.lock) do
+        check_open(s)
+        if range !== nothing
+            c = s.cursor
+            c === nothing && throw(ArgumentError("rows can be marked only when the cursor is on a line"))
+            range[1] <= range[2] ||
+                throw(ArgumentError("the marked range must not end before it starts: $(range[1]) to $(range[2])"))
+            n = line_rows(s, c.item, c.line)
+            1 <= range[1] && range[2] <= n ||
+                throw(ArgumentError("the marked rows $(range[1]) to $(range[2]) are not on line $(line_name(c.line)), which has rows 1 to $n"))
+        end
         s.marked = range
+        bump!(s)
         return nothing
     end
 end
@@ -684,9 +955,11 @@ Throws `ItemBusyError` while a job or an export uses the item, and
 `ProjectError` when there is no such item.
 """
 function remove_item!(s::Session, id::AbstractString)
+    check_open(s)
     key = String(id)
     p = s.project
     lock(s.lock) do
+        check_open(s)
         check_not_busy(s, key)
         it = item(p, key)
         k = something(findfirst(i -> i === it, p.items))
@@ -732,11 +1005,13 @@ Throws `ArgumentError` for a blank name, `ItemBusyError` while a job or an
 export uses the item, and `ProjectError` when there is no such item.
 """
 function rename_item!(s::Session, id::AbstractString, name::AbstractString)
+    check_open(s)
     key = String(id)
     new = String(strip(name))
     isempty(new) && throw(ArgumentError("the name of an item cannot be blank"))
     p = s.project
     lock(s.lock) do
+        check_open(s)
         check_not_busy(s, key)
         old = item(p, key).name
         put(v::String) = () -> lock(s.lock) do
@@ -802,8 +1077,10 @@ of a protected channel cannot be edited. Undoable and recorded as
 export uses the database.
 """
 function set_channel_protected!(s::Session, id::AbstractString, name::AbstractString, flag::Bool)
+    check_open(s)
     key, ch = String(id), String(name)
     lock(s.lock) do
+        check_open(s)
         edit_channel_meta!(c -> c.protected, (c, v) -> (c.protected = v), s, key, ch,
                            (flag ? "protect " : "unprotect ") * ch, flag)
         record!(s, "database.set_channel_protected", Dict{String,Any}("item" => key, "channel" => ch,
@@ -829,6 +1106,7 @@ function set_channel_info!(s::Session, id::AbstractString, name::AbstractString;
                            units::Union{Nothing,AbstractString} = nothing,
                            decimals::Union{Nothing,Integer} = nothing, format::Union{Nothing,Symbol} = nothing,
                            width::Union{Nothing,Integer} = nothing)
+    check_open(s)
     format === nothing || format in CHANNEL_FORMATS ||
         throw(ArgumentError("format must be one of $(join(CHANNEL_FORMATS, ", ")), not $format"))
     decimals === nothing || decimals >= -1 || throw(ArgumentError("decimals must be -1 (not set) or more, not $decimals"))
@@ -841,6 +1119,7 @@ function set_channel_info!(s::Session, id::AbstractString, name::AbstractString;
     info(c) = Tuple(getfield(c, k) for k in CHANNEL_INFO_FIELDS)
     set_info!(c, v) = foreach((k, x) -> setfield!(c, k, x), CHANNEL_INFO_FIELDS, v)
     lock(s.lock) do
+        check_open(s)
         check_not_busy(s, key)
         old = info(channel(database(s.project, key), ch))
         isempty(given) && return nothing
@@ -868,8 +1147,10 @@ another channel (case is ignored), or is a name that a position pair uses;
 when there is no channel `old`.
 """
 function rename_channel!(s::Session, id::AbstractString, old::AbstractString, new::AbstractString)
+    check_open(s)
     key, from, to = String(id), String(old), String(new)
     lock(s.lock) do
+        check_open(s)
         check_not_busy(s, key)
         db = database(s.project, key)
         c = channel(db, from)
@@ -911,8 +1192,10 @@ that a position pair uses, `ItemBusyError` while a job or an export uses the
 database, and `DatabaseError` when there is no such channel.
 """
 function delete_channel!(s::Session, id::AbstractString, name::AbstractString)
+    check_open(s)
     key, ch = String(id), String(name)
     lock(s.lock) do
+        check_open(s)
         check_not_busy(s, key)
         db = database(s.project, key)
         c = channel(db, ch)

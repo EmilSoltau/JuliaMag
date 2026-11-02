@@ -364,9 +364,9 @@ end
 const XYZ_SETTINGS = SettingSpec[
     ChoiceSetting("mode", "Import into", ["new", "append"]; default = "new",
                   labels = ["New database", "Append to existing"],
-                  help = "new makes a new database. append adds the lines to an existing one."),
+                  help = "Make a new database, or add the lines to an existing one."),
     TextSetting("name", "Database name"; help = "Leave blank to name it after the file."),
-    ItemSetting("target", "Append to", ITEM_DATABASE; optional = true,
+    ItemSetting("target", "Append to", ITEM_DATABASE; optional = true, when = "mode" => ["append"],
                 help = "The database to append to, such as db-1. Used only to append."),
     CRSSetting("crs", "Coordinate system"; help = "The code of the X and Y coordinates, such as EPSG:7855."),
 ]

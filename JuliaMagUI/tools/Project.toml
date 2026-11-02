@@ -1,0 +1,8 @@
+# The environment of the tools in this folder, stacked on JuliaMagUI's own.
+# It holds the packages the tools need that the app must not depend on.
+
+[deps]
+ImGuiTestEngine = "464e2eba-0a11-4ed3-b274-413caa1a1cca"
+
+[compat]
+ImGuiTestEngine = "3"

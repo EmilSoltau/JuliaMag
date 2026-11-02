@@ -5,16 +5,22 @@ Date: 2026-10-28
 Plan 1 (JuliaMagCore) is done and reviewed.
 These are the open points from the reviews that later plans must handle.
 
-## Must be done before the UI depends on it (plan 2 to 4)
+## Done in plan 3
 
-- `Session.warnings` is stored but not shown.
-  Close-time warnings go there too, into the warnings of the session that closes, so the UI must show them after a close.
-- A closed session stays usable.
-  Jobs started while `close_session!` runs are not cancelled.
-  Add a closed flag that the edits and `start_job!` refuse.
-- An `ItemSetting` in mode new can keep a stale target item.
-- There is no call to remove a position pair.
-- `set_marked!` accepts rows below 1.
+Plan 3 (the UI shell) did the five points that had to be done before the UI depends on the core.
+
+- `Session.warnings` was stored but not shown.
+  Done in the commit "Add a change counter, a warnings reader and a closed state to sessions": `warnings(s)` reads them, also after `close_session!`.
+  The app shows the warnings of a close in a dialog.
+- A closed session stayed usable, and jobs started while `close_session!` ran were not cancelled.
+  Done in the same commit: a session has a closed state that edits and `start_job!` refuse.
+  The commit "Check the session is open again under the lock and harden the close tests" closes the race with a check under the lock.
+- An `ItemSetting` in mode new could keep a stale target item.
+  Done in the commit "Let settings depend on other settings and report problems per setting": the append target has `when = "mode" => ["append"]`, so it is not used in mode new.
+- There was no call to remove a position pair.
+  Done in the commit "Add and remove position pairs, select many lines at once, check the cursor": `add_pair!` and `remove_pair!`, both undoable.
+- `set_marked!` accepted rows below 1.
+  Done in the same commit: it checks the range against the cursor line.
 
 ## Done in plan 2
 
@@ -73,8 +79,45 @@ These are the open points from the reviews that later plans must handle.
   So a script line that bound a quick tool's output gave an item, and a later line that used it failed on replay.
   Done in the commit "Return item ids from quick tools": a quick tool returns item ids now, as a job does.
 
+## Left for later from plan 3
+
+These were out of scope for the UI shell.
+
+- Views (map, database, profile, statistics), the Layers tab, maps, "Add to current map", the shared cursor and the status bar's pointer and cursor parts: plan 4.
+- The CSV import wizard, file previews in import dialogs and the coordinate system picker with EPSG search: plan 4.
+- Save As (copy a project), the Project Settings page, "Find..." for missing items, and "Clear Finished" in the Jobs tab.
+- Greyed "later" buttons for tools that do not exist yet.
+  The ribbon shows only real commands (spec 9.1: empty tabs are not shown).
+- Applying the software rendering setting on Windows, and the Windows checks of DPI, fonts and dialogs: plan 5 (packaging), on a real Windows machine.
+  On Linux the setting already takes effect (`LIBGL_ALWAYS_SOFTWARE`).
+  On Windows it is only saved; plan 5 ships a Mesa `opengl32.dll` switch (ruling T15-C4).
+- Editing an item's free-text description (spec 9.2): the core has no call for it yet.
+- NativeFileDialog 0.2 has no dialog title and no suggested file name for a save (ruling T13-C4): plan 5 picks a dialog that has them, or a newer NativeFileDialog.
+- Text widths (T12-C1, T15-C5): long lines of regular text are about 5 % shorter than in the prototype at scale 1.
+  "No jobs yet. Imports and long tools run here." is 256 px wide in the app and 270 px in Chromium.
+  Two causes add up.
+  ImGui rounds every font size to whole pixels (`GetRoundedFontSize`), so the 12.5 px body font (15.12 px from ascender to descender) is drawn at 15 px, 0.8 % small.
+  FreeType hinting then rounds each advance to a pixel, so the space (3.49 px at 15 px) becomes 3 px, where Chromium makes it 4.
+  Chromium also hints some letters wider (`o` is 8 px there, 7.5 px in the font).
+  A tested fix for the first cause: set `ImFontConfig.ExtraSizeScale` to the requested size over the rounded size.
+  At scale 1 it makes the space 4 px and that sentence 264 px, and line heights stay the same.
+  Its glyphs were not checked for blur.
+  At scale 1.5 it makes text narrower, so it needs one font per size and scale, or a fix in ImGui; that is why it is not in plan 3.
+- Long expressions in text (`wrap_units` in `shell/draw.jl`): it glues an operator chain into one unit, so `A = B - C + D` is one unit.
+  A long expression can run past the box.
+  Consider breaking a unit after the last operator when it is wider than the line.
+- `ViewCache` (`app/state.jl`) watches only `database.json` and `grid.json`.
+  If a channel file is cut or damaged outside the app, no error shows until the JSON changes.
+  Before the cache, every revision bump read the files again.
+- With three sticky toasts open, a new ordinary toast is dropped at once (`add_toast!`).
+  The user then sees no toast for their action while three errors stay.
+
 ## Checks on real systems
 
+- Plan 3: on Windows, check the job start and end times in the Jobs tab and the job records (T12-P3).
+  They are written in UTC with a "Z" and shown in local time.
+- Plan 3: check the overwrite question of the native save dialog on GTK and on Windows (T13-P2).
+  JuliaMag asks itself when the dialog did not confirm the exact path.
 - Windows is the main platform, but no test has run there yet.
 - The memory-map release before undo, the file-cut order in undo, and readers during an append need a Windows CI job in the packaging plan.
 - Open a `.grd` written by JuliaMag in Oasis montaj.
@@ -91,6 +134,9 @@ These are the open points from the reviews that later plans must handle.
 - Windows: call `GetLastError` right after `OpenProcess`, so the pid check reads the right error.
 - Windows: renaming a lock file that another program holds open without share-delete gives a raw `IOError`.
 - Windows: rename and read failures in `take_over!` escape as raw errors.
+- Plan 5: `thrown_by_juliamag` (`app/worker.jl`) compares the first frame's file with `SOURCE_DIR` and `pathof(JuliaMagCore)`.
+  In a packaged or relocated build the debug paths can differ.
+  Then every JuliaMag `ArgumentError` would count as a bug.
 
 ## Can wait
 

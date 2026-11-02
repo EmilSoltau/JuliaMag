@@ -138,8 +138,12 @@ end
     crs_axis_unit(code)::Union{Nothing,Tuple{String,Float64}}
 
 The unit of the first axis of a coordinate system: its name, such as
-`"metre"`, and its size in metres (radians for an angle). `nothing` when PROJ
-cannot tell, such as for a compound coordinate system.
+`"metre"` or `"degree"`, and its size in metres (radians for an angle).
+`nothing` when PROJ cannot tell, such as for a compound coordinate system, and for a
+code that is not known.
+
+It is public, not exported: call it as `JuliaMagCore.crs_axis_unit`. The UI uses it to
+show lengths with their unit, such as a cell size of "25 m".
 """
 function crs_axis_unit(code::AbstractString)::Union{Nothing,Tuple{String,Float64}}
     r = with_crs_context(code) do pj, ctx

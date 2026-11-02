@@ -16,8 +16,34 @@ using JSON3
         j3 = start_job!(s, "test.fail", Dict{String,Any}(), (p, r) -> error("disk full"))
         wait_job(j3)                                                     # Review Focus 3
         @test status(j3) == JOB_FAILED && occursin("disk full", j3.error)
+        @test occursin(r"\.\d{3}Z$", j3.finished) && occursin(r"\.\d{3}Z$", j2.finished)
         close_session!(s)
         @test with_session(s2 -> length(jobs(s2)), s.project.folder) == 3
+    end
+end
+
+@testset "job times are UTC, written without the time zone of the machine" begin
+    @test JuliaMagCore.job_time_text(0.0) == "1970-01-01T00:00:00.000Z"
+    @test JuliaMagCore.job_time_text(1_761_902_102.123) == "2025-10-31T09:15:02.123Z"
+    @test JuliaMagCore.job_time_text(31_536_000.5) == "1971-01-01T00:00:00.500Z"
+end
+
+@testset "history and lock times are UTC with a Z, whole seconds" begin
+    # `strftime("%z")` gave the zone's name on Windows (I4). Dates gives the same text everywhere.
+    @test JuliaMagCore.now_text(0.0) == "1970-01-01T00:00:00Z"
+    @test JuliaMagCore.now_text(1_761_902_102.999) == "2025-10-31T09:15:02Z"
+    stamp = r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$"
+    @test occursin(stamp, JuliaMagCore.now_text())
+    mktempdir() do dir
+        s = new_session(joinpath(dir, "p"), "p")
+        try
+            @test occursin(stamp, JuliaMagCore.read_lock(joinpath(s.project.folder, JuliaMagCore.LOCK_FILE)).started)
+            f = joinpath(dir, "a.xyz"); write_synthetic_xyz(f; lines = 1, ties = 0, rows_per_line = 10)
+            wait_job(import_file(s, f; crs = "EPSG:7855"))
+            @test !isempty(s.history) && all(e -> occursin(stamp, e.time), s.history)
+        finally
+            close_session!(s)
+        end
     end
 end
 
@@ -28,6 +54,9 @@ end
         j = import_file(s, f; crs = "EPSG:7855"); wait_job(j)
         @test j.id == "job-1" && status(j) == JOB_DONE && j.progress[] == 1.0
         @test !isempty(j.started) && !isempty(j.finished) && isempty(j.error)
+        # Job times are UTC with milliseconds, so the Jobs tab can say "Done in 0.4 s.".
+        stamp = r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$"
+        @test occursin(stamp, j.started) && occursin(stamp, j.finished)
         it = only(s.project.items)
         @test j.outputs == [it.id] && it.made_by == j.id
         @test occursin("100 rows", report_text(j))

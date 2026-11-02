@@ -311,7 +311,7 @@ end
     # the current line
     job = cm_run(s, id; expr = "CUR = MAG", lines = "current")
     @test status(job) == JOB_FAILED && job.error == "No current line."
-    set_cursor!(s, Cursor("db-other", CM_L1, 1))
+    s.cursor = Cursor("db-other", CM_L1, 1)    # set_cursor! refuses this, so set the field
     job = cm_run(s, id; expr = "CUR = MAG", lines = "current")
     @test status(job) == JOB_FAILED && job.error == "No current line."
     set_cursor!(s, Cursor(id, CM_L1, 2))

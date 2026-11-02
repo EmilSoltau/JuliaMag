@@ -1,17 +1,36 @@
 # JuliaMag
 
 JuliaMag is a tool for processing airborne magnetic data.
-The code lives in `JuliaMagCore`, a headless Julia package.
-It has no user interface.
+The processing lives in `JuliaMagCore`, a headless Julia package.
+The desktop app is `JuliaMagUI`, a window on top of the core (see `JuliaMagUI/README.md`).
+
+## Run the app
+
+Install Julia 1.12 first.
+Then start the app from the repository root:
+
+```
+bin/juliamag.sh [project folder]
+bin\juliamag.cmd [project folder]
+```
+
+The first is for Linux, the second for Windows.
+The optional argument is a project folder to open.
+The first start installs and precompiles the packages and takes a few minutes.
+Later starts check that the packages are there, which takes a few milliseconds.
+Until the app is packaged, this is how to start it.
 
 ## Run the tests
 
-Install Julia 1.12 first.
-Then run this from the repository root:
+Run this from the repository root:
 
 ```
 julia --project=JuliaMagCore -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
+julia -t auto,1 --project=JuliaMagUI -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
 ```
+
+The first runs the core tests, the second the app tests.
+The app's window tests need a display; without one they are skipped.
 
 ## Try it
 

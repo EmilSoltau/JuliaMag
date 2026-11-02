@@ -743,7 +743,8 @@ new_log() = (String[], ReentrantLock())
     end
 
     @testset "set_marked! is not undoable and not recorded" begin
-        s = fresh_session()
+        (; s, id, L) = make_db_with(MAG = collect(1.0:10.0))
+        set_cursor!(s, Cursor(id, L, 1))
         set_marked!(s, (3, 8))
         @test s.marked == (3, 8)
         set_marked!(s, nothing)

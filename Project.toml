@@ -1,2 +1,2 @@
 [workspace]
-projects = ["JuliaMagCore"]
+projects = ["JuliaMagCore", "JuliaMagUI", "JuliaMagUI/tools"]

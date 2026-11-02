@@ -68,16 +68,21 @@ start_job!(s::Session, command::AbstractString, args::AbstractDict, work::Functi
 
 function start_job!(s::Session, command::AbstractString, args::AbstractDict, work::Function,
                     replaces::Union{Nothing,Job}; undoable::Bool = true)::Job
+    check_open(s)
     a = Dict{String,Any}(String(k) => v for (k, v) in args)
     before = lock(() -> Set{String}(i.id for i in s.project.items), s.lock)
     # The lock makes `job.task` set before any other thread can see the job.
+    # `close_session!` sets the state before it lists the jobs (which takes this
+    # lock), so a job is either listed there or refused here.
     lock(s.jobs_lock) do
+        check_open(s)
         job = Job(reserve_job_id!(s), String(command), a, Threads.Atomic{Int}(Int(JOB_RUNNING)),
-                  Threads.Atomic{Float64}(0.0), Threads.Atomic{Bool}(false), now_text(), "",
+                  Threads.Atomic{Float64}(0.0), Threads.Atomic{Bool}(false), job_time_text(), "",
                   JobReport(), String[], String[], "", nothing)
         push!(s.jobs, job)
         save_job_quietly(s, job)
         job.task = Threads.@spawn run_job!(s, job, work, before, replaces, undoable)
+        bump!(s)
         return job
     end
 end
@@ -236,13 +241,15 @@ function finish_locked!(s::Session, job::Job, items::Vector{ProjectItem}, before
     old_status = replaces === nothing ? JOB_DONE : status(replaces)
     job.outputs = String[it.id for it in new]
     job.progress[] = 1.0
-    job.finished = now_text()
+    job.finished = job_time_text()
     set_status!(job, JOB_DONE)
     save_job_quietly(s, job)
+    bump!(s)
     kept_old = replaces !== nothing && any(id -> any(i -> i.id == id, p.items), replaces.outputs)
     if replaces !== nothing && old_status == JOB_DONE && !kept_old
         set_status!(replaces, JOB_UNDONE)
         save_job_quietly(s, replaces)
+        bump!(s)
     end
     undoable || return nothing
     noted = copy(ctx.undos)
@@ -392,6 +399,7 @@ end
 function set_job_status!(s::Session, job::Job, st::JobStatus)
     set_status!(job, st)
     save_job_quietly(s, job)
+    bump!(s)
     return nothing
 end
 
@@ -422,9 +430,10 @@ function fail_job!(s::Session, job::Job, e, ctx::JobContext)
     end
     job.error = cancel_error ? "the job was cancelled" :
                 cancelled ? "the job was cancelled: " * first(msg, 10_000) : first(msg, 10_000)
-    job.finished = now_text()
+    job.finished = job_time_text()
     set_status!(job, cancelled ? JOB_CANCELLED : JOB_FAILED)
     quietly(() -> save_job_quietly(s, job))
+    bump!(s)
     return nothing
 end
 
@@ -560,6 +569,8 @@ function import_file(s::Session, path::AbstractString; kwargs...)::Job
     spec = importer_for(path)
     spec === nothing && return start_job!(s, "import", args, (_, _) -> throw(ArgumentError(
         "no importer for the file type of $path")))
+    settings = deactivate_settings(spec.settings, settings)
+    args = merge(settings, Dict{String,Any}("path" => String(path)))
     return start_job!(s, spec.id, args, import_work(s, spec, String(path), settings))
 end
 
@@ -598,6 +609,7 @@ function rerun!(s::Session, job::Job; args::AbstractDict = job.args, replace::Bo
     k = findfirst(i -> i.id == job.command, known)
     if k !== nothing
         spec = known[k]
+        a = deactivate_settings(spec.settings, a)
         path = get(a, "path", "")
         if path isa AbstractString && !isempty(path)
             settings = Dict{String,Any}(key => v for (key, v) in a if key != "path")
@@ -608,6 +620,7 @@ function rerun!(s::Session, job::Job; args::AbstractDict = job.args, replace::Bo
     end
     e = exporter_for(job.command)
     if e !== nothing && e.id == job.command
+        a = deactivate_settings(e.settings, a)
         item_id, path = get(a, "item", ""), get(a, "path", "")
         if item_id isa AbstractString && path isa AbstractString && !isempty(item_id) && !isempty(path)
             settings = Dict{String,Any}(key => v for (key, v) in a if !(key in ("item", "path")))
@@ -618,7 +631,10 @@ function rerun!(s::Session, job::Job; args::AbstractDict = job.args, replace::Bo
             "the job args have no item or no file path, so \"$(job.command)\" cannot run again")); undoable = false)
     end
     t = find_tool(job.command)
-    t !== nothing && t.mode == :job && return start_job!(s, job.command, a, tool_rerun_work(s, t, a), old)
+    if t !== nothing && t.mode == :job
+        a = deactivate_settings(t.settings, a)
+        return start_job!(s, job.command, a, tool_rerun_work(s, t, a), old)
+    end
     return start_job!(s, job.command, a, (_, _) -> throw(ArgumentError(
         "the command \"$(job.command)\" cannot be run again")), old)
 end
@@ -661,6 +677,8 @@ function export_file(s::Session, item_id::AbstractString, path::AbstractString; 
         end
         return start_job!(s, "export", args, (_, _) -> throw(ArgumentError(what)); undoable = false)
     end
+    settings = deactivate_settings(spec.settings, settings)
+    args = merge(settings, Dict{String,Any}("item" => String(item_id), "path" => String(path)))
     return start_job!(s, spec.id, args, export_work(s, spec, String(item_id), String(path), settings);
                       undoable = false)
 end
