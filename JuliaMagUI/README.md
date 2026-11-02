@@ -96,6 +96,13 @@ julia -t auto,1 --project=JuliaMagUI -e 'using Pkg; Pkg.test()'
   Git ignores that folder.
   There are no golden-image tests, because pixels differ between graphics drivers.
 
+### Headless tests on Linux
+
+`bin/test-headless.sh` runs the UI tests on a virtual display, so no window opens on the desktop.
+It uses `xvfb-run`; install it with `sudo apt-get install -y xvfb`.
+Extra arguments go to Julia.
+The screenshots are the same as on the desktop, except for timing details such as a toast that fades.
+
 ## The shot tool
 
 `tools/shot.jl` runs a script of UI actions against the real app and saves screenshots.
