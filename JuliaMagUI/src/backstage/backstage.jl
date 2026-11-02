@@ -22,7 +22,7 @@ const H1_SIZE = 26
 const H2_SIZE = 15
 const LOGO_SIZE = 44
 const CARD_W = 200
-const CARD_GAP = 18
+const START_CARD_GAP = 18     # between the Start page cards
 const RECENT_MAX_W = 860
 const RECENT_ROW_H = 44
 const INFO_LABEL_W = 140
@@ -394,7 +394,7 @@ function draw_start_page(app, dl, x::Float32, y::Float32, w::Float32)::Float32
     for (title, sub, icon, page) in cards
         draw_card(app, dl, Box(cx, y, cx + f(CARD_W), y + f(CARD_H)), title, title, sub, icon) &&
             set_page!(app, page)
-        cx += f(CARD_W + CARD_GAP)
+        cx += f(CARD_W + START_CARD_GAP)
     end
     y += f(CARD_H)
     y = draw_h2(app, dl, x, y, "Recent Projects")

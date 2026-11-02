@@ -65,6 +65,18 @@ window_testset("jobs tab") do
                 @test abs(w1 - 0.2 * UI.width(b)) <= 3 && abs(w2 - 0.6 * UI.width(b)) <= 3 && w2 > w1
                 # The rest of the bar is the well.
                 @test bar_fill(img2, b, rgb255(LIGHT.well)) >= 0.4 * UI.width(b) - 4
+                # The card's rows, as the prototype's `.job` (padding 9 12 10, 5 px gaps):
+                # icon 16, gap 5, the target line (14.375) if any, gap 5, bar 4, gap 5,
+                # buttons 22, 10 under them and the 1 px line. Without a target it is 77 px.
+                v = app.ui.jobs_cache
+                row = only(filter(r -> r.job === job, app.snap.jobs))
+                e = v.entries[row.id]
+                target = e.has_target ? 14.375f0 : 0f0
+                top = v.y0 + v.tops[1] - app.ui.jobs_scroll
+                @test e.height ≈ 77 + target
+                @test abs(b.y0 - (top + 35 + target)) <= 1
+                cancel = item_box_of(job_ref(job.id, "Cancel"))
+                @test abs(cancel.y0 - (b.y1 + 5)) <= 1 && abs(UI.height(cancel) - 22) <= 1
                 # The badge: an accent pill right of "Jobs", in the middle of the header band.
                 tab = item_box_of("JuliaMag/left/Jobs")
                 mid = round(Int, (tab.y0 + tab.y1) / 2)
