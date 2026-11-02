@@ -242,6 +242,7 @@ function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGH
 
     result = Ref{Any}(nothing)
     failure = Ref{Any}(nothing)
+    started = Ref(false)
     finished = Threads.Atomic{Bool}(false)
     watch_hang(finished, timeout)
     engine = te.CreateContext(; exit_on_completion = true, show_test_window = false)
@@ -254,6 +255,7 @@ function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGH
         io.ConfigWatchdogKillTest = timeout   # stops an engine action that hangs
         test = te.@register_test(engine, "app", "with_test_app")
         test.TestFunc = () -> begin
+            started[] = true
             try
                 # The test starts before the first frame reaches the hook.
                 for _ in 1:100
@@ -276,7 +278,8 @@ function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGH
         failure[] === nothing && time() > deadline && throw(TestTimeout(timeout))
         if failure[] === nothing && (summary.CountTested != 1 || summary.CountSuccess != 1)
             error("the test engine did not finish the test with success " *
-                  "(tested $(summary.CountTested), passed $(summary.CountSuccess))")
+                  "(tested $(summary.CountTested), passed $(summary.CountSuccess)); " *
+                  loop_end_text(window[], started[]))
         end
     finally
         finished[] = true
@@ -284,10 +287,35 @@ function with_test_app(f; project = nothing, theme::UI.ThemeMode = UI.THEME_LIGH
     end
     failure[] === nothing || throw(failure[])
     a = app[]
+    a === nothing || drain_bug_reports!(a)
     if !draw_errors_ok && a !== nothing && !isempty(a.draw_errors)
         error("the app had errors while drawing: " * join((e.text for e in a.draw_errors), "; "))
     end
     return result[]
+end
+
+# What `with_test_app` says when the engine did not finish the test: did the test function
+# start, how many frames the loop drew, and why it ended. The loop ends by `quit!` (which the
+# loop itself calls once the engine has no test left) or by a window close request.
+function loop_end_text(w::Union{Nothing,UI.Window}, started::Bool)
+    w === nothing && return "the app drew no frame"
+    why = w.quit ? "quit! or the test engine had no test left" : "a window close request (on_close)"
+    return "the test function " * (started ? "started" : "did not start") *
+           ", the loop drew $(w.frame) frames and ended by $why"
+end
+
+# Take the bug reports that a worker action or the last frame left in the queue, so
+# `app.draw_errors` is complete when the harness reads it. The loop has ended, so nothing
+# else reads the queue. Other messages stay where they are.
+function drain_bug_reports!(app::UI.AppState)
+    results = app.queue.results
+    keep = Any[]
+    while isready(results)
+        m = take!(results)
+        m isa UI.BugReport ? UI.handle_result!(app, m) : push!(keep, m)
+    end
+    foreach(m -> put!(results, m), keep)
+    return nothing
 end
 
 const HANG_GRACE = 30   # s after the timeout before the watchdog ends a hung test process

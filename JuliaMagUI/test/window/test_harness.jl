@@ -216,6 +216,31 @@ window_testset("harness") do
         @test !stopped[]
     end
 
+    @testset "a bug reported in the last frame fails the draw error check" begin
+        late(ctx) = (put!(ctx.app.queue.results, UI.BugReport(ErrorException("late bug"), nothing)); nothing)
+        err = try
+            with_test_app(late)
+            nothing
+        catch e
+            e
+        end
+        @test err isa ErrorException
+        @test occursin("late bug", sprint(showerror, err))
+        # A test that expects draw errors still passes.
+        @test with_test_app(late; draw_errors_ok = true) === nothing
+    end
+
+    @testset "the harness says how the loop ended" begin
+        @test loop_end_text(nothing, false) == "the app drew no frame"
+        win = Ref{Any}(nothing)
+        with_test_app(ctx -> win[] = ctx.window)
+        text = loop_end_text(win[], true)
+        @test occursin("the test function started", text)
+        @test occursin("the loop drew $(win[].frame) frames", text)
+        @test occursin("ended by quit!", text)
+        @test occursin("did not start", loop_end_text(win[], false))
+    end
+
     @testset "errors in the test function reach the caller" begin
         @test_throws CapturedException with_test_app(ctx -> error("boom"))
         err = try
