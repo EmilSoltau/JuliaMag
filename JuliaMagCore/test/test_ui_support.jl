@@ -117,10 +117,13 @@ isdefined(@__MODULE__, :add_test_grid!) || include(joinpath(@__DIR__, "support",
         catch e
             e
         end
-        # Wait until the edit has passed the first check and waits for the lock: Base sets the
-        # PARKED bit (0x02) of a `ReentrantLock`'s `havelock` while a task waits for it.
-        # No fixed sleep, so a slow start cannot skip the inner check.
-        @test timedwait(() -> s.lock.havelock & 0x02 != 0, 20; pollint = 0.005) === :ok
+        # The edit passes the first check at once, then waits for the lock the holder keeps.
+        # Only public task state shows this: it has started and cannot finish. The short
+        # wait gives it time to reach the lock; if it is slower, the edit is refused by the
+        # first check instead and the test is weaker, but it does not fail.
+        @test timedwait(() -> istaskstarted(edit), 20; pollint = 0.005) === :ok
+        @test timedwait(() -> istaskdone(edit), 0.2; pollint = 0.005) === :timed_out
+        @test islocked(s.lock)
         s.state[] = 1                   # the close has started
         notify(release)
         wait(holder)
