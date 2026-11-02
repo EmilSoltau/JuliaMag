@@ -311,6 +311,35 @@ julia -t auto,1 --project=JuliaMagUI bench/ui_frame.jl
 - The first command is needed once: the script uses the window test harness, which needs ImGuiTestEngine.
 - The optional argument is the number of frames per case (default 200).
 
+## UI idle CPU
+
+`bench/ui_idle.jl` measures how much CPU the app uses when nobody touches it.
+It starts the app with no project, waits 5 s for the start to pass, then reads the process's CPU time over 20 s with no input.
+While idle, the loop still draws a frame every 0.1 s at the latest: `refresh!` polls the project's revision, and the sticky toasts and the theme need a frame now and then.
+
+### Results
+
+Run of 2026-10-31 on the machine above, on WSLg, two runs.
+
+| Run | CPU while idle | Frames per second |
+|---|---|---|
+| 1 | 2.6 % of one core | 9.2 |
+| 2 | 2.5 % of one core | 9.2 |
+
+The idle cost is small, but not zero.
+A later plan can let the core wake the loop when its revision goes up, so the idle wait can be longer.
+
+### How to re-run
+
+From the repo root, on Linux with a display:
+
+```
+julia bench/ui_idle.jl [SECONDS]
+```
+
+- `SECONDS` is the idle time measured (default 20).
+- The script reads `/proc/self/stat`, so it runs on Linux only.
+
 ## Icon atlas
 
 `bench/ui_icons.jl` times how long the icon atlas takes to build.

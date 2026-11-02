@@ -17,14 +17,19 @@ bin\juliamag.cmd [project folder]
 - The optional argument is a project folder to open.
 - Without it, the app opens the last project when the setting "Open Last Project" is on.
 - Set `JULIA` to use another Julia than the one on the `PATH`.
-- The first start precompiles the packages and takes a few minutes.
+- The first start installs and precompiles the packages and takes a few minutes.
   Later starts take about 2.5 s on a fast machine.
 
 The launchers run this command, which also works by hand:
 
 ```
-julia -t auto,1 --project=JuliaMagUI -e "using JuliaMagUI; JuliaMagUI.main(ARGS)" [project folder]
+julia -t auto,1 --project=JuliaMagUI bin/start.jl [project folder]
 ```
+
+`bin/start.jl` checks that every package of the manifest is installed.
+The check takes a few milliseconds.
+When a package is missing, it runs `Pkg.instantiate()` in a separate Julia process first.
+Then it starts the app with `JuliaMagUI.main(ARGS)`.
 
 `-t auto,1` gives the jobs one thread per core and keeps one interactive thread for the window.
 Without it, the app shows a warning: "JuliaMag runs with one worker thread. Start it with -t auto for faster jobs."
@@ -116,5 +121,9 @@ The first command is needed once: it installs ImGuiTestEngine, which the app its
 
 ## Benchmarks
 
-`bench/ui_startup.jl` times the start until the first frame, and `bench/ui_icons.jl` times the icon atlas.
+- `bench/ui_startup.jl` times the start until the first frame.
+- `bench/ui_icons.jl` times the icon atlas.
+- `bench/ui_frame.jl` times the frames with a database of 5,000 lines and 300 channels in the Data tree.
+- `bench/ui_idle.jl` measures the CPU the app uses while idle (Linux only).
+
 `docs/bench.md` has the numbers.

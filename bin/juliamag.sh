@@ -32,5 +32,5 @@ if ! command -v "$julia" > /dev/null 2>&1; then
     exit 1
 fi
 
-exec "$julia" -t auto,1 --project="$repo/JuliaMagUI" \
-    -e 'using JuliaMagUI; JuliaMagUI.main(ARGS)' "$@"
+# start.jl installs the packages on the first start, then starts the app.
+exec "$julia" -t auto,1 --project="$repo/JuliaMagUI" "$repo/bin/start.jl" "$@"

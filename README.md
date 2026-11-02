@@ -16,7 +16,8 @@ bin\juliamag.cmd [project folder]
 
 The first is for Linux, the second for Windows.
 The optional argument is a project folder to open.
-The first start precompiles the packages and takes a few minutes.
+The first start installs and precompiles the packages and takes a few minutes.
+Later starts check that the packages are there, which takes a few milliseconds.
 Until the app is packaged, this is how to start it.
 
 ## Run the tests
