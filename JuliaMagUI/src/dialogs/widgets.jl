@@ -156,12 +156,17 @@ function combo!(app, id::AbstractString, b::Box, text::AbstractString; icon::Abs
 end
 
 """
-A drag of a `slider!`: its ImGui `id`, the value it is at, and whether Esc `cancelled` it.
+A drag of a `slider!`: its ImGui `id`, the value it is at, whether Esc `cancelled` it, the
+`grab` offset of the mouse from the thumb's centre (a press on the thumb keeps it there), the
+mouse x at the press, and whether the mouse has `moved` since: a press alone changes nothing.
 """
 mutable struct SliderDrag
     id::UInt32
     value::Float64
     cancelled::Bool
+    grab::Float32
+    start_x::Float32
+    moved::Bool
 end
 
 const SLIDER_THUMB = 12   # the prototype's range thumb; its track is 4 px high
@@ -176,12 +181,16 @@ and a small shadow) whose centre runs from 6 px in to 6 px before the end. With 
 text `format(value)` sits at the right of `b` in a $(SLIDER_VALUE_W) px column (`text`,
 right-aligned), and the track ends 8 px before it, as the prototype's `.opac`.
 
-A press on the track puts the thumb there and a drag moves it. The value goes from `lo` to
-`hi`, rounded to `step` when it is above 0. Pass the stored value as `value`: it is drawn
-while no drag runs. During a drag the dragged value is returned, with `changed` in each
-frame it changes. Esc ends a drag at once: the value goes back to `value` (with `changed`),
-and the release then keeps it. `released` is true in the frame the mouse is let go after a
-drag, with the value of the drag.
+A press on the track puts the thumb there; a press on the thumb keeps the mouse where it
+took it, as a native slider does. A drag then moves it; a press without a move changes
+nothing. The value goes from `lo` to `hi`, rounded to `step` when it is above 0. Pass the
+stored value as `value`: it is drawn while no drag runs. During a drag the dragged value is
+returned, with `changed` in each frame it changes. Esc ends a drag at once: the value goes
+back to `value` (with `changed`), and the release then keeps it. `released` is true in the
+frame the mouse is let go after a drag, with the value of the drag.
+While the mouse is over the slider (and no drag, dialog, menu or text field takes the keys),
+Left and Right step the value by `step` (1 % of the range without one); each press returns
+the new value with `changed` and `released`, as a drag of its own.
 """
 function slider!(app, id::AbstractString, b::Box, value::Real, lo::Real, hi::Real;
         format::Union{Nothing,Function} = nothing, step::Real = 0)::Tuple{Float64,Bool,Bool}
@@ -193,15 +202,18 @@ function slider!(app, id::AbstractString, b::Box, value::Real, lo::Real, hi::Rea
     ui = app.ui
     track_x1 = format === nothing ? b.x1 : b.x1 - f(SLIDER_VALUE_W + 8)
     area = Box(b.x0, b.y0, track_x1, b.y1)
-    _, _, held = hit(id, area)
+    _, hovered, held = hit(id, area)
     key = ig.GetItemID()
     span = Float64(hi) - Float64(lo)
     run = max(width(area) - f(SLIDER_THUMB), 1f0)   # the thumb centre's travel
-    function at(x)
-        u = Float64(lo) + clamp((x - area.x0 - f(SLIDER_THUMB / 2)) / run, 0, 1) * span
-        return step > 0 ? clamp(round(u / step) * step, Float64(lo), Float64(hi)) : u
+    snap_to(u) = step > 0 ? clamp(round(u / step) * step, Float64(lo), Float64(hi)) : clamp(u, Float64(lo), Float64(hi))
+    at(x) = snap_to(Float64(lo) + clamp((x - area.x0 - f(SLIDER_THUMB / 2)) / run, 0, 1) * span)
+    centre(v) = area.x0 + f(SLIDER_THUMB / 2) + (span == 0 ? 0f0 : Float32(clamp((v - lo) / span, 0, 1))) * run
+    mouse_x = unsafe_load(ig.GetIO().MousePos).x
+    if ig.IsItemActivated()
+        on_thumb = abs(mouse_x - centre(value)) <= f(SLIDER_THUMB / 2)
+        ui.drag = SliderDrag(key, Float64(value), false, on_thumb ? mouse_x - centre(value) : 0f0, mouse_x, !on_thumb)
     end
-    ig.IsItemActivated() && (ui.drag = SliderDrag(key, Float64(value), false))
     cur = ui.drag
     d = cur isa SliderDrag && cur.id == key ? cur : nothing   # this slider's drag, or `nothing`
     changed = released = false
@@ -211,9 +223,12 @@ function slider!(app, id::AbstractString, b::Box, value::Real, lo::Real, hi::Rea
             changed = d.value != value
             d.value = Float64(value)
         else
-            v = at(unsafe_load(ig.GetIO().MousePos).x)
-            changed = v != d.value
-            d.value = v
+            d.moved |= mouse_x != d.start_x
+            if d.moved
+                v = at(mouse_x - d.grab)
+                changed = v != d.value
+                d.value = v
+            end
         end
     end
     if ig.IsItemDeactivated() && d !== nothing
@@ -221,6 +236,16 @@ function slider!(app, id::AbstractString, b::Box, value::Real, lo::Real, hi::Rea
         ui.drag = nothing
     end
     shown = d === nothing ? Float64(value) : d.value
+    io = unsafe_load(ig.GetIO())
+    if d === nothing && hovered && isempty(ui.dialogs) && ui.menu === nothing && ui.search === nothing &&
+            !io.WantTextInput
+        dir = ig.IsKeyPressed(lib.ImGuiKey_RightArrow, true) ? 1 : ig.IsKeyPressed(lib.ImGuiKey_LeftArrow, true) ? -1 : 0
+        v = snap_to(Float64(value) + dir * (step > 0 ? step : span / 100))
+        if dir != 0 && v != value
+            shown = v
+            changed = released = true
+        end
+    end
 
     frac = span == 0 ? 0f0 : Float32(clamp((shown - lo) / span, 0, 1))
     mid = centre_y(area)

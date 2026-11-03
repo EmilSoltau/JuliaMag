@@ -65,6 +65,8 @@ The map's layer data. Changed on the render thread only.
 - `freed`: keys whose GL objects the next `update_layers!` frees (set by `set_session!`).
 - `seen`: the snapshot whose maps `update_layers!` last checked for unused entries.
 - `dropped`: how many loads of another session came back and were dropped (tests read it).
+- `version`: counts the changes of the entries (a load started or came back, an entry
+  dropped), so what is built from their state can be kept until it changes (the Layers tab).
 - `hold`: a test hook. While it is set, each load started waits for a `put!` on it.
 - `views`: the view of each map by id (a `MapViewState`); `view`: where the map view was drawn
   last, in device pixels.
@@ -79,6 +81,7 @@ mutable struct MapState
     freed::Vector{LayerKey}
     seen::Any
     dropped::Int
+    version::Int
     hold::Union{Nothing,Channel{Nothing}}
     views::Dict{String,MapViewState}
     view::Box
@@ -92,9 +95,12 @@ mutable struct MapState
 end
 
 MapState(session::Union{Nothing,Core.Session}) =
-    MapState(Dict{LayerKey,LayerEntry}(), MapRenderer(), session, LayerKey[], nothing, 0, nothing,
+    MapState(Dict{LayerKey,LayerEntry}(), MapRenderer(), session, LayerKey[], nothing, 0, 0, nothing,
              Dict{String,MapViewState}(), Box(0, 0, 0, 0), Scene(Camera(0, 0, 1), 1, 1, (0x00, 0x00, 0x00, 0xff), LineDraw[], 0),
              LayerPlan[], nothing, "", "", false, Dict{String,LayerLook}())
+
+"What a layer whose item is not in the project says, in the map's hint and the Layers tab."
+const LAYER_ITEM_GONE = "The layer's item is not in the project."
 
 # A load for the loader task. `folder` is the item's absolute folder; `name` its name.
 struct LayerLoad
@@ -293,7 +299,7 @@ function update_layers!(app)
         l.visible || continue
         key = layer_key(snap, mv, l)
         e = get(ms.entries, key, nothing)
-        e === nothing && (e = ms.entries[key] = LayerEntry(key))
+        e === nothing && (e = ms.entries[key] = LayerEntry(key); ms.version += 1)
         rev = get(snap.item_revisions, l.item, 0)
         (e.loading || e.wanted == rev || !spare_free(ms, e)) && continue
         start_load!(app, e, rev)
@@ -313,6 +319,7 @@ function drop_unused!(ms::MapState, snap)
     for k in collect(keys(ms.entries))
         k in used && continue
         delete!(ms.entries, k)
+        ms.version += 1
         gl === nothing || free_layer!(gl, k)
     end
     return nothing
@@ -323,10 +330,11 @@ function start_load!(app, e::LayerEntry, rev::Int)
     snap = app.snap
     k = findfirst(it -> it.id == e.key.item, snap.items)
     e.wanted = rev
+    ms.version += 1
     if k === nothing
         set_data!(ms, e, nothing)
         e.revision = rev
-        e.error = "There is no item $(e.key.item) in the project."
+        e.error = LAYER_ITEM_GONE
         return nothing
     end
     row = snap.items[k]
@@ -378,6 +386,7 @@ function handle_result!(app, m::LayerLoaded)
     # No map uses it any more, or it is a load of an entry that was dropped and made again.
     (e === nothing || !e.loading || m.revision != e.wanted) && return nothing
     e.loading = false
+    ms.version += 1
     e.revision = m.revision
     e.error = m.error
     e.seconds = m.seconds

@@ -7,7 +7,6 @@
 # ribbon's. Rows are listed top layer first, while `move_layer!` counts positions from the
 # bottom: `drop_position` is the one place that converts between them.
 
-const LAYER_ITEM_GONE = "The layer's item is not in the project."
 const LAYER_GONE_NAME = "Removed item"
 const LAYERS_NO_MAP = "No map is open."
 const LAYERS_NO_LAYERS = "This map has no layers."
@@ -25,6 +24,7 @@ const LAYER_RAMP_W = 60       # the colour ramp of a sub line
 const LAYER_RAMP_H = 8
 const LAYER_TEXT_SIZE = 11.5f0
 const MAP_CHOOSER_W = 112
+const OPACITY_LABEL_W = 50    # "Opacity" and the 8 px gap before the slider, as the prototype lays it out
 const LAYER_DROP_LINE = 2
 
 # The commands of the toolbar after Add Item, in its order.
@@ -66,15 +66,16 @@ const STRETCH_TEXT = Dict(:histeq => "hist. eq.", :linear => "linear", :clip => 
 opacity_text(o::Real)::String = o < 1 ? string(clamp(round(Int, 100 * o), 0, 99), " %") : ""
 
 """
-    layer_status(snap, mv, layer, entries) -> NamedTuple
+    layer_status(snap, mv, layer, entries; index = nothing) -> NamedTuple
 
 What the Layers tab shows of a layer's data: its `name`, whether its item is `missing`, its
 `error` (see `LayerRow`), whether it is `loading`, and whether it `failed`: the item is
 missing, or its last load gave an error and no data. Reads the snapshot and the loader's
-entries only.
+entries only. `index` maps item ids to their place in `snap.items`, to find many layers' items
+without a search each (see `item_index`).
 """
-function layer_status(snap, mv, l::Core.MapLayer, entries)
-    k = findfirst(it -> it.id == l.item, snap.items)
+function layer_status(snap, mv, l::Core.MapLayer, entries; index::Union{Nothing,Dict{String,Int}} = nothing)
+    k = index === nothing ? findfirst(it -> it.id == l.item, snap.items) : get(index, l.item, nothing)
     k === nothing && return (; name = LAYER_GONE_NAME, missing = true, error = LAYER_ITEM_GONE, loading = false, failed = true)
     it = snap.items[k]
     it.missing && return (; name = it.name, missing = true, error = missing_text(it), loading = false, failed = true)
@@ -83,6 +84,9 @@ function layer_status(snap, mv, l::Core.MapLayer, entries)
     failed = e !== nothing && !e.loading && e.data === nothing && !isempty(e.error)
     return (; name = it.name, missing = false, error = e === nothing ? "" : e.error, loading, failed)
 end
+
+"The place of each item of the snapshot in `snap.items`, by id."
+item_index(snap)::Dict{String,Int} = Dict{String,Int}(it.id => k for (k, it) in enumerate(snap.items))
 
 """
     layer_rows(snap, map_id, entries, app_colours) -> Vector{LayerRow}
@@ -94,9 +98,10 @@ A grid layer without its own style shows its grid's colours, with `app_colours` 
 function layer_rows(snap, map_id::AbstractString, entries, app_colours::AbstractString)::Vector{LayerRow}
     mv = get(snap.maps, map_id, nothing)
     mv === nothing && return LayerRow[]
+    index = item_index(snap)
     rows = LayerRow[]
     for l in Iterators.reverse(mv.layers)
-        st = layer_status(snap, mv, l, entries)
+        st = layer_status(snap, mv, l, entries; index)
         if l.kind == :lines
             plain = isempty(l.channel)
             sub = plain ? "One colour" : l.channel
@@ -115,6 +120,58 @@ function layer_rows(snap, map_id::AbstractString, entries, app_colours::Abstract
 end
 
 """
+The Layers tab's rows of one map and what is built with them, kept while its key holds: the
+snapshot, the map, the app's grid colours and the loader's `version`.
+
+- `rows`: `layer_rows`, top first; `failed` and `extent`: for each row, whether its layer
+  failed (`layer_status`) and whether its data has an extent. The map commands read them.
+- `heights`, `tops`: the layout of the rows in the last frame, in device pixels (filled in
+  place each frame); `foot_w`, `foot`: the footer's lines for that width.
+"""
+mutable struct LayersCache
+    snap::Any
+    map::String
+    colours::String
+    version::Int
+    rows::Vector{LayerRow}
+    failed::Vector{Bool}
+    extent::Vector{Bool}
+    heights::Vector{Float32}
+    tops::Vector{Float32}
+    foot_w::Float32
+    foot::Vector{String}
+end
+
+"""
+    layers_cache(app, mv) -> LayersCache
+
+The rows of map view `mv` (`layer_rows`) and their states, built again only when the
+snapshot, the map, the app's grid colours or a layer load changed (`MapState.version`).
+"""
+function layers_cache(app, mv)::LayersCache
+    ms = app.map
+    snap = app.snap
+    colours = app.config.grid_colours
+    c = app.ui.layers_cache
+    if c isa LayersCache
+        c.snap === snap && c.map == mv.id && c.version == ms.version && c.colours == colours && return c
+    else
+        c = LayersCache(nothing, "", "", -1, LayerRow[], Bool[], Bool[], Float32[], Float32[], -1f0, String[])
+        app.ui.layers_cache = c
+    end
+    c.snap, c.map, c.colours, c.version = snap, mv.id, colours, ms.version
+    c.rows = layer_rows(snap, mv.id, ms.entries, colours)
+    index = item_index(snap)
+    empty!(c.failed)
+    empty!(c.extent)
+    for l in Iterators.reverse(mv.layers)
+        push!(c.failed, layer_status(snap, mv, l, ms.entries; index).failed)
+        push!(c.extent, layer_extent(get(ms.entries, layer_key(snap, mv, l), nothing)) !== nothing)
+    end
+    return c
+end
+
+"""
     drop_position(from, to_row, n) -> Int
 
 The `move_layer!` position (1 is the bottom) of the layer in row `from` when it is dropped
@@ -128,13 +185,18 @@ drop_position(from::Int, to_row::Int, n::Int)::Int = n + 1 - (to_row > from ? to
 """
     commit_opacity!(app, map_id, layer_id, opacity)
 
-Set the opacity of a layer on the worker: one undo step. Until the edit is in a snapshot,
-`app.ui.opacity_wait` keeps the live opacity drawn (see `settle_opacity_preview!`). A failed
-edit is reported as other edits are, and ends the live opacity too.
+Set the opacity of a layer on the worker: one undo step. The live opacity
+(`app.ui.opacity_preview`) shows the new value until a snapshot has this edit: the edit is
+`app.ui.opacity_edit`, with a token of its own, so an older edit that comes back later
+never ends the live opacity of a newer one (see `settle_opacity_preview!`). A failed edit is
+reported as other edits are, and ends the live opacity too.
 """
 function commit_opacity!(app, map_id::AbstractString, layer_id::AbstractString, opacity::Real)
+    ui = app.ui
     m, id, o = String(map_id), String(layer_id), Float64(opacity)
-    app.ui.opacity_wait = 0
+    token = (ui.opacity_edits += 1)
+    ui.opacity_edit = OpacityEdit(token, id, o, -1)
+    ui.opacity_preview = (id, o)
     submit!(app, "Change opacity", s -> begin
             try
                 Core.set_layer!(s, m, id; opacity = o)
@@ -145,50 +207,74 @@ function commit_opacity!(app, map_id::AbstractString, layer_id::AbstractString, 
             end
         end;
         done = (a, r) -> begin
-            a.ui.opacity_wait == 0 && (a.ui.opacity_wait = max(r[1], 1))
+            ed = a.ui.opacity_edit
+            ed !== nothing && ed.token == token && (ed.revision = r[1])
             r[2] === nothing || report_error!(a, r[2]...)
             nothing
         end)
     return nothing
 end
 
+"""
+    shown_opacity(app, mv, layer_id) -> Float64
+
+The opacity the Layers tab shows for a layer of map view `mv`: the value of an edit still on
+its way (`app.ui.opacity_edit`), so the slider does not jump back after its release; else the
+layer's own.
+"""
+function shown_opacity(app, mv, id::AbstractString)::Float64
+    ed = app.ui.opacity_edit
+    ed !== nothing && ed.layer == id && return ed.value
+    k = findfirst(l -> l.id == id, mv.layers)
+    return k === nothing ? 1.0 : mv.layers[k].opacity
+end
+
 "Is a `slider!` being dragged now? Reads ImGui's active item; false without a slider drag."
 slider_dragging(app) = (d = app.ui.drag; d isa SliderDrag && lib.igGetActiveID() == d.id)
 
 """
+    settle_drags!(app)
+
+End a layer row drag or a slider drag whose item is no longer ImGui's active item: its row
+or slider went away while the mouse was down (an undo took the layer out), so no release
+ever comes. Call it once per frame, before drawing.
+"""
+function settle_drags!(app)
+    d = app.ui.drag
+    (d isa LayerDrag || d isa SliderDrag) && lib.igGetActiveID() != d.id && (app.ui.drag = nothing)
+    return nothing
+end
+
+"""
     settle_opacity_preview!(app)
 
-End the live opacity (`app.ui.opacity_preview`) once nothing needs it: when the edit of its
-release is in the snapshot, or at once when no slider drags and no edit is on its way (the
-slider was let go with no change, Esc cancelled it, or it went away). Call it once per frame.
+End the live opacity (`app.ui.opacity_preview`) once nothing needs it: when the snapshot has
+the last release's edit (`app.ui.opacity_edit`), unless a slider drags again, or at once when
+no slider drags and no edit is on its way (the slider was let go with no change, Esc
+cancelled it, or it went away). Call it once per frame.
 """
 function settle_opacity_preview!(app)
     ui = app.ui
-    if ui.opacity_preview === nothing
-        ui.opacity_wait = -1
-        return nothing
-    end
-    w = ui.opacity_wait
+    ed = ui.opacity_edit
     snap = app.snap
-    if w > 0 && snap !== nothing && snap.revision >= w
-        ui.opacity_preview = nothing
-        ui.opacity_wait = -1
-    elseif w < 0 && !slider_dragging(app)
-        ui.opacity_preview = nothing
+    if ed !== nothing && ed.revision >= 0 && snap !== nothing && snap.revision >= ed.revision
+        ui.opacity_edit = ed = nothing
     end
+    ui.opacity_preview === nothing && return nothing
+    ed === nothing && !slider_dragging(app) && (ui.opacity_preview = nothing)
     return nothing
 end
 
 # --- Drawing ---
 
 """
-A drag of a layer row: the map, the layer and its row `from` (top first), whether the mouse
+A drag of a layer row: the ImGui `id` of the row, the map and the layer, whether the mouse
 has `moved` far enough to be a drag, and whether Esc `cancelled` it.
 """
 mutable struct LayerDrag
+    id::UInt32
     map::String
     layer::String
-    from::Int
     moved::Bool
     cancelled::Bool
 end
@@ -210,7 +296,7 @@ function draw_layers_tab(app, dl, body::Box)
     ig.PushID("layers")
     bar = Box(body.x0, body.y0, body.x1, body.y0 + f(LAYERS_BAR_H))
     draw_layers_bar(app, dl, bar, mv)
-    lines = wrap_lines(FONT_REGULAR, LAYER_TEXT_SIZE, LAYERS_FOOT, width(body) - f(16))
+    lines = foot_lines!(app, width(body) - f(16))
     foot = Box(body.x0, rnd(body.y1 - hl - f(16) - length(lines) * f(LAYER_TEXT_SIZE * 1.4)), body.x1, body.y1)
     view = Box(body.x0, rnd(bar.y1), body.x1, foot.y0)
     empty!(ui.layer_boxes)
@@ -221,11 +307,22 @@ function draw_layers_tab(app, dl, body::Box)
         ui.layers_scroll = 0f0
         draw_layers_empty(app, dl, view, isempty(mv.error) ? LAYERS_NO_LAYERS : mv.error; add = isempty(mv.error))
     else
-        draw_layer_list(app, dl, view, mv, layer_rows(snap, mv.id, app.map.entries, app.config.grid_colours))
+        draw_layer_list(app, dl, view, mv, layers_cache(app, mv))
     end
     draw_layers_foot(app, dl, foot, lines)
     ig.PopID()
     return nothing
+end
+
+# The footer's lines at `width`, wrapped again only when the width changes.
+function foot_lines!(app, width::Float32)::Vector{String}
+    c = app.ui.layers_cache
+    c isa LayersCache || return wrap_lines(FONT_REGULAR, LAYER_TEXT_SIZE, LAYERS_FOOT, width)
+    if c.foot_w != width
+        c.foot = wrap_lines(FONT_REGULAR, LAYER_TEXT_SIZE, LAYERS_FOOT, width)
+        c.foot_w = width
+    end
+    return c.foot
 end
 
 # The toolbar (`.ltools`): icon buttons 22 px square, 2 apart, 6 px in; the map chooser at
@@ -365,24 +462,29 @@ selects it; a drag moves it (a 2 px `accent` line shows where it goes, and the r
 cancels a drag. The selected layer has its opacity slider under its sub line. The right
 click opens the layer's context menu; a double click opens Layer Style.
 """
-function draw_layer_list(app, dl, view::Box, mv, rows::Vector{LayerRow})
+function draw_layer_list(app, dl, view::Box, mv, c::LayersCache)
     s = app.window.scale
     t = app.tokens
     f(v) = fpx(s, v)
     ui = app.ui
+    rows = c.rows
     n = length(rows)
-    heights = Float32[layer_block_h(s, r.id == ui.layer_selected) for r in rows]
+    heights = resize!(c.heights, n)
+    for (k, r) in enumerate(rows)
+        heights[k] = layer_block_h(s, r.id == ui.layer_selected)
+    end
     pad = f(LAYERS_PAD)
     ui.layers_scroll, bar = scroll_area!(app, "scrollbar", view, 2pad + sum(heights), ui.layers_scroll)
     right = view.x1 - (bar ? fpx(s, SCROLLBAR_W) : 0f0)
-    tops = Vector{Float32}(undef, n)
+    tops = resize!(c.tops, n)
     y = view.y0 + pad - ui.layers_scroll
     for k in 1:n
         tops[k] = y
         y += heights[k]
     end
+    # A drop goes before row `target`; 0 while the mouse is outside the list: no drop.
     mouse = unsafe_load(ig.GetIO().MousePos)
-    target = drop_row(tops, heights, mouse.y)
+    target = inside(Box(view.x0, view.y0, right, view.y1), mouse.x, mouse.y) ? drop_row(tops, heights, mouse.y) : 0
     ig.PushClipRect((view.x0, view.y0), (right, view.y1), true)
     for (k, r) in enumerate(rows)
         b = Box(view.x0, tops[k], right, tops[k] + f(LAYER_ROW_H))
@@ -400,7 +502,7 @@ function draw_layer_list(app, dl, view::Box, mv, rows::Vector{LayerRow})
         if k !== nothing
             b = ui.layer_boxes[d.layer]   # the dragged row fades, as the prototype's opacity 0.5
             ig.AddRectFilled(dl, (b.x0, b.y0), (b.x1, b.y1), u32(t.pane, 0.5))
-            if target != k && target != k + 1
+            if target != 0 && target != k && target != k + 1
                 ly = rnd(target <= n ? tops[target] : y - f(LAYER_DROP_LINE))
                 ig.AddRectFilled(dl, (view.x0, ly), (right, ly + px(s, LAYER_DROP_LINE)), u32(t.accent))
             end
@@ -468,6 +570,7 @@ function draw_layer_row(app, dl, mv, r::LayerRow, k::Int, n::Int, b::Box, target
     clicked, hovered, held = hit("row", b; overlap = true)
     on_row = ig.IsItemHovered()
     started = ig.IsItemActivated()
+    row_id = ig.GetItemID()
     ended = ig.IsItemDeactivated()
     name != r.name && item_tip!(app, r.name; hovered = on_row)
     if r.missing && !isempty(right_text)
@@ -482,7 +585,7 @@ function draw_layer_row(app, dl, mv, r::LayerRow, k::Int, n::Int, b::Box, target
         hit("warning", something(wbox))
         item_tip!(app, r.error)
     end
-    started && (ui.drag = LayerDrag(mv.id, r.id, k, false, false))
+    started && (ui.drag = LayerDrag(row_id, mv.id, r.id, false, false))
     cur = ui.drag
     d = cur isa LayerDrag && cur.map == mv.id && cur.layer == r.id ? cur : nothing   # this row's drag, or `nothing`
     if held && d !== nothing && !d.cancelled
@@ -493,7 +596,7 @@ function draw_layer_row(app, dl, mv, r::LayerRow, k::Int, n::Int, b::Box, target
     dragged = d !== nothing && d.moved
     if ended && d !== nothing
         ui.drag = nothing
-        if d.moved && !d.cancelled && target != k && target != k + 1
+        if d.moved && !d.cancelled && target != 0 && target != k && target != k + 1
             m, id, pos = mv.id, r.id, drop_position(k, target, n)
             submit!(app, "Move layer", s -> Core.move_layer!(s, m, id, pos))
         end
@@ -595,24 +698,23 @@ function draw_opacity_row(app, dl, mv, r::LayerRow, b::Box)
     mid = centre_y(b)
     x = b.x0 + f(LAYER_INDENT)
     draw_text_mid(dl, FONT_REGULAR, LAYER_TEXT_SIZE, x, mid, u32(t.text_dim), "Opacity")
-    x += text_width(FONT_REGULAR, LAYER_TEXT_SIZE, "Opacity") + f(8)
-    k = findfirst(l -> l.id == r.id, mv.layers)
-    k === nothing && return nothing
-    stored = mv.layers[k].opacity
+    x += f(OPACITY_LABEL_W)
+    base = shown_opacity(app, mv, r.id)   # an edit still on its way shows its value
+    pending = ui.opacity_edit !== nothing && ui.opacity_edit.layer == r.id
     sb = Box(x, mid - f(8), max(x + f(SLIDER_THUMB + SLIDER_VALUE_W + 8), b.x1 - f(12)), mid + f(8))
     ig.PushID(r.id)
-    v, changed, released = slider!(app, "Opacity", sb, round(100 * stored), 0, 100;
+    value = 100 * base
+    v, changed, released = slider!(app, "Opacity", sb, value, 0, 100;
         format = v -> string(round(Int, v), " %"), step = 1)
     ig.PopID()
     ui.layer_boxes["opacity"] = Box(sb.x0, sb.y0, sb.x1 - f(SLIDER_VALUE_W + 8), sb.y1)
-    o = v / 100
-    changed && (ui.opacity_preview = o == stored ? nothing : (r.id, o))
+    same = v == value
+    changed && (ui.opacity_preview = same && !pending ? nothing : (r.id, same ? base : v / 100))
     if released
-        if o == stored
-            ui.opacity_preview = nothing
+        if same
+            ui.opacity_preview = pending ? (r.id, base) : nothing
         else
-            ui.opacity_preview = (r.id, o)
-            commit_opacity!(app, mv.id, r.id, o)
+            commit_opacity!(app, mv.id, r.id, v / 100)
         end
     end
     return nothing

@@ -208,6 +208,7 @@ function (a::AppFrame)(w::Window)
     drain!(app)
     refresh!(app)
     update_layers!(app)
+    settle_drags!(app)
     settle_opacity_preview!(app)
     settle_draw_errors!(app)
     # A bug that `user_message` meets in this frame is noted at the next `drain!`.

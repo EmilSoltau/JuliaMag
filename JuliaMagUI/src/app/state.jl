@@ -471,6 +471,18 @@ Base.@kwdef mutable struct BackstageState
 end
 
 """
+An opacity edit of the Layers tab's slider on its way: its `token` (one per release), the
+`layer` and the `value`, and the project `revision` it was done at (-1 while it is on the
+worker). The live opacity stays until a snapshot of that revision is in.
+"""
+mutable struct OpacityEdit
+    token::Int
+    layer::String
+    value::Float64
+    revision::Int
+end
+
+"""
     UiState
 
 What the UI shows and where, apart from the project data. Changed on the render thread only.
@@ -488,12 +500,13 @@ What the UI shows and where, apart from the project data. Changed on the render 
 - `colour_bars`: the shown map draws a colour bar (legend) for each coloured layer.
 - `opacity_preview`: a live opacity `(layer id, opacity)` for one layer of the shown map,
   drawn before it is set on the layer (the Layers tab sets it while its slider moves), or `nothing`.
-  `opacity_wait`: after the slider's release, the edit is on the worker (0) or done at that
-  project revision (above 0); the preview stays until a snapshot has the edit, so the map
-  never shows the old opacity for a frame. -1: no edit pending (see `settle_opacity_preview!`).
+  `opacity_edit`: the last release's edit (an `OpacityEdit`) until a snapshot has it, so the
+  map never shows the old opacity for a frame (see `settle_opacity_preview!`), or `nothing`;
+  `opacity_edits` counts the releases, for their tokens.
 - `layers_scroll`: how far the Layers tab's list is scrolled, in device pixels.
   `layer_boxes`: where the last frame drew each layer row of the Layers tab, by layer id, and
   the selected layer's opacity slider (`"opacity"`), in device pixels (tests read it).
+  `layers_cache`: the Layers tab's rows and layout for the last key (a `LayersCache`, see layers.jl).
 - `selected`: `(kind, item id, sub key)` of the selection in the Data tree, where the sub
   key is a line or channel name or `""`; or `nothing`.
 - `expanded`: the keys of expanded tree nodes (see `row_key`); `filter`: the Data tree
@@ -558,7 +571,9 @@ Base.@kwdef mutable struct UiState
     layer_selected::String = ""
     colour_bars::Bool = true
     opacity_preview::Union{Nothing,Tuple{String,Float64}} = nothing
-    opacity_wait::Int = -1
+    opacity_edit::Union{Nothing,OpacityEdit} = nothing
+    opacity_edits::Int = 0
+    layers_cache::Any = nothing
     layers_scroll::Float32 = 0f0
     layer_boxes::Dict{String,Box} = Dict{String,Box}()
     selected::Union{Nothing,Tuple{Symbol,String,String}} = nothing
@@ -728,6 +743,7 @@ function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     ms = app.map
     ms.renderer.gl === nothing || append!(ms.freed, keys(ms.entries))
     empty!(ms.entries)
+    ms.version += 1
     ms.session = s
     ms.seen = nothing
     empty!(ms.views)
@@ -737,7 +753,8 @@ function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     ms.plan_complete = false
     clear_image!(ms.renderer)
     ui.opacity_preview = nothing
-    ui.opacity_wait = -1
+    ui.opacity_edit = nothing
+    ui.layers_cache = nothing
     ui.layers_scroll = 0f0
     empty!(ui.layer_boxes)
     ui.selected = nothing

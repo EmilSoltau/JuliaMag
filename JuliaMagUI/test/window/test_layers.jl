@@ -156,6 +156,74 @@ window_testset("layers tab") do
             @test haskey(app.ui.layer_boxes, ids.lg) && te.ItemExists(layers_ref(ids.lg, "row"))
         end
 
+        @testset "a drag whose row goes away ends; a drop outside the list moves nothing (T13 review)" begin
+            # Remove the grid and bring it back, so Ctrl+Y takes it out again mid drag.
+            ctx.click(layers_ref(ids.lg, "row"))
+            ctx.click(layers_ref("Remove Layer"))
+            ctx.wait_until(() -> layer_order(app, ids.m) == [ids.ld])
+            te.MouseMoveToPos((700f0, 600f0))
+            ctx.key("Ctrl+Z")
+            ctx.wait_until(() -> layer_order(app, ids.m) == [ids.lg, ids.ld])
+            ctx.frames(2)
+            b = app.ui.layer_boxes[ids.lg]
+            te.MouseMoveToPos((b.x0 + 120, UI.centre_y(b)))
+            te.MouseDown(0)
+            te.MouseMoveToPos((b.x0 + 120, UI.centre_y(b) + 20))
+            te.MouseMoveToPos((b.x0 + 120, UI.centre_y(b) + 40))
+            ctx.frames(1)
+            @test app.ui.drag isa UI.LayerDrag
+            ctx.key("Ctrl+Y")
+            ctx.wait_until(() -> layer_order(app, ids.m) == [ids.ld])
+            ctx.frames(2)
+            te.MouseUp(0)
+            ctx.frames(2)
+            @test app.ui.drag === nothing
+            # The hover fill is back on the row under the mouse.
+            r = app.ui.layer_boxes[ids.ld]
+            te.MouseMoveToPos((r.x0 + 150, UI.centre_y(r)))
+            ctx.frames(2)
+            path = ctx.shot(joinpath(LAYERS_SHOTS, "layers-hover-light.png"))
+            fill = UI.Box(r.x0 + 200, r.y0 + 4, r.x0 + 230, r.y1 - 4)
+            @test count(p -> near(p, LIGHT.hover; tol = 0.01), shot_pixels(path, fill)) > 100
+            te.MouseMoveToPos((700f0, 600f0))
+            ctx.key("Ctrl+Z")
+            ctx.wait_until(() -> layer_order(app, ids.m) == [ids.lg, ids.ld])
+            ctx.frames(2)
+            # Dropped over the map: no move.
+            n = undo_depth(s)
+            b = app.ui.layer_boxes[ids.ld]
+            ctx.drag((b.x0 + 120, UI.centre_y(b)), (700, UI.centre_y(b) + 60); steps = 8)
+            ctx.frames(3)
+            @test undo_depth(s) == n && layer_order(app, ids.m) == [ids.lg, ids.ld] && app.ui.drag === nothing
+        end
+
+        @testset "the slider: a press without a move changes nothing; arrow keys step 1 %" begin
+            ctx.click(layers_ref(ids.ld, "row"))
+            ctx.frames(1)
+            n = undo_depth(s)
+            track = app.ui.layer_boxes["opacity"]
+            y = UI.centre_y(track)
+            te.MouseMoveToPos((track.x1 - 10, y))              # on the thumb, left of its centre
+            te.MouseDown(0)
+            ctx.frames(2)
+            te.MouseUp(0)
+            ctx.frames(3)
+            @test undo_depth(s) == n && app.snap.maps[ids.m].layers[2].opacity == 1.0
+            @test app.ui.opacity_preview === nothing
+            ctx.key("Left")
+            ctx.wait_until(() -> app.snap.maps[ids.m].layers[2].opacity == 0.99)
+            ctx.key("Left")
+            ctx.wait_until(() -> app.snap.maps[ids.m].layers[2].opacity == 0.98)
+            @test undo_depth(s) == n + 2                        # one undo step per press
+            ctx.key("Right")
+            ctx.wait_until(() -> app.snap.maps[ids.m].layers[2].opacity == 0.99)
+            te.MouseMoveToPos((700f0, 600f0))
+            for _ in 1:3
+                ctx.key("Ctrl+Z")
+            end
+            ctx.wait_until(() -> app.snap.maps[ids.m].layers[2].opacity == 1.0)
+        end
+
         @testset "the toolbar runs the map commands; the context menu too" begin
             ctx.click(layers_ref(ids.ld, "row"))
             ctx.click(layers_ref("Move Down"))

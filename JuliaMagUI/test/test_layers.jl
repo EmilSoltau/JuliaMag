@@ -2,7 +2,7 @@ using Test
 import JuliaMagCore as Core
 import JuliaMagUI as UI
 using JuliaMagUI: layer_rows, drop_position, LayerRow, commands, open_map!, settle_opacity_preview!,
-    commit_opacity!, Camera, MapViewState
+    commit_opacity!, Camera, MapViewState, shown_opacity, layers_cache, view_reason
 
 layer_cmd(app, id) = only(filter(c -> c.id == id, commands(app)))
 layer_reason(app, id) = layer_cmd(app, id).enabled(app)
@@ -151,7 +151,7 @@ end
                 @test layer_reason(app, id) == "The map's layers could not be loaded."
             end
             app.ui.layer_selected = l1
-            @test layer_reason(app, "map.zoom_layer") == "The map's layers could not be loaded."
+            @test layer_reason(app, "map.zoom_layer") == "The folder of $db is missing."   # the layer's own reason
             Core.set_layer!(s, m, l1; visible = false); Core.set_layer!(s, m, l2; visible = false)
             refresh_now!(app)
             @test layer_reason(app, "map.full_extent") == "Every layer of the map is hidden."
@@ -197,6 +197,75 @@ end
             app.ui.opacity_preview = (l, 0.2)
             open_map!(app, m2)
             @test app.ui.opacity_preview === nothing && app.ui.layer_selected == ""
+        end
+    end
+
+    @testset "Zoom to Layer says why a layer cannot be zoomed to (T13 review)" begin
+        s = fresh_session(); ok = survey_database!(s); gone = survey_database!(s); bad = survey_database!(s)
+        Core.rename_item!(s, bad, "North block")
+        empty_db = survey_database!(s; lines = 1, nan_line = 1)
+        m = Core.new_map!(s)
+        lok = Core.add_layer!(s, m, ok); lgone = Core.add_layer!(s, m, gone); lbad = Core.add_layer!(s, m, bad)
+        lnan = Core.add_layer!(s, m, empty_db); lhid = Core.add_layer!(s, m, ok)
+        Core.set_layer!(s, m, lhid; visible = false)
+        Core.remove_item!(s, gone)
+        Core.delete_channel!(s, bad, "MAG")
+        with_app(test_app_state(s)) do app
+            refresh_now!(app); app.ui.current_map = m
+            wait_layers(app)
+            give(id) = (app.ui.layer_selected = id; layer_reason(app, "map.zoom_layer"))
+            @test give(lgone) == "The layer's item is not in the project."
+            @test give(lbad) == "Channel MAG is not in North block."
+            @test give(lnan) == "The layer has nothing to draw."
+            @test give(lhid) == "The layer is hidden."
+            @test give(lok) == "The map is still loading."   # no camera: the view has not drawn
+            # The loader's own text for a removed item names no id (T13 review).
+            e = only(e for e in values(app.map.entries) if e.key.item == gone)
+            @test e.error == "The layer's item is not in the project."
+        end
+    end
+
+    @testset "a map that cannot be read gives its own error as the reason" begin
+        s = fresh_session(); m = Core.new_map!(s)
+        write(joinpath(s.project.folder, "maps", m, "map.json"), "{ not json")
+        with_app(test_app_state(s)) do app
+            refresh_now!(app); app.ui.current_map = m
+            err = app.snap.maps[m].error
+            @test !isempty(err) && view_reason(app) == err
+        end
+    end
+
+    @testset "opacity edits: each release has its own token; the slider shows the pending value" begin
+        s = fresh_session(); db = survey_database!(s)
+        m = Core.new_map!(s); l = Core.add_layer!(s, m, db)
+        with_app(test_app_state(s)) do app
+            refresh_now!(app); app.ui.current_map = m; app.ui.layer_selected = l
+            mv = app.snap.maps[m]
+            @test shown_opacity(app, mv, l) == 1.0
+            commit_opacity!(app, m, l, 0.4)
+            commit_opacity!(app, m, l, 0.3)                   # a second release before the first is in
+            @test app.ui.opacity_preview == (l, 0.3) && shown_opacity(app, mv, l) == 0.3
+            wait_drained(app)
+            @test app.ui.opacity_edit.token == 2 && app.ui.opacity_edit.revision == Core.revision(s)
+            settle_opacity_preview!(app)
+            @test app.ui.opacity_preview == (l, 0.3)          # the snapshot is still the old one
+            refresh_now!(app); settle_opacity_preview!(app)
+            @test app.ui.opacity_preview === nothing && app.ui.opacity_edit === nothing
+            @test app.snap.maps[m].layers[1].opacity == 0.3
+        end
+    end
+
+    @testset "the rows are cached until the snapshot or a load changes" begin
+        s = fresh_session(); db = survey_database!(s); m = Core.new_map!(s); Core.add_layer!(s, m, db)
+        with_app(test_app_state(s)) do app
+            refresh_now!(app); app.ui.current_map = m
+            mv = app.snap.maps[m]
+            c1 = layers_cache(app, mv)
+            @test layers_cache(app, mv).rows === c1.rows && only(c1.rows).loading
+            @test (@allocated layers_cache(app, mv)) == 0
+            wait_layers(app)
+            c2 = layers_cache(app, mv)
+            @test !only(c2.rows).loading                      # a load came back: built again
         end
     end
 end

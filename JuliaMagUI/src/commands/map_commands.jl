@@ -17,6 +17,8 @@ const MAP_LOADING = "The map is still loading."
 const MAP_FAILED = "The map's layers could not be loaded."
 const MAP_HIDDEN = "Every layer of the map is hidden."
 const MAP_NO_DATA = "The map's layers have nothing to draw."
+const LAYER_HIDDEN = "The layer is hidden."
+const LAYER_NO_DATA = "The layer has nothing to draw."
 const LAYER_AT_TOP = "The layer is at the top."
 const LAYER_AT_BOTTOM = "The layer is at the bottom."
 # "The current point is not on this map." is `NOT_ON_MAP_TEXT` (overlays.jl), as the nav button says.
@@ -86,25 +88,25 @@ end
 
 map_reason(app) = last(map_target(app))
 
-# A view move needs a camera: the map has layers and its first data is in. Without a camera,
-# the reason comes from the layer states the Layers tab shows (`layer_status`): every layer
-# hidden; a visible layer still loading, or one with an extent (the view places the camera in
-# its next frame); every visible layer failed (its item missing, or its load gave an error and
-# no data); else the data that came has no point to place (all values missing).
+# A view move needs a camera: the map has layers and its first data is in. A map that could
+# not be read gives its own error, as the Layers tab shows it. Without a camera, the reason
+# comes from the layer states the Layers tab shows (`layers_cache`): every layer hidden; a
+# visible layer still loading, or one with an extent (the view places the camera in its next
+# frame); every visible layer failed (its item missing, or its load gave an error and no
+# data); else the data that came has no point to place (all values missing).
 function view_reason(app)
     mv, why = map_target(app)
     why === nothing || return why
+    isempty(mv.error) || return mv.error
     isempty(mv.layers) && return NEED_MAP_LAYERS
     last(shown_view(app)) === nothing || return nothing
-    any(l -> l.visible, mv.layers) || return MAP_HIDDEN
-    snap, entries = app.snap, app.map.entries
+    c = layers_cache(app, mv)
+    any(r -> r.visible, c.rows) || return MAP_HIDDEN
     failed = true
-    for l in mv.layers
-        l.visible || continue
-        st = layer_status(snap, mv, l, entries)
-        st.loading && return MAP_LOADING
-        layer_extent(get(entries, layer_key(snap, mv, l), nothing)) === nothing || return MAP_LOADING
-        failed &= st.failed
+    for (k, r) in enumerate(c.rows)
+        r.visible || continue
+        (r.loading || c.extent[k]) && return MAP_LOADING
+        failed &= c.failed[k]
     end
     return failed ? MAP_FAILED : MAP_NO_DATA
 end
@@ -115,8 +117,22 @@ function layer_reason(app)
     return selected_layer(app, mv) === nothing ? NEED_LAYER : nothing
 end
 
-# Zoom to Layer: a selected layer, and a camera to move.
-zoom_layer_reason(app) = something(layer_reason(app), view_reason(app), Some(nothing))
+# Zoom to Layer: a selected layer with something to fit, and a camera to move. A hidden layer,
+# one whose item is missing or whose load failed (its own error), and one whose data has no
+# extent say so; a layer still loading waits with the map.
+function zoom_layer_reason(app)
+    why = layer_reason(app)
+    why === nothing || return why
+    c = layers_cache(app, shown_map(app)::MapView)
+    k = findfirst(r -> r.id == app.ui.layer_selected, c.rows)
+    if k !== nothing
+        r = c.rows[k]
+        r.visible || return LAYER_HIDDEN
+        (r.missing || c.failed[k]) && return r.error
+        r.loading || c.extent[k] || return LAYER_NO_DATA
+    end
+    return view_reason(app)
+end
 
 # Move Up and Move Down: a selected layer that is not at the top (or the bottom) already.
 function move_reason(app, up::Bool)
@@ -177,7 +193,7 @@ function open_map!(app, id::AbstractString)
     app.ui.current_map = String(id)
     app.ui.layer_selected = ""
     app.ui.opacity_preview = nothing
-    app.ui.opacity_wait = -1
+    app.ui.opacity_edit = nothing
     return nothing
 end
 
