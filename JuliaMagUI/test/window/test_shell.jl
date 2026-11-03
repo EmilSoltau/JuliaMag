@@ -338,7 +338,7 @@ window_testset("shell") do
                 vp = unsafe_load(ig.GetMainViewport())
                 b = UI.Box(0, 0, vp.Size.x, UI.px(w, UI.HEADER_H))
                 layout[] = UI.header_layout(b, w.scale, UI.text_width, UI.header_title(app),
-                    length(UI.QAT))
+                    length(UI.QAT); doc = UI.header_doc(app))
             end)
             l = layout[]
             @test l.title === nothing && !l.pill_round

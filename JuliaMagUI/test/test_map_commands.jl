@@ -228,7 +228,7 @@ end
             show_on_map!(app, g)
             ext = UI.grid_extent(app.map.entries[UI.layer_key(app.snap, app.snap.maps[m], only(l for l in app.snap.maps[m].layers if l.id == lg))].data.geo)
             @test app.ui.layer_selected == lg
-            @test st.camera == UI.fit_inner(ext, 800, 600, UI.px(1, UI.BAND))
+            @test st.camera == UI.view_camera(app, app.snap.maps[m], ext, 800, 600)
             @test st.history.past == [Camera(0.0, 0.0, 1.0)]
         end
     end
@@ -300,9 +300,10 @@ end
             @test st.camera == Camera(a.cx, a.cy, 1.0) && st.history.past == [a]
             run!(app, "map.zoom_out")
             @test st.camera == a && length(st.history.past) == 2
-            # Full Extent fits the inner box: the view less the coordinate bands.
+            # Full Extent fits the inner box: the view less the coordinate bands, clear of the scale bar and the legend.
             run!(app, "map.full_extent")
-            full = UI.fit_inner(ext, 800, 600, UI.px(1, UI.BAND))
+            full = UI.view_camera(app, app.snap.maps[m], ext, 800, 600)
+            @test full == UI.fit_clear(ext, 800, 600, UI.px(1, UI.BAND), UI.overlay_corners(app, app.snap.maps[m]))
             @test st.camera == full && length(st.history.past) == 3
             @test reason(app, "map.next_extent") == "There is no later extent."
             run!(app, "map.prev_extent"); @test st.camera == a

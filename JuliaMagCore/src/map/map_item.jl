@@ -236,13 +236,20 @@ end
 
 The channel a new line layer colours by: the first channel in database order that
 is numeric, not an array, not an axis of `pair`, and has role none, Z or
-elevation. `""` when there is none.
+elevation. A fiducial channel (`FIDUCIAL`, `FID`, `FIDUCIAL_`) counts only when no other
+channel does: it only counts up along each line. `""` when there is none.
 """
 function default_colour_channel(db::LineDatabase, pair::PositionPair)::String
+    fid = ""
     for c in db.channels
         (c.eltype <: Number && c.arraylen == 1) || continue
         (c.name == pair.x || c.name == pair.y) && continue
-        c.role in (ROLE_NONE, ROLE_Z, ROLE_ELEVATION) && return c.name
+        c.role in (ROLE_NONE, ROLE_Z, ROLE_ELEVATION) || continue
+        if uppercase(c.name) in FIDUCIAL_NAMES
+            isempty(fid) && (fid = c.name)
+            continue
+        end
+        return c.name
     end
-    return ""
+    return fid
 end

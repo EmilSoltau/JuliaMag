@@ -42,8 +42,8 @@ function show_map!(ctx, app, m; timeout = 5)
 end
 
 view_state(app) = app.map.views[app.ui.current_map]
-# The full extent camera of map `m`: inside the coordinate bands.
-full_camera(app, m, w, h) = UI.fit_inner(UI.map_extent(app, app.snap.maps[m]), w, h, UI.px(app.window.scale, UI.BAND))
+# The full extent camera of map `m`: inside the coordinate bands, clear of the legends.
+full_camera(app, m, w, h) = UI.view_camera(app, app.snap.maps[m], UI.map_extent(app, app.snap.maps[m]), w, h)
 view_size(app) = (round(Int, UI.width(app.map.view)), round(Int, UI.height(app.map.view)))
 view_point(app, x, y) = (app.map.view.x0 + x, app.map.view.y0 + y)   # device px of a view point
 
@@ -105,6 +105,35 @@ window_testset("map view") do
             ctx.key("Home")
             ctx.frames(2)
             @test st.camera == full_camera(app, ids.m, w, h)
+        end
+
+        @testset "the camera follows the full extent until the view moves" begin
+            @test st.fitted == st.camera
+            # A new UI scale fits again: the bands and the panes change size.
+            ctx.on_render(win -> UI.set_scale!(win, 1.5f0))
+            ctx.frames(3)
+            @test view_size(app) != (w, h) && st.camera == full_camera(app, ids.m, view_size(app)...)
+            ctx.on_render(win -> UI.set_scale!(win, 1f0))
+            ctx.frames(3)
+            @test view_size(app) == (w, h) && st.camera == full_camera(app, ids.m, w, h)
+            # Colour Bars off: no legend to keep clear of.
+            ctx.on_render(win -> (app.ui.colour_bars = false))
+            ctx.frames(2)
+            @test st.camera == UI.fit_inner(UI.map_extent(app, app.snap.maps[ids.m]), w, h, UI.px(1, UI.BAND))
+            ctx.on_render(win -> (app.ui.colour_bars = true))
+            ctx.frames(2)
+            # Once the view moves, a new scale keeps the camera, and the history has no fits.
+            ctx.click("JuliaMag/mapnav/zoom_in")
+            ctx.frames(1)
+            c, n = st.camera, length(st.history.past)
+            ctx.on_render(win -> UI.set_scale!(win, 1.5f0))
+            ctx.frames(3)
+            @test st.camera == c && length(st.history.past) == n
+            ctx.on_render(win -> UI.set_scale!(win, 1f0))
+            ctx.frames(3)
+            ctx.key("Home")
+            ctx.frames(2)
+            @test st.camera == full_camera(app, ids.m, w, h) && st.fitted == st.camera
         end
 
         @testset "Shift and a drag zoom to the box" begin

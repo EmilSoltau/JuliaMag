@@ -6,6 +6,7 @@
 const BAND = 20          # the coordinate bands along the top and left edges
 const TICK = 6           # tick length
 const TICK_GAP = 90      # the least space between ticks
+const LABEL_END = 6      # tick labels keep this far from the ends of their band
 const EDGE = 10          # overlays sit this far in from the edges (and the bands)
 const NAV_SIZE = 26
 const NAV_GAP = 4
@@ -74,7 +75,7 @@ function draw_coordinate_bands(app, dl, b::Box, cam::Camera)
     s = app.window.scale
     t = app.tokens
     hl = hairline(s)
-    band, tick = px(s, BAND), px(s, TICK)
+    band, tick, room = px(s, BAND), px(s, TICK), px(s, LABEL_END)
     w, h = width(b), height(b)
     ix, iy = b.x0 + band, b.y0 + band
     fill = u32(t.ribbon, OVERLAY_ALPHA)
@@ -95,7 +96,7 @@ function draw_coordinate_bands(app, dl, b::Box, cam::Camera)
         text = coord_text(v, step)
         tw = text_width(FONT_REGULAR, 10.5, text)
         x0 = x - tw / 2
-        (x0 >= ix && x0 + tw <= b.x1) || continue   # a tick only with its label
+        (x0 >= ix + room && x0 + tw <= b.x1 - room) || continue   # a tick only with its label
         ig.AddRectFilled(dl, (x, iy - hl - tick), (x + hl, iy - hl), col)
         draw_text_mid(dl, FONT_REGULAR, 10.5, x0, label_mid, col, text)
     end
@@ -107,7 +108,7 @@ function draw_coordinate_bands(app, dl, b::Box, cam::Camera)
         y = rnd(b.y0 + world_to_screen(cam, w, h, 0.0, v)[2])
         text = coord_text(v, step)
         tw = text_width(FONT_REGULAR, 10.5, text)
-        (y - tw / 2 >= iy && y + tw / 2 <= b.y1) || continue   # a tick only with its label
+        (y - tw / 2 >= iy + room && y + tw / 2 <= b.y1 - room) || continue   # a tick only with its label
         ig.AddRectFilled(dl, (ix - hl - tick, y), (ix - hl, y + hl), col)
         # Drawn inside the view, where the clip rectangle keeps every glyph, then turned into the band.
         x0 = rnd(ix + px(s, 1))
@@ -219,7 +220,7 @@ function draw_nav_buttons(app, b::Box, mv, st::MapViewState)
                 zoom_by!(st, 1 / ZOOM_STEP)
             elseif id == "full_extent"
                 ext = map_extent(app, mv)
-                ext === nothing || full_extent!(st, ext, vw, vh; inset = px(s, BAND))
+                ext === nothing || full_extent!(st, ext, vw, vh; inset = px(s, BAND), corners = overlay_corners(app, mv))
             elseif target !== nothing
                 go_to!(st, target)
             end
@@ -332,8 +333,7 @@ function draw_legends(app, dl, b::Box, mv)
         legend = legend_of(app, p)
         legend === nothing && continue
         title, units, d = legend
-        empty = d.hist.total == 0
-        h = 2hairline(s) + f(6 + 13.75 + 4 + (empty ? 13 : 10 + 2 + 13) + 5)
+        h = legend_height(s, d)
         card = Box(x1 - f(LEGEND_W), bottom - h, x1, bottom)
         push!(app.map.overlay_boxes, (:legend, snap(card)))
         draw_legend(app, dl, card, p, title, units, d)
@@ -342,18 +342,63 @@ function draw_legends(app, dl, b::Box, mv)
     return nothing
 end
 
-# The title, the units text and the data of a coloured layer's legend, or `nothing`.
-function legend_of(app, p)
+# The height of a legend card of the data `d`: a line less when it has no values.
+legend_height(s::Real, d)::Float32 = 2hairline(s) + fpx(s, 6 + 13.75 + 4 + (d.hist.total == 0 ? 13 : 10 + 2 + 13) + 5)
+
+# The data of a layer that has a legend card (a coloured layer with data), or `nothing`.
+function legend_data(p)
     e = p.entry
     (e === nothing || e.data === nothing) && return nothing
     d = e.data
     isempty(d.levels) && return nothing
+    p.layer.kind == :lines && isempty(p.layer.channel) && return nothing
+    return d
+end
+
+"""
+    overlay_corners(app, mv) -> NTuple{2,NTuple{2,Float64}}
+
+The room of the overlays at the bottom corners of map view `mv`, for `fit_clear`: the scale bar
+at the left, from the band, as wide as its longest bar; the legend cards at the right
+(`legend_room`). Device pixels.
+"""
+function overlay_corners(app, mv)::NTuple{2,NTuple{2,Float64}}
+    s = app.window === nothing ? 1 : app.window.scale
+    hl = hairline(s)
+    bar = (Float64(fpx(s, EDGE + SCALE_TARGET + 16) + 2hl), Float64(fpx(s, EDGE + 4 + 13.75 + 2 + 6 + 3) + 2hl))
+    return (bar, legend_room(app, mv))
+end
+
+"""
+    legend_room(app, mv) -> NTuple{2,Float64}
+
+The width and height in device pixels that the legend cards of map view `mv` take at the
+bottom right of the view, from its edges; `(0.0, 0.0)` when it has none or Colour Bars is off.
+`fit_clear` keeps the full extent out of it (`overlay_corners`).
+"""
+function legend_room(app, mv)::NTuple{2,Float64}
+    app.ui.colour_bars || return (0.0, 0.0)
+    refresh_plan!(app.map, app, mv)
+    s = app.window === nothing ? 1 : app.window.scale
+    h = 0.0
+    for p in app.map.plan
+        d = legend_data(p)
+        d === nothing && continue
+        h += legend_height(s, d) + fpx(s, 6)
+    end
+    h == 0 && return (0.0, 0.0)
+    return (Float64(fpx(s, LEGEND_W + EDGE)), h - fpx(s, 6) + fpx(s, EDGE))
+end
+
+# The title, the units text and the data of a coloured layer's legend, or `nothing`.
+function legend_of(app, p)
+    d = legend_data(p)
+    d === nothing && return nothing
     snap = app.snap
     k = findfirst(it -> it.id == p.layer.item, snap.items)
     name = k === nothing ? p.layer.item : snap.items[k].name
     units = ""
     if p.layer.kind == :lines
-        isempty(p.layer.channel) && return nothing
         name = string(name, ": ", p.layer.channel)
         v = get(snap.databases, p.layer.item, nothing)
         if v !== nothing

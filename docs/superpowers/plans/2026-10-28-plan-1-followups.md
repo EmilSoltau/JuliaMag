@@ -112,6 +112,21 @@ These were out of scope for the UI shell.
 - With three sticky toasts open, a new ordinary toast is dropped at once (`add_toast!`).
   The user then sees no toast for their action while three errors stay.
 
+## Left for later from plan 4a
+
+These were out of scope for the map view (plan 4a).
+
+- Measure and identify tools, Oasis keyboard shortcuts (P, B, Z, X, F, S, L, O), a log colour scale, contours, layouts and printing, map export, bookmarks, auto recolour to the view, a dots mode at high zoom, direction arrows on lines.
+- Reprojecting a grid on the fly to the map's coordinate system (lines are reprojected; a grid in another system draws as it is, with a layer warning).
+- Changing a map's coordinate system (needs the coordinate system picker of plan 4c).
+- "Add to current map" in tool dialogs for tool outputs (spec 8.2): no tool makes a grid or database yet.
+- "Save as grid default" from a grid layer's own style (spec 13.4); the core has `set_grid_style!` for it.
+- Line width above 1 px and a highlighted selected line (core profile OpenGL draws 1 px lines; thick lines need quads).
+- Mid-gesture redraws while panning far on a slow renderer (the gap shows `canvas` until the gesture settles).
+- Several maps side by side, view tabs and split views (plan 4b brings the other views).
+- Stored line levels and grid overviews next to the data, if loads of 50 M points need them.
+- A GPU memory budget with eviction for several large grids.
+
 ## Checks on real systems
 
 - Plan 3: on Windows, check the job start and end times in the Jobs tab and the job records (T12-P3).
@@ -134,6 +149,10 @@ These were out of scope for the UI shell.
 - Windows: call `GetLastError` right after `OpenProcess`, so the pid check reads the right error.
 - Windows: renaming a lock file that another program holds open without share-delete gives a raw `IOError`.
 - Windows: rename and read failures in `take_over!` escape as raw errors.
+- Windows: run `bench/map_frame.jl` on the target laptops (Intel iGPU, NVIDIA, AMD) and record `GL_RENDERER`, `GL_MAX_TEXTURE_SIZE`, frame times at 1080p and at 4K with scale 1.5, upload times per batch and per tile, and VRAM in Task Manager.
+- Windows: undo, append, rename and delete of a channel while its map layer loads (the loader holds files open with plain reads for a short time).
+- Windows: frame time p95 while a 20 M point layer and a 10k by 10k grid load (GC pauses).
+- Windows: the CPU fallback on a machine whose driver lacks `GL_R32F` or a complete float framebuffer.
 - Plan 5: `thrown_by_juliamag` (`app/worker.jl`) compares the first frame's file with `SOURCE_DIR` and `pathof(JuliaMagCore)`.
   In a packaged or relocated build the debug paths can differ.
   Then every JuliaMag `ArgumentError` would count as a bug.

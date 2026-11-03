@@ -66,7 +66,8 @@ function shown_view(app)
     return mv, st
 end
 
-# The coordinate bands that Full Extent and Zoom to Layer fit inside, in device pixels.
+# The coordinate bands that Full Extent and Zoom to Layer fit inside, in device pixels. They
+# also keep clear of the scale bar and the legend cards (`overlay_corners`).
 band_inset(app) = px(app.window === nothing ? 1 : app.window.scale, BAND)
 
 # The extent of the loaded data of layer `id` of the shown map `mv`, or `nothing`.
@@ -354,7 +355,7 @@ function full_extent_now!(app)
     mv, st = shown_view(app)
     st === nothing && return nothing
     ext = map_extent(app, mv)
-    ext === nothing || full_extent!(st, ext, st.size...; inset = band_inset(app))
+    ext === nothing || full_extent!(st, ext, st.size...; inset = band_inset(app), corners = overlay_corners(app, mv))
     return nothing
 end
 
@@ -367,7 +368,7 @@ function zoom_to_layer!(app)
     l = selected_layer(app, mv)
     l === nothing && return nothing
     ext = shown_layer_extent(app, mv, l.id)
-    ext === nothing || zoom_layer!(st, ext, st.size...; inset = band_inset(app))
+    ext === nothing || zoom_layer!(st, ext, st.size...; inset = band_inset(app), corners = overlay_corners(app, mv))
     return nothing
 end
 

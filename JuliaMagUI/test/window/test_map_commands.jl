@@ -7,10 +7,11 @@ using JuliaMagUI: Camera, THEME_LIGHT, THEME_DARK, LIGHT, DARK
 
 const MAP_TAB_SHOTS = joinpath(@__DIR__, "..", "shots")
 
-# The full extent camera of the shown map: inside the coordinate bands.
+# The full extent camera of the shown map: inside the coordinate bands, clear of the legends.
 function shown_full_camera(app)
     st = app.map.views[app.ui.current_map]
-    return UI.fit_inner(UI.map_extent(app, app.snap.maps[app.ui.current_map]), st.size..., UI.px(app.window.scale, UI.BAND))
+    mv = app.snap.maps[app.ui.current_map]
+    return UI.view_camera(app, mv, UI.map_extent(app, mv), st.size...)
 end
 
 window_testset("map commands") do

@@ -3,6 +3,7 @@
 JuliaMag is a tool for processing airborne magnetic data.
 The processing lives in `JuliaMagCore`, a headless Julia package.
 The desktop app is `JuliaMagUI`, a window on top of the core (see `JuliaMagUI/README.md`).
+The app shows survey lines and grids on maps, drawn with the graphics card or on the CPU.
 
 ## Run the app
 

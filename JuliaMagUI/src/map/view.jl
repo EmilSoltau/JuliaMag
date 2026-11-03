@@ -7,6 +7,10 @@
 The view of one map. Changed on the render thread only.
 
 - `camera`: `nothing` until the first layer has an extent; then the full extent.
+- `fitted`: the camera the full extent last gave (the first camera, Full Extent), or `nothing`.
+  While the camera is still that one, it follows the full extent (`view_camera`): data that
+  comes in later, a new size or scale, and the legends showing or not fit it again. Any other
+  move of the view ends that; Full Extent starts it again.
 - `history`: the extents to go back and forward to.
 - `gesture`: `:none`, `:pan` (a left or middle drag), `:box` (a Shift and left drag) or `:wheel`.
 - `before`: the camera when the gesture started, until the gesture has settled.
@@ -20,6 +24,7 @@ The view of one map. Changed on the render thread only.
 """
 mutable struct MapViewState
     camera::Union{Nothing,Camera}
+    fitted::Union{Nothing,Camera}
     history::ExtentHistory
     gesture::Symbol
     before::Union{Nothing,Camera}
@@ -34,7 +39,7 @@ mutable struct MapViewState
 end
 
 MapViewState(camera::Union{Nothing,Camera} = nothing) =
-    MapViewState(camera, ExtentHistory(), :none, nothing, (0.0, 0.0), (0f0, 0f0), false, false, 0.0,
+    MapViewState(camera, nothing, ExtentHistory(), :none, nothing, (0.0, 0.0), (0f0, 0f0), false, false, 0.0,
                  nothing, (0, 0), (0f0, 0f0))
 
 """
@@ -207,24 +212,72 @@ function fit_inner(ext::NTuple{4,Float64}, w, h, inset)::Camera
 end
 
 """
-    full_extent!(st, ext, w, h; inset = 0)
+    fit_clear(ext, w, h, inset, corners) -> Camera
+
+`fit_inner`, kept clear of the overlays at the bottom corners of the view: `corners =
+(left, right)`, each `(width, height)` in device pixels, the left one from the band (the scale
+bar), the right one from the right edge (the legend cards); `(0.0, 0.0)` is none. When the
+extent fitted inside the bands reaches into one of them, it fits instead into the largest of
+these that keeps it clear: left of the right box, right of the left box, between them, or above
+both.
+"""
+function fit_clear(ext::NTuple{4,Float64}, w, h, inset, corners::NTuple{2,NTuple{2,Float64}})::Camera
+    (lw, lh), (rw, rh) = corners
+    best = fit_inner(ext, w, h, inset)
+    keeps_clear(best, ext, w, h, inset, corners) && return best
+    best = fit_box(ext, w, h, (inset, inset, w, h - max(lh, rh)))   # above both: always clear
+    for b in ((inset, inset, w - rw, h), (inset + lw, inset, w, h), (inset + lw, inset, w - rw, h))
+        c = fit_box(ext, w, h, b)
+        c.res < best.res && keeps_clear(c, ext, w, h, inset, corners) && (best = c)
+    end
+    return best
+end
+
+# Does `ext` under camera `c` keep out of the corner boxes of `fit_clear`?
+function keeps_clear(c::Camera, ext::NTuple{4,Float64}, w, h, inset, corners::NTuple{2,NTuple{2,Float64}})::Bool
+    x0, y1 = world_to_screen(c, w, h, ext[1], ext[2])   # the bottom left of the extent
+    x1, _ = world_to_screen(c, w, h, ext[3], ext[2])
+    (lw, lh), (rw, rh) = corners
+    meets(bx0, bx1, by0) = bx1 > bx0 && by0 < h && x1 > bx0 && x0 < bx1 && y1 > by0
+    return !meets(inset, inset + lw, h - lh) && !meets(w - rw, w, h - rh)
+end
+
+const NO_CORNERS = ((0.0, 0.0), (0.0, 0.0))
+
+# `fit_extent` into the box `(x0, y0, x1, y1)` (view px) of a `w` by `h` view, centred in it.
+function fit_box(ext::NTuple{4,Float64}, w, h, b)::Camera
+    c = fit_extent(ext, max(b[3] - b[1], 1), max(b[4] - b[2], 1))
+    return Camera(c.cx - ((b[1] + b[3]) / 2 - w / 2) * c.res, c.cy + ((b[2] + b[4]) / 2 - h / 2) * c.res, c.res)
+end
+
+"""
+    full_extent!(st, ext, w, h; inset = 0, corners = NO_CORNERS)
 
 Fit the extent `ext` of all the map's layers into a view of `w` by `h` device pixels, inside
-`inset` px of coordinate bands at the left and top (`fit_inner`). Records one extent (none for
-the first camera).
+`inset` px of coordinate bands at the left and top and clear of the `corners` boxes at the
+bottom (`fit_clear`). Records one extent (none for the first camera). The camera follows the
+full extent from now on (`fitted`).
 """
-function full_extent!(st::MapViewState, ext::NTuple{4,Float64}, w, h; inset::Real = 0)
+function full_extent!(st::MapViewState, ext::NTuple{4,Float64}, w, h; inset::Real = 0,
+                      corners::NTuple{2,NTuple{2,Float64}} = NO_CORNERS)
     record_command!(st)
-    st.camera = fit_inner(ext, w, h, inset)
+    st.camera = fit_clear(ext, w, h, inset, corners)
+    st.fitted = st.camera
     return nothing
 end
 
 """
-    zoom_layer!(st, ext, w, h; inset = 0)
+    zoom_layer!(st, ext, w, h; inset = 0, corners = NO_CORNERS)
 
-Fit the extent `ext` of one layer, as `full_extent!` does. Records one extent.
+Fit the extent `ext` of one layer, as `full_extent!` does, but the camera does not follow the
+full extent. Records one extent.
 """
-zoom_layer!(st::MapViewState, ext::NTuple{4,Float64}, w, h; inset::Real = 0) = full_extent!(st, ext, w, h; inset)
+function zoom_layer!(st::MapViewState, ext::NTuple{4,Float64}, w, h; inset::Real = 0,
+                     corners::NTuple{2,NTuple{2,Float64}} = NO_CORNERS)
+    record_command!(st)
+    st.camera = fit_clear(ext, w, h, inset, corners)
+    return nothing
+end
 
 """
     zoom_by!(st, factor)
@@ -288,6 +341,15 @@ function map_extent(app, mv)::Union{Nothing,NTuple{4,Float64}}
     return any(isnan, ext) ? nothing : ext
 end
 
+"""
+    view_camera(app, mv, ext, w, h) -> Camera
+
+The camera that fits `ext` into a `w` by `h` view of map view `mv`: inside the coordinate bands
+and clear of the scale bar and the legend cards (`fit_clear`, `overlay_corners`).
+"""
+view_camera(app, mv, ext::NTuple{4,Float64}, w, h)::Camera =
+    fit_clear(ext, w, h, px(app.window === nothing ? 1 : app.window.scale, BAND), overlay_corners(app, mv))
+
 "The extent of an entry's data: the good points of a line layer, the corners of a grid; `nothing` for none."
 function layer_extent(e)::Union{Nothing,NTuple{4,Float64}}   # e: a LayerEntry or nothing
     e === nothing && return nothing
@@ -347,7 +409,8 @@ that takes the mouse for `step_view!`, the map image, then the overlays (`draw_o
 A click (a `:pick`) moves the shared cursor (`pick_cursor!`); while the mouse is over the
 view, `map_hover` reads what is under it for the status bar.
 The map image is the last full picture (`draw_map_image`); a full GL picture is drawn by
-this frame's GL pass. The camera starts at the full extent once a layer has an extent. A map
+this frame's GL pass. The camera starts at the full extent once a layer has an extent, and
+follows it until the view moves (`fitted`). A map
 with no layers says so. The keys (`Home` for Full Extent) are the map commands' (map_commands.jl).
 """
 function draw_map_view(app, dl, b::Box)
@@ -370,9 +433,14 @@ function draw_map_view(app, dl, b::Box)
     refresh_plan!(ms, app, mv)   # the overlays read the plan of this map
     vw, vh = round(Int, width(b)), round(Int, height(b))
     st = get!(MapViewState, ms.views, mv.id)
-    if st.camera === nothing && vw > 0 && vh > 0
+    # Until the view moves, the camera follows the full extent: of the data in so far, at this
+    # size and scale, clear of the legends.
+    if (st.camera === nothing || st.camera == st.fitted) && vw > 0 && vh > 0
         ext = map_extent(app, mv)
-        ext === nothing || (st.camera = fit_inner(ext, vw, vh, px(w.scale, BAND)))
+        if ext !== nothing
+            st.camera = view_camera(app, mv, ext, vw, vh)
+            st.fitted = st.camera
+        end
     end
     ig.SetCursorScreenPos((b.x0, b.y0))
     lib.igSetNextItemAllowOverlap()   # the nav buttons on top take the mouse over themselves

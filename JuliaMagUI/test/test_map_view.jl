@@ -112,6 +112,45 @@ end
         @test st.camera == UI.fit_inner(ext, w, h, inset)
     end
 
+    @testset "the full extent keeps clear of the scale bar and the legend cards" begin
+        w, h, inset = 1000, 600, 20
+        right = (248.0, 150.0)                 # the legend cards, from the right edge
+        bar = (160.0, 100.0)                   # the scale bar, from the band
+        legends = ((0.0, 0.0), right)
+        both = (bar, right)
+        inside(c, e, box) = all(box[1] - 1e-6 <= world_to_screen(c, w, h, x, y)[1] <= box[3] + 1e-6 &&
+                                box[2] - 1e-6 <= world_to_screen(c, w, h, x, y)[2] <= box[4] + 1e-6
+                                for x in (e[1], e[3]), y in (e[2], e[4]))
+        # A wide extent would reach under the cards: it fits above them, where it shows larger
+        # (1120 / 430 world units per pixel) than left of them (2240 / 732).
+        wide = (0.0, 0.0, 2000.0, 1000.0)
+        c = UI.fit_clear(wide, w, h, inset, legends)
+        @test c.res ≈ 1120 / 430
+        @test inside(c, wide, (inset, inset, w, h - right[2]))
+        # A tall one fits left of them.
+        tall = (0.0, 0.0, 1300.0, 900.0)
+        c = UI.fit_clear(tall, w, h, inset, legends)
+        @test c.res ≈ 1300 * 1.12 / (w - right[1] - inset)
+        @test inside(c, tall, (inset, inset, w - right[1], h))
+        # With the scale bar too, left of the cards would meet the bar, and right of the bar
+        # the cards: it fits between the two (1456 / 572), larger than above both (1120 / 430).
+        deep = (0.0, 0.0, 1300.0, 1000.0)
+        @test UI.fit_clear(deep, w, h, inset, legends).res ≈ 1456 / 732
+        c = UI.fit_clear(deep, w, h, inset, both)
+        @test c.res ≈ 1456 / 572
+        @test inside(c, deep, (inset + bar[1], inset, w - right[1], h))
+        # One that leaves room beside the boxes, or no boxes: the plain fit.
+        narrow = (0.0, 0.0, 300.0, 1000.0)
+        @test UI.fit_clear(narrow, w, h, inset, both) == UI.fit_inner(narrow, w, h, inset)
+        @test UI.fit_clear(wide, w, h, inset, UI.NO_CORNERS) == UI.fit_inner(wide, w, h, inset)
+        # Full Extent and Zoom to Layer take the boxes; only Full Extent is followed.
+        st = MapViewState(nothing)
+        full_extent!(st, wide, w, h; inset, corners = both)
+        @test st.camera == UI.fit_clear(wide, w, h, inset, both) && st.fitted == st.camera
+        zoom_layer!(st, tall, w, h; inset, corners = both)
+        @test st.camera == UI.fit_clear(tall, w, h, inset, both) && st.fitted != st.camera
+    end
+
     @testset "Review Focus 4: a pan while the window resizes" begin
         st = MapViewState(Camera(500_000.0, 7_000_000.0, 3.0))
         step_view!(st, idle_input(0.0))

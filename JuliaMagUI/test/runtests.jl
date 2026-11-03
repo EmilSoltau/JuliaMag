@@ -51,6 +51,7 @@ include("support/state.jl")
     include("window/test_map_cursor.jl")
     include("window/test_layers.jl")
     include("window/test_style_pane.jl")
+    include("window/test_map_end_to_end.jl")
 end
 
 end

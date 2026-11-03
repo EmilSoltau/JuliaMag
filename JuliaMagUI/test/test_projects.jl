@@ -586,9 +586,9 @@ toast_texts(app) = [t.text for t in app.toasts]
             @test c.open_last && c.software_rendering
             @test c.distance_units == "km" && c.grid_colours == "viridis"
             @test "viridis" in first.(Core.colour_tables())
-            # Nothing draws grids yet: the toast does not claim an effect (final review M1).
+            # The maps use it for grids with the stock colour table (Task 16).
             @test any(t -> t.text == "Saved: Viridis for grids." &&
-                           t.sub == "Grid views use it once JuliaMag has them.", app.toasts)
+                           t.sub == "Maps show grids that use the default colours with it.", app.toasts)
         end
     end
 

@@ -94,8 +94,8 @@ function set_distance_units!(app, u::AbstractString)
 end
 
 """
-Keep colour table `name` for grids and save the settings. Nothing draws grids yet (the
-grid views come in plan 4), so the toast says only that it is saved.
+Keep colour table `name` for grids and save the settings. A grid whose style still has the
+stock colour table shows in it on the maps (`Core.effective_style`), from the next frame on.
 """
 function set_grid_colours!(app, name::AbstractString)
     k = findfirst(p -> first(p) == name, Core.colour_tables())
@@ -103,7 +103,7 @@ function set_grid_colours!(app, name::AbstractString)
     app.config.grid_colours = String(name)
     save_settings!(app)
     toast!(app, :info, "Saved: $(last(Core.colour_tables()[k])) for grids.";
-        sub = "Grid views use it once JuliaMag has them.")
+        sub = "Maps show grids that use the default colours with it.")
     return nothing
 end
 

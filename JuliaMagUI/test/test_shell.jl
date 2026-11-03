@@ -82,6 +82,15 @@ end
         @test !shrunk.pill_round && 225 <= UI.width(shrunk.pill) < 372
         @test header_layout(Box(0, 0, 400, 34), 1.5, fake_measure, title, 5).pill_round
         @test header_layout(Box(0, 0, 1480, 34), 1, fake_measure, "", 5).title === nothing
+        @test l.doc === nothing
+        # The shown map follows the project name, as "Project - Map 1"; the two are centred.
+        d = header_layout(Box(0, 0, 1480, 34), 1, fake_measure, title, 5; doc = "Map 1")
+        @test d.doc == Box(d.title.x1, 0, d.title.x1 + 7 * length(" - Map 1"), 34)
+        @test (d.title.x0 + d.doc.x1) / 2 ≈ 740 atol = 1
+        # When both do not fit, the map's name goes first, then the title.
+        n = header_layout(Box(0, 0, 1480, 34), 1, fake_measure, long, 5; doc = "Survey map " ^ 20)
+        @test n.title !== nothing && n.doc === nothing
+        @test header_layout(Box(0, 0, 900, 34), 1, fake_measure, long, 5; doc = "Map 1").title === nothing
     end
 
     @testset "tab layout" begin

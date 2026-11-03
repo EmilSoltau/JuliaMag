@@ -36,6 +36,18 @@
     close_session!(s)
 end
 
+@testset "map items: a fiducial channel colours a layer only when nothing else can" begin
+    s = fresh_session()
+    channels(names) = Pair{String,Vector{Float64}}[n => [1.0, 2.0] for n in names]
+    db = database(s.project, add_test_database!(s, channels(["X", "Y", "FIDUCIAL", "Fid", "MAG"])))
+    @test default_colour_channel(db, PositionPair("X", "Y", "")) == "MAG"
+    db = database(s.project, add_test_database!(s, channels(["X", "Y", "fid", "FIDUCIAL"])))
+    @test default_colour_channel(db, PositionPair("X", "Y", "")) == "fid"
+    db = database(s.project, add_test_database!(s, channels(["X", "Y"])))
+    @test default_colour_channel(db, PositionPair("X", "Y", "")) == ""
+    close_session!(s)
+end
+
 @testset "map items: file round trip" begin
     dir = joinpath(mktempdir(), "m")
     m = create_map(dir, "Round"; crs = "EPSG:32755")
