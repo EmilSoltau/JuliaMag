@@ -27,6 +27,7 @@ cursor's marker, the box of a box zoom, the coordinate bands, the scale bar, the
 buttons; and always the hint.
 """
 function draw_overlays(app, dl, b::Box, mv, st::MapViewState)
+    empty!(app.map.overlay_boxes)
     cam = st.camera
     if cam !== nothing
         draw_line_labels(app, dl, b, cam)
@@ -155,6 +156,7 @@ function draw_scale_bar(app, dl, b::Box, mv, cam::Camera)
     # pixel from the box's own (unrounded) top, each part's edges rounded.
     box = Box(left, bottom - 2hl - f(4 + 13.75 + 2 + 6 + 3), left + max(tw, bar_w) + 2hl + f(16), bottom)
     frame = snap(box)
+    push!(app.map.overlay_boxes, (:scale_bar, frame))
     ig.AddRectFilled(dl, (frame.x0, frame.y0), (frame.x1, frame.y1), u32(t.ribbon, OVERLAY_ALPHA), f(5))
     ig.AddRect(dl, (frame.x0, frame.y0), (frame.x1, frame.y1), u32(t.border), f(5), hl)
     draw_text_mid(dl, FONT_REGULAR, 11, box.x0 + hl + f(8), box.y0 + hl + f(4) + f(13.75) / 2, u32(t.text), sb.label)
@@ -175,6 +177,8 @@ const NAV_BUTTONS = (("zoom_in", "zoomIn", "Zoom In"), ("zoom_out", "zoomOut", "
     ("full_extent", "fullExtent", "Full Extent"), ("go_cursor", "crosshair", "Go To Cursor"))
 
 const NOT_ON_MAP_TEXT = "The current point is not on this map."
+const CURSOR_HIDDEN_TEXT = "The current point's layer is hidden."
+const CURSOR_LOADING_TEXT = "The current point's line is still loading."
 
 """
     draw_nav_buttons(app, b, mv, st)
@@ -193,6 +197,7 @@ function draw_nav_buttons(app, b::Box, mv, st::MapViewState)
     x1 = b.x1 - px(s, EDGE)
     y = inner_box(b, s).y0 + px(s, EDGE)
     vw, vh = round(Int, width(b)), round(Int, height(b))
+    push!(app.map.overlay_boxes, (:nav, Box(x1 - size, y, x1, y + length(NAV_BUTTONS) * size + (length(NAV_BUTTONS) - 1) * gap)))
     ig.PushID("mapnav")
     for (id, icon, title) in NAV_BUTTONS
         nb = Box(x1 - size, y, x1, y + size)
@@ -205,7 +210,7 @@ function draw_nav_buttons(app, b::Box, mv, st::MapViewState)
         ig.AddRect(dl, (nb.x0, nb.y0), (nb.x1, nb.y1), u32(t.border), px(s, 5), hl)
         d = px(s, 16)
         draw_icon(dl, icon, (nb.x0 + (size - d) / 2, nb.y0 + (size - d) / 2), 16; style = enabled ? :normal : :disabled)
-        item_tip!(app, title; reason = enabled ? nothing : NOT_ON_MAP_TEXT)
+        item_tip!(app, title; reason = enabled ? nothing : cursor_why(app, mv))
         hovered && request_frames!(app.window::Window)
         if clicked && enabled
             if id == "zoom_in"
@@ -245,6 +250,30 @@ function cursor_target(app, mv)::Union{Nothing,NTuple{2,Float64}}
         pt === nothing || return pt
     end
     return nothing
+end
+
+"""
+    cursor_why(app, mv) -> Union{Nothing,String}
+
+Why the shared cursor has no point on map `mv` (`cursor_target`), or `nothing` when it has one:
+its database's line layer is hidden, or still loading; else it is not on this map.
+"""
+function cursor_why(app, mv)::Union{Nothing,String}
+    cursor_target(app, mv) === nothing || return nothing
+    snap = app.snap
+    c = snap.cursor
+    c === nothing && return NOT_ON_MAP_TEXT
+    hidden = false
+    for l in mv.layers
+        (l.item == c.item && l.kind == :lines) || continue
+        if !l.visible
+            hidden = true
+            continue
+        end
+        e = get(app.map.entries, layer_key(snap, mv, l), nothing)
+        (e === nothing || e.loading || (e.data === nothing && isempty(e.error))) && return CURSOR_LOADING_TEXT
+    end
+    return hidden ? CURSOR_HIDDEN_TEXT : NOT_ON_MAP_TEXT
 end
 
 """
@@ -306,6 +335,7 @@ function draw_legends(app, dl, b::Box, mv)
         empty = d.hist.total == 0
         h = 2hairline(s) + f(6 + 13.75 + 4 + (empty ? 13 : 10 + 2 + 13) + 5)
         card = Box(x1 - f(LEGEND_W), bottom - h, x1, bottom)
+        push!(app.map.overlay_boxes, (:legend, snap(card)))
         draw_legend(app, dl, card, p, title, units, d)
         bottom -= h + f(6)
     end

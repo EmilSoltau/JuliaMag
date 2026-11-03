@@ -70,6 +70,9 @@ The map's layer data. Changed on the render thread only.
 - `hold`: a test hook. While it is set, each load started waits for a `put!` on it.
 - `views`: the view of each map by id (a `MapViewState`); `view`: where the map view was drawn
   last, in device pixels.
+- `overlay_boxes`: where the last frame drew the legend cards, the scale bar and the nav
+  buttons (`(:legend, box)`, `(:scale_bar, box)`, `(:nav, box)`), so the mouse over them
+  neither reads nor picks the map.
 - `scene`: the scene of the shown map, filled again each frame (`build_scene!`); `plan`,
   `plan_snap`, `plan_map`, `plan_colours`, `plan_complete`, `looks`: what it is built from (see
   `refresh_plan!`).
@@ -85,6 +88,7 @@ mutable struct MapState
     hold::Union{Nothing,Channel{Nothing}}
     views::Dict{String,MapViewState}
     view::Box
+    overlay_boxes::Vector{Tuple{Symbol,Box}}
     scene::Scene
     plan::Vector{LayerPlan}
     plan_snap::Any
@@ -96,7 +100,7 @@ end
 
 MapState(session::Union{Nothing,Core.Session}) =
     MapState(Dict{LayerKey,LayerEntry}(), MapRenderer(), session, LayerKey[], nothing, 0, 0, nothing,
-             Dict{String,MapViewState}(), Box(0, 0, 0, 0), Scene(Camera(0, 0, 1), 1, 1, (0x00, 0x00, 0x00, 0xff), LineDraw[], 0),
+             Dict{String,MapViewState}(), Box(0, 0, 0, 0), Tuple{Symbol,Box}[], Scene(Camera(0, 0, 1), 1, 1, (0x00, 0x00, 0x00, 0xff), LineDraw[], 0),
              LayerPlan[], nothing, "", "", false, Dict{String,LayerLook}())
 
 "What a layer whose item is not in the project says, in the map's hint and the Layers tab."

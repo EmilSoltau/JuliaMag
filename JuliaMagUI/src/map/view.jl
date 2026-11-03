@@ -298,6 +298,9 @@ function layer_extent(e)::Union{Nothing,NTuple{4,Float64}}   # e: a LayerEntry o
     return any(isnan, ext) ? nothing : ext
 end
 
+"Is window point `(x, y)` on a legend card, the scale bar or the nav buttons drawn in the last frame?"
+over_overlay(ms, x::Real, y::Real)::Bool = any(kb -> inside(last(kb), x, y), ms.overlay_boxes)
+
 """
     map_gl_pass!(app, w)
 
@@ -385,10 +388,12 @@ function draw_map_view(app, dl, b::Box)
         active && ig.IsMouseDown(2), unsafe_load(io.KeyShift), hovered ? Float32(unsafe_load(io.MouseWheel)) : 0f0,
         (vw, vh), time())
     pick = step_view!(st, input)
-    pick === nothing || pick_cursor!(app, mv, pick[2]...)
+    # A legend card, the scale bar or a nav button over the map takes the mouse.
+    free = !over_overlay(ms, mouse.x, mouse.y)
+    pick === nothing || !free || pick_cursor!(app, mv, pick[2]...)
     # The readout of what is under the pointer, while it is over the map.
     cam = st.camera
-    if hovered && cam !== nothing && ig.IsMousePosValid()
+    if hovered && free && cam !== nothing && ig.IsMousePosValid()
         map_hover(app, screen_to_world(cam, vw, vh, view_mouse[1], view_mouse[2])...)
     else
         clear_hover!(app)

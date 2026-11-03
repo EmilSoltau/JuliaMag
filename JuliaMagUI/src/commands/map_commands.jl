@@ -21,7 +21,7 @@ const LAYER_HIDDEN = "The layer is hidden."
 const LAYER_NO_DATA = "The layer has nothing to draw."
 const LAYER_AT_TOP = "The layer is at the top."
 const LAYER_AT_BOTTOM = "The layer is at the bottom."
-# "The current point is not on this map." is `NOT_ON_MAP_TEXT` (overlays.jl), as the nav button says.
+# Go To Cursor's reasons are `cursor_why`'s (overlays.jl), as the nav button says.
 
 # --- What the commands act on ---
 
@@ -171,7 +171,7 @@ function cursor_reason(app)
     mv, why = map_target(app)
     why === nothing || return why
     refresh_plan!(app.map, app, mv)
-    return cursor_target(app, mv) === nothing ? NOT_ON_MAP_TEXT : nothing
+    return cursor_why(app, mv)
 end
 
 function add_item_reason(app)

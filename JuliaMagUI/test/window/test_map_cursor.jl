@@ -49,6 +49,9 @@ function click_at(ctx, pos)
     return nothing
 end
 
+# `Core.Cursor` is mutable: `==` compares identity.
+same_cursor(a, b) = (a.item, a.line, a.row) == (b.item, b.line, b.row)
+
 const CURSOR_LINE = Core.LineId(Core.LINE, 1002, 0)
 
 window_testset("map cursor") do
@@ -96,7 +99,7 @@ window_testset("map cursor") do
             click_at(ctx, cursor_screen(app, p) .+ (3, 2))
             ctx.wait_until(() -> app.snap.cursor !== nothing)
             c = app.snap.cursor
-            @test c.item == ids.db && c.line == CURSOR_LINE && c.row == 3
+            @test (c.item, c.line, c.row) == (ids.db, CURSOR_LINE, 3)
             @test UI.cursor_target(app, app.snap.maps[ids.m]) == p
             ctx.mouse_to(cursor_screen(app, (500_300.0, 7_000_225.0)))   # off the marker
             ctx.frames(2)
@@ -114,12 +117,51 @@ window_testset("map cursor") do
             c = app.snap.cursor
             click_at(ctx, cursor_screen(app, (500_300.0, 7_000_075.0)))   # 25 m from two lines
             ctx.frames(3)
-            @test app.queue.pending == 0 && app.snap.cursor == c
+            @test app.queue.pending == 0 && same_cursor(app.snap.cursor, c)
             # Nor does a drag that ends on a line.
             from = cursor_screen(app, (500_300.0, 7_000_075.0))
             ctx.drag(from, cursor_screen(app, (500_030.0, 7_000_100.0)))
             ctx.frames(3)
-            @test app.queue.pending == 0 && app.snap.cursor == c
+            @test app.queue.pending == 0 && same_cursor(app.snap.cursor, c)
+        end
+
+        @testset "a legend card, the scale bar and the nav buttons take the mouse" begin
+            c = app.snap.cursor
+            ctx.key("Home")   # the drag before panned the map
+            ctx.frames(2)
+            ctx.wait_until(() -> st.before === nothing)
+            boxes = app.map.overlay_boxes
+            @test sort(unique(first.(boxes))) == [:legend, :nav, :scale_bar]
+            # Pan L1002 under the top card: a click there would pick it without the card.
+            card = last(first(kb for kb in boxes if first(kb) == :legend && last(kb).y0 == minimum(last(q).y0 for q in boxes if first(q) == :legend)))
+            vc = (app.map.view.x0 + w / 2, app.map.view.y0 + h / 2)
+            dy = (card.y0 + card.y1) / 2 - cursor_screen(app, (500_000.0, 7_000_050.0))[2]
+            ctx.drag(vc, vc .+ (0, round(dy)))
+            ctx.frames(2)
+            ctx.wait_until(() -> st.before === nothing)
+            x = card.x0 + 20
+            y = cursor_screen(app, (500_000.0, 7_000_050.0))[2]
+            @test card.y0 + 6 <= y <= card.y1 - 6
+            wx = UI.screen_to_world(st.camera, w, h, x - app.map.view.x0, y - app.map.view.y0)[1]
+            @test 500_000.0 < wx < 500_590.0
+            click_at(ctx, (x, y))
+            ctx.frames(3)
+            @test app.queue.pending == 0 && same_cursor(app.snap.cursor, c)
+            @test app.ui.hover === nothing && UI.map_status(app)[2] == "X -  Y -"
+            # The same point with no card over it reads the line (Colour Bars off).
+            ctx.on_render(win -> (app.ui.colour_bars = false))
+            ctx.mouse_to((x, y + 1)); ctx.mouse_to((x, y))
+            ctx.frames(2)
+            @test app.ui.hover !== nothing && app.ui.hover.near !== nothing
+            ctx.on_render(win -> (app.ui.colour_bars = true))
+            ctx.frames(2)
+            # The scale bar and the nav buttons.
+            for kind in (:scale_bar, :nav)
+                bx = last(only(filter(kb -> first(kb) == kind, boxes)))
+                ctx.mouse_to(((bx.x0 + bx.x1) / 2, (bx.y0 + bx.y1) / 2))
+                ctx.frames(2)
+                @test app.ui.hover === nothing
+            end
         end
 
         @testset "Go To Cursor centres the camera on it" begin

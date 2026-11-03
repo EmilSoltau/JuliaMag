@@ -49,7 +49,48 @@ end
             @test app.ui.hover === h
             @test map_status(app)[2] == "X 500,010.0  Y 7,000,050.0"
             @test map_status(app)[3] == "TMI 12.35 nT  L1002 fid 0.1 MAG 202.00"
+            @test app.ui.map_status.parts == ["TMI 12.35 nT", "L1002 fid 0.1 MAG 202.00"]   # drawn apart
         end
+    end
+
+    @testset "a fiducial reads with no grouping" begin
+        s = fresh_session()
+        db = survey_database!(s; lines = 2, fid_start = 12_345.0)
+        m = Core.new_map!(s)
+        Core.add_layer!(s, m, db)
+        with_app(test_app_state(s)) do app
+            refresh_now!(app); app.ui.current_map = m
+            wait_layers(app)
+            readout_view!(app, m, Camera(500_020.0, 7_000_050.0, 1.0))
+            map_hover(app, 500_010.0, 7_000_050.0)
+            @test map_status(app)[3] == "L1002 fid 12345.1 MAG 202.00"
+        end
+        @test UI.fid_text(1_234_567.04) == "1234567.0" && UI.fid_text(-12.34) == "-12.3"
+    end
+
+    @testset "the status bar in a narrow window" begin
+        measure(role, size, text) = 7f0 * length(text)
+        texts = UI.StatusTexts("Survey: 2 lines, 2 channels", "Selected lines: 2 of 2", 0, nothing, "GPU", "")
+        on_map = ("WGS 84 / UTM zone 55S", "X 500,010.0  Y 7,000,050.0", "TMI 12.35 nT  L1002 fid 0.1 MAG 202.00")
+        parts = ["TMI 12.35 nT", "L1002 fid 0.1 MAG 202.00"]
+        wide = UI.status_layout(UI.Box(0, 0, 1480, 26), 1, measure, texts; on_map, parts)
+        @test wide.left == on_map[1] && wide.pointer_x !== nothing && wide.parts == parts
+        @test length(wide.seps) == 2 + 3   # the right side's 2; after the system, before each part
+        # Each item ends 10 px before the next separator; the last before the right side.
+        @test wide.part_x[2] + 7 * length(parts[2]) <= wide.right_x - 10
+        # Too narrow for the readout: it goes, and its separator with it.
+        right = 1480 - wide.right_x   # the right side's width, the same in any box
+        crs_pointer = 7 * 21 + 21 + 7 * 26
+        l = UI.status_layout(UI.Box(0, 0, right + 20 + crs_pointer + 10, 26), 1, measure, texts; on_map, parts)
+        @test l.pointer_x !== nothing && isempty(l.parts) && length(l.seps) == 2 + 1
+        @test l.pointer_x + 7 * 26 <= l.right_x - 10
+        # Narrower still: the pointer goes too, and the system is cut short.
+        l = UI.status_layout(UI.Box(0, 0, right + 20 + 100, 26), 1, measure, texts; on_map, parts)
+        @test l.pointer_x === nothing && isempty(l.parts) && length(l.seps) == 2
+        @test endswith(l.left, "...") && 10 + 7 * length(l.left) <= l.right_x - 10
+        # No room at all: nothing on the left.
+        l = UI.status_layout(UI.Box(0, 0, 200, 26), 1, measure, texts; on_map, parts)
+        @test l.left == "" && l.pointer_x === nothing && isempty(l.parts)
     end
 
     @testset "the parts of the status" begin
@@ -165,13 +206,13 @@ end
             @test pick_cursor!(app, mv, 500_021.0, 7_000_053.0)
             wait_drained(app); refresh_now!(app)
             c = app.snap.cursor
-            @test c.item == ids.db && c.line == Core.LineId(Core.LINE, 1002, 0) && c.row == 3
+            @test (c.item, c.line, c.row) == (ids.db, Core.LineId(Core.LINE, 1002, 0), 3)
             @test app.snap.undo_label == undo   # the cursor is view state of the session: no undo step
             # Nothing within 20 px: the cursor stays, and nothing goes to the worker.
             @test !pick_cursor!(app, mv, 500_021.0, 7_000_075.0)
             @test app.queue.pending == 0
             wait_drained(app); refresh_now!(app)
-            @test app.snap.cursor == c
+            @test (app.snap.cursor.item, app.snap.cursor.line, app.snap.cursor.row) == (c.item, c.line, c.row)
             # The marker goes where the cursor is.
             @test UI.cursor_target(app, mv) == (500_020.0, 7_000_050.0)
         end
@@ -199,6 +240,35 @@ end
         st = MapViewState(cam)
         step_view!(st, MapInput((100f0, 100f0), true, false, true, false, 0f0, (800, 600), 0.0))
         @test step_view!(st, MapInput((100f0, 100f0), true, false, false, false, 0f0, (800, 600), 0.02)) === nothing
+    end
+
+    @testset "why the current point is not shown" begin
+        s, ids = readout_project()
+        other = survey_database!(s; lines = 2, x0 = 600_000.0)
+        Core.set_cursor!(s, Core.Cursor(ids.db, Core.LineId(Core.LINE, 1002, 0), 3))
+        with_app(test_app_state(s)) do app
+            refresh_now!(app); app.ui.current_map = ids.m
+            wait_layers(app)
+            go = only(c for c in UI.commands(app) if c.id == "map.go_cursor")
+            mv() = app.snap.maps[ids.m]
+            @test go.enabled(app) === nothing && UI.cursor_target(app, mv()) !== nothing
+            # Its line layer still loading.
+            e = only(e for e in values(app.map.entries) if e.key.item == ids.db)
+            d = e.data
+            e.data = nothing; e.loading = true
+            @test go.enabled(app) == "The current point's line is still loading."
+            @test UI.cursor_target(app, mv()) === nothing
+            e.data = d; e.loading = false
+            # Its line layer hidden.
+            submit!(app, "hide", s -> Core.set_layer!(s, ids.m, ids.ld; visible = false))
+            wait_drained(app); refresh_now!(app)
+            @test go.enabled(app) == "The current point's layer is hidden."
+            @test UI.cursor_target(app, mv()) === nothing
+            # Its database not on the map.
+            submit!(app, "cursor", s -> Core.set_cursor!(s, Core.Cursor(other, Core.LineId(Core.LINE, 1001, 0), 1)))
+            wait_drained(app); refresh_now!(app)
+            @test go.enabled(app) == "The current point is not on this map."
+        end
     end
 
     @testset "Go To Cursor follows a map switch at once" begin

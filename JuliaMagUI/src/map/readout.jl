@@ -30,15 +30,19 @@ end
 
 MapHover() = MapHover(NaN, NaN, Tuple{String,Float32,String}[], nothing, "", "", Core.LineId(Core.LINE, 0, 0), 0)
 
-"The texts `map_status` made last, and the snapshot, map and hover version they were made from."
+"""
+The texts `map_status` made last, the readout's `parts` (drawn apart in the status bar), and
+the snapshot, map and hover version they were made from.
+"""
 mutable struct MapStatusCache
     snap::Any
     map::String
     hover::Int   # the hover's version, -1 for no hover
     texts::NTuple{3,String}
+    parts::Vector{String}
 end
 
-MapStatusCache() = MapStatusCache(nothing, "", -1, ("", "", ""))
+MapStatusCache() = MapStatusCache(nothing, "", -1, ("", "", ""), String[])
 
 """
     map_hover(app, x, y) -> MapHover
@@ -168,8 +172,9 @@ end
 
 The status bar texts of the shown map: its coordinate system's name (or "No coordinate
 system"), the pointer (`pointer_text`, or `"X -  Y -"` off the map) and the readout of
-`ui.hover`, two spaces between its parts: each grid as `"TMI 12.35 nT"` (`"TMI -"` where it
-has no value), then the line point as `"L1002 fid 0.3 MAG 203.00"`. Made again only when the
+`ui.hover`, two spaces between its parts (also kept apart in `ui.map_status.parts`): each
+grid as `"TMI 12.35 nT"` (`"TMI -"` where it has no value), then the line point as
+`"L1002 fid 0.3 MAG 203.00"` (the fiducial with `fid_text`). Made again only when the
 snapshot, the map or the hover changed; else the same texts, with no allocation.
 """
 function map_status(app)::NTuple{3,String}
@@ -180,8 +185,9 @@ function map_status(app)::NTuple{3,String}
     h = ui.hover
     version = h === nothing ? -1 : h.version
     (c.snap === snap && c.map == id && c.hover == version) && return c.texts
+    empty!(c.parts)
     texts = (snap === nothing || !haskey(snap.maps, id)) ? ("", "X -  Y -", "") :
-        map_texts(snap, snap.maps[id], h)
+        map_texts!(c.parts, snap, snap.maps[id], h)
     c.snap = snap
     c.map = id
     c.hover = version
@@ -189,37 +195,40 @@ function map_status(app)::NTuple{3,String}
     return texts
 end
 
-function map_texts(snap, mv, h::Union{Nothing,MapHover})::NTuple{3,String}
+# The three texts of `map_status`; the readout's parts also go into `parts`.
+function map_texts!(parts::Vector{String}, snap, mv, h::Union{Nothing,MapHover})::NTuple{3,String}
     info = get(snap.crs, mv.crs, nothing)
     crs = isempty(mv.crs) ? "No coordinate system" : info === nothing || isempty(info.name) ? mv.crs : info.name
     h === nothing && return (crs, "X -  Y -", "")
-    io = IOBuffer()
     for (name, v, units) in h.grids
-        position(io) > 0 && print(io, "  ")
-        print(io, name, " ", isnan(v) ? "-" : fmt_num(v, 2))
-        isnan(v) || isempty(units) || print(io, " ", units)
+        push!(parts, isnan(v) ? string(name, " -") :
+            isempty(units) ? string(name, " ", fmt_num(v, 2)) : string(name, " ", fmt_num(v, 2), " ", units))
     end
     np = h.near
-    np === nothing || near_text(io, snap, h, np)
-    return (crs, pointer_text(h.x, h.y, info === nothing ? "" : info.unit), String(take!(io)))
+    np === nothing || near_part!(parts, snap, h, np)
+    return (crs, pointer_text(h.x, h.y, info === nothing ? "" : info.unit), join(parts, "  "))
 end
 
 # The line point of the readout: "L1002 fid 0.3 MAG 203.00", the value with the channel's
-# decimals (2 when not set). Nothing when the database is not in the snapshot.
-function near_text(io::IO, snap, h::MapHover, np::NearPoint)
+# decimals (2 when not set). None when the database is not in the snapshot.
+function near_part!(parts::Vector{String}, snap, h::MapHover, np::NearPoint)
     v = get(snap.databases, h.near_item, nothing)
     v === nothing && return nothing
     k = findfirst(l -> l.id == h.near_line, v.lines)
     k === nothing && return nothing
     l = v.lines[k]
-    position(io) > 0 && print(io, "  ")
-    print(io, l.name, " fid ", fmt_num(l.fid_start + (np.row - 1) * l.fid_step, 1))
-    isempty(h.near_channel) && return nothing
-    c = findfirst(ch -> ch.name == h.near_channel, v.channels)
-    decimals = c === nothing || v.channels[c].decimals < 0 ? 2 : v.channels[c].decimals
-    print(io, " ", h.near_channel, " ", isnan(np.value) ? "-" : fmt_num(np.value, decimals))
+    text = string(l.name, " fid ", fid_text(l.fid_start + (np.row - 1) * l.fid_step))
+    if !isempty(h.near_channel)
+        c = findfirst(ch -> ch.name == h.near_channel, v.channels)
+        decimals = c === nothing || v.channels[c].decimals < 0 ? 2 : v.channels[c].decimals
+        text = string(text, " ", h.near_channel, " ", isnan(np.value) ? "-" : fmt_num(np.value, decimals))
+    end
+    push!(parts, text)
     return nothing
 end
+
+"A fiducial with 1 decimal and no grouping, as `12345.0`: a fiducial is an index, not an amount."
+fid_text(v::Real)::String = replace(fmt_num(v, 1), "," => "")
 
 """
     pointer_text(x, y, unit) -> String

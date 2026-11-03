@@ -58,8 +58,8 @@ Where the status bar parts go, in device pixels: the `left` text (cut short with
 when it would reach the right side), the left edge `x` of each right item (`nothing`
 when it is not shown), the separators' `seps`, the spinner and text widths of the jobs
 item, and `right_x`, where the right side starts. While a map is shown, `left` is its
-coordinate system (`left_w` wide), then the pointer text at `pointer_x` (`pointer_w` wide)
-and the `readout` (cut short) at `readout_x`; else `pointer_x` is `nothing`.
+coordinate system (`left_w` wide), then the pointer text at `pointer_x` (`pointer_w` wide;
+`nothing` when it is not shown) and the readout's `parts` at `part_x`, a separator before each.
 """
 struct StatusLayout
     left::String
@@ -74,22 +74,24 @@ struct StatusLayout
     left_w::Float32
     pointer_x::Union{Nothing,Float32}
     pointer_w::Float32
-    readout_x::Float32
-    readout::String
+    parts::Vector{String}
+    part_x::Vector{Float32}
 end
 
 """
-    status_layout(b, scale, measure, texts; on_map = nothing) -> StatusLayout
+    status_layout(b, scale, measure, texts; on_map = nothing, parts = String[]) -> StatusLayout
 
 Lay out the status bar in box `b`, as the prototype's `#status`: padding 10, 10 px
 between the items and around the 1 px separators. The right side is laid out from the
 right edge; the left text gets the room that is left, at least 10 px from the right side.
-With the texts of a shown map (`map_status`), the left side is its coordinate system, a
-separator, the pointer in mono, a separator and the readout: the readout is cut short
-first, then the coordinate system. `measure(role, size, text)` is the text width in device pixels.
+With the texts of a shown map (`map_status`) and its readout's `parts`, the left side is its
+coordinate system, a separator, the pointer in mono, and each part after a separator. When
+the room runs out, the readout's parts go first (the last one that fits is cut short), then
+the pointer; then the coordinate system is cut short. Nothing reaches the right side.
+`measure(role, size, text)` is the text width in device pixels.
 """
 function status_layout(b::Box, scale::Real, measure, texts::StatusTexts;
-        on_map::Union{Nothing,NTuple{3,String}} = nothing)::StatusLayout
+        on_map::Union{Nothing,NTuple{3,String}} = nothing, parts::Vector{String} = String[])::StatusLayout
     p(v) = px(scale, v)
     hl = hairline(scale)
     seps = Float32[]
@@ -117,26 +119,39 @@ function status_layout(b::Box, scale::Real, measure, texts::StatusTexts;
         selected_x = x
     end
     x0 = b.x0 + p(10)
-    x1 = x - p(10)   # the left side ends here
+    room = max(0f0, x - p(10) - x0)   # the left side ends 10 px before the right side
+    x1 = x0 + room
+    shown, shown_x = String[], Float32[]
     if on_map === nothing
-        left = elide(measure, texts.database, x1 - x0; role = FONT_REGULAR, size = 11.5)
+        left = elide(measure, texts.database, room; role = FONT_REGULAR, size = 11.5)
         return StatusLayout(left, mode_x, busy_x, jobs_x, spin, jobs_w, selected_x, seps, x,
-            measure(FONT_REGULAR, 11.5, left), nothing, 0f0, x1, "")
+            measure(FONT_REGULAR, 11.5, left), nothing, 0f0, shown, shown_x)
     end
-    crs, pointer, readout = on_map
+    crs, pointer, _ = on_map
+    crs_w = measure(FONT_REGULAR, 11.5, crs)
     pointer_w = measure(FONT_MONO, 11.5, pointer)
-    between = 2 * (p(10) + hl + p(10)) + pointer_w   # from the end of the system to the readout
-    left = elide(measure, crs, x1 - x0 - between; role = FONT_REGULAR, size = 11.5)
-    left_w = measure(FONT_REGULAR, 11.5, left)
-    sep = rnd(x0 + left_w + p(10))
+    if crs_w + p(10) + hl + p(10) + pointer_w > room   # no room for the pointer
+        left = elide(measure, crs, room; role = FONT_REGULAR, size = 11.5)
+        return StatusLayout(left, mode_x, busy_x, jobs_x, spin, jobs_w, selected_x, seps, x,
+            measure(FONT_REGULAR, 11.5, left), nothing, 0f0, shown, shown_x)
+    end
+    sep = rnd(x0 + crs_w + p(10))
     push!(seps, sep)
     pointer_x = sep + hl + p(10)
-    sep = rnd(pointer_x + pointer_w + p(10))
-    push!(seps, sep)
-    readout_x = sep + hl + p(10)
-    readout = elide(measure, readout, x1 - readout_x; role = FONT_REGULAR, size = 11.5)
-    return StatusLayout(left, mode_x, busy_x, jobs_x, spin, jobs_w, selected_x, seps, x,
-        left_w, pointer_x, pointer_w, readout_x, readout)
+    at = pointer_x + pointer_w   # where the last item ends
+    for part in parts
+        sep = rnd(at + p(10))
+        start = sep + hl + p(10)
+        text = elide(measure, part, x1 - start; role = FONT_REGULAR, size = 11.5)
+        isempty(text) && break
+        push!(seps, sep)
+        push!(shown, text)
+        push!(shown_x, start)
+        text === part || break   # cut short: nothing fits after it
+        at = start + measure(FONT_REGULAR, 11.5, text)
+    end
+    return StatusLayout(crs, mode_x, busy_x, jobs_x, spin, jobs_w, selected_x, seps, x,
+        crs_w, pointer_x, pointer_w, shown, shown_x)
 end
 
 """
@@ -196,7 +211,7 @@ function status_view(app, b::Box)::StatusCache
         m = map_status(app)
         prev = c.on_map
         if !(same && prev isa NTuple{3,String} && prev === m)
-            c.layout = status_layout(b, scale, text_width, texts; on_map = m)
+            c.layout = status_layout(b, scale, text_width, texts; on_map = m, parts = app.ui.map_status.parts)
             c.box, c.scale, c.shown, c.on_map = b, scale, texts, m
         end
     elseif !(same && c.on_map === nothing)
@@ -211,8 +226,8 @@ end
 
 Draw the status bar in box `b` (see `status_layout`): 26 high, `status_bar` fill, a 1 px
 `border` line on top, text 11.5 `text_dim`, 1 by 14 separators in `border_strong`.
-While a map is shown: its coordinate system, the pointer in mono 11.5 and the readout
-in `text`. A click on the jobs text opens the Jobs tab.
+While a map is shown: its coordinate system, the pointer in mono 11.5 and the readout's
+parts in `text`, each after a separator. A click on the jobs text opens the Jobs tab.
 """
 function draw_status_bar(app, dl, b::Box)
     w = app.window::Window
@@ -235,14 +250,18 @@ function draw_status_bar(app, dl, b::Box)
     ig.PushID("status")
     x0 = b.x0 + p(10)
     draw_text_mid(dl, FONT_REGULAR, 11.5, x0, mid, dim, l.left)
-    pointer_x = l.pointer_x
-    if pointer_x !== nothing && on_map !== nothing
+    if on_map !== nothing
         hit("Coordinate System", Box(x0, b.y0 + hl, x0 + l.left_w, b.y1))
         ig.IsItemHovered() && item_tip!(app, "Map coordinate system"; help = "The coordinate system the map is drawn in.")
-        draw_text_mid(dl, FONT_MONO, 11.5, pointer_x, mid, dim, on_map[2])
-        hit("Pointer", Box(pointer_x, b.y0 + hl, pointer_x + l.pointer_w, b.y1))
-        ig.IsItemHovered() && item_tip!(app, "Pointer position"; help = "X and Y of the pointer in the map's coordinate system.")
-        draw_text_mid(dl, FONT_REGULAR, 11.5, l.readout_x, mid, u32(t.text), l.readout)
+        pointer_x = l.pointer_x
+        if pointer_x !== nothing
+            draw_text_mid(dl, FONT_MONO, 11.5, pointer_x, mid, dim, on_map[2])
+            hit("Pointer", Box(pointer_x, b.y0 + hl, pointer_x + l.pointer_w, b.y1))
+            ig.IsItemHovered() && item_tip!(app, "Pointer position"; help = "X and Y of the pointer in the map's coordinate system.")
+        end
+        for (k, part) in enumerate(l.parts)
+            draw_text_mid(dl, FONT_REGULAR, 11.5, l.part_x[k], mid, u32(t.text), part)
+        end
     end
 
     # "GPU" in `accent_text`; "Software" and "CPU map" in `amber`.
