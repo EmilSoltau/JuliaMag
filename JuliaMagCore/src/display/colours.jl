@@ -241,13 +241,13 @@ end
     grid_shading(grid_style) -> LayerStyle
 
 A layer style with the shading of a grid's style: its `shade`, the sun (`altitude` as the
-inclination, clamped to 0 to 90, and `azimuth` as the declination) and its vertical scale
-(the stock 1, or a value not above 0, means automatic). The rest is the default. A new
-grid layer starts with it.
+inclination, clamped to 0 to 90, and `azimuth` as the declination, turned into 0 to 360)
+and its vertical scale (the stock 1, or a value not above 0, means automatic). The rest is
+the default. A new grid layer starts with it.
 """
 function grid_shading(gs::GridStyle)::LayerStyle
     z = gs.zfactor
-    return LayerStyle(; shade = gs.shade, inclination = clamp(gs.altitude, 0.0, 90.0), declination = gs.azimuth,
+    return LayerStyle(; shade = gs.shade, inclination = clamp(gs.altitude, 0.0, 90.0), declination = mod(gs.azimuth, 360.0),
                       zfactor = (z == GridStyle().zfactor || !(z > 0) || !isfinite(z)) ? NaN : z)
 end
 

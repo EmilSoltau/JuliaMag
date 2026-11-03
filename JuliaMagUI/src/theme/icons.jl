@@ -392,10 +392,19 @@ end
 # The atlas size to draw a `size` icon of style `s` from, as an index of `ICON_SIZES`:
 # that size, else the next bigger of the style, else the style's biggest.
 function icon_size_index(s::Int, size::Integer)::Int
+    1 <= size <= Base.size(ICON_SIZE_INDEX, 2) && return ICON_SIZE_INDEX[s, size]
+    return find_icon_size(s, size)
+end
+
+function find_icon_size(s::Int, size::Integer)::Int
     sizes = ICON_STYLE_SIZES[s]
     j = findfirst(>=(size), sizes)
     return findfirst(==(sizes[j === nothing ? lastindex(sizes) : j]), ICON_SIZES)::Int
 end
+
+# `icon_size_index` of each style and size up to 64, worked out once: the styles' size lists
+# differ in length, so a search allocates each time it runs.
+const ICON_SIZE_INDEX = [find_icon_size(s, n) for s in eachindex(ICON_STYLES), n in 1:64]
 
 """
     draw_icon(dl, name, pos, size; style = :normal, alpha = 1)

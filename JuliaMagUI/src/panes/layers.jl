@@ -211,21 +211,22 @@ function clear_previews!(ui)
 end
 
 """
-    commit_layer_edit!(app, T, label, map_id, layer_id, shown::T; kwargs...)
+    commit_layer_edit!(app, T, label, map_id, layer_id, shown::T, after = nothing; kwargs...)
 
 Run `Core.set_layer!(s, map_id, layer_id; kwargs...)` on the worker: one undo step. The map
 draws `shown` (an opacity when `T` is `Float64`, the style the layer will be drawn with when
-`T` is `Core.LayerStyle`) at once, and keeps it until a snapshot has this edit: the edit has a
+`T` is `Core.LayerStyle`) at once, and keeps it until a snapshot has this edit. `after` is the
+layer as it will be, kept with the edit for the next one (`pending_layer`). The edit has a
 token of its own, so an older edit that comes back later never ends the live value of a newer
 one (see `settle_previews!`). A failed edit is reported as other edits are, and ends the live
 value too.
 """
 function commit_layer_edit!(app, ::Type{T}, label::AbstractString, map_id::AbstractString,
-        layer_id::AbstractString, shown::T; kwargs...) where {T}
+        layer_id::AbstractString, shown::T, after::Union{Nothing,Core.MapLayer} = nothing; kwargs...) where {T}
     ui = app.ui
     m, id = String(map_id), String(layer_id)
     token = (ui.layer_edits += 1)
-    set_live!(ui, T, (id, shown), LayerEdit{T}(token, id, shown, -1))
+    set_live!(ui, T, (id, shown), LayerEdit{T}(token, id, shown, -1, after))
     submit!(app, label, s -> begin
             try
                 Core.set_layer!(s, m, id; kwargs...)
@@ -750,6 +751,10 @@ function draw_opacity_row(app, dl, mv, r::LayerRow, b::Box)
     return nothing
 end
 
+# The texts of the whole percents, made once, so a slider's value text allocates nothing.
+const PERCENT_TEXTS = [string(k, " %") for k in 0:100]
+slider_percent_text(v::Real)::String = PERCENT_TEXTS[clamp(round(Int, v), 0, 100) + 1]
+
 """
     opacity_slider!(app, mv, layer_id, b)
 
@@ -762,8 +767,7 @@ function opacity_slider!(app, mv, id::AbstractString, sb::Box)
     base = shown_opacity(app, mv, id)   # an edit still on its way shows its value
     pending = ui.opacity_edit !== nothing && ui.opacity_edit.layer == id
     value = 100 * base
-    v, changed, released = slider!(app, "Opacity", sb, value, 0, 100;
-        format = v -> string(round(Int, v), " %"), step = 1)
+    v, changed, released = slider!(app, "Opacity", sb, value, 0, 100; format = slider_percent_text, step = 1)
     same = v == value
     changed && (ui.opacity_preview = same && !pending ? nothing : (String(id), same ? base : v / 100))
     if released

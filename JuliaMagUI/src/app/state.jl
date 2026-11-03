@@ -472,15 +472,17 @@ end
 
 """
 A layer edit on its way that the map already draws live: its `token` (one per edit), the
-`layer` and the `value` drawn (an opacity, or the style the layer will be drawn with), and
-the project `revision` it was done at (-1 while it is on the worker). The live value stays
-until a snapshot of that revision is in (see `commit_layer_edit!`).
+`layer` and the `value` drawn (an opacity, or the style the layer will be drawn with), the
+project `revision` it was done at (-1 while it is on the worker), and the layer as it will be
+once the edit is in (`after`; `nothing` for an opacity), so a quick next edit builds on it.
+The live value stays until a snapshot of that revision is in (see `commit_layer_edit!`).
 """
 mutable struct LayerEdit{T}
     token::Int
     layer::String
     value::T
     revision::Int
+    after::Union{Nothing,Core.MapLayer}
 end
 
 """

@@ -86,21 +86,22 @@ setting_hint!(app, d, g, st::Core.SettingSpec, text::AbstractString = st.help) =
 # --- Text fields ---
 
 """
-    field!(app, d, key, b, text; kwargs...) -> Union{Nothing,String}
+    field!(app, d, key, b, text; id = "##" * key, kwargs...) -> Union{Nothing,String}
 
 A text field for `key` in box `b` (see `text_field!`), its buffer kept by the dialog and
-filled from `text` when the dialog has none. Returns the new text when it changed.
+filled from `text` when the dialog has none. `id` is its ImGui id; a caller that draws it each
+frame can pass a constant, so no string is made. Returns the new text when it changed.
 """
-function field!(app, d, key::AbstractString, b::Box, text::AbstractString; kwargs...)
+function field!(app, d, key::AbstractString, b::Box, text::AbstractString; id::AbstractString = "##" * key, kwargs...)
     buf = get!(() -> set_field!(zeros(UInt8, FIELD_BYTES), text), d.buffers, key)
     focus = d.focus == key
     focus && (d.focus = "")
-    changed = text_field!(app, "##" * key, buf, snap(b); focus, kwargs...)
-    id = ig.GetItemID()
-    d.field_ids[String(key)] = id
+    changed = text_field!(app, id, buf, snap(b); focus, kwargs...)
+    item = ig.GetItemID()
+    d.field_ids[String(key)] = item
     c = d.caret
     if c !== nothing && first(c) == key && ig.IsItemActive()   # after a chip put a name in
-        st = lib.igGetInputTextState(id)
+        st = lib.igGetInputTextState(item)
         st == C_NULL || lib.ImGuiInputTextState_SetSelection(st, last(c), last(c))
         d.caret = nothing
     end
@@ -284,16 +285,17 @@ function segmented!(app, id::AbstractString, x::Real, b::Box, options, current)
     dl = ig.GetWindowDrawList()
     r = fpx(s, 5)
     role(v) = v == current ? FONT_SEMIBOLD : FONT_REGULAR
-    widths = [text_width(role(v), BODY_FONT_SIZE, l) + fpx(s, 20) for (v, l, _) in options]
+    seg_w(v, l) = text_width(role(v), BODY_FONT_SIZE, l) + fpx(s, 20)
     n = length(options)
-    outer = snap(Box(x, b.y0, x + 2 * hl + sum(widths) + (n - 1) * hl, b.y1))
+    total = sum(o -> seg_w(o[1], o[2]), options)
+    outer = snap(Box(x, b.y0, x + 2 * hl + total + (n - 1) * hl, b.y1))
     ig.AddRectFilled(dl, (outer.x0, outer.y0), (outer.x1, outer.y1), u32(t.input), r)
     cx = outer.x0 + hl
     picked = nothing
     ig.PushID(id)
     for (k, (v, label, enabled)) in enumerate(options)
         k > 1 && (ig.AddRectFilled(dl, (cx, outer.y0), (cx + hl, outer.y1), u32(t.input_border)); cx += hl)
-        seg = Box(cx, outer.y0 + hl, k == n ? outer.x1 - hl : rnd(cx + widths[k]), outer.y1 - hl)
+        seg = Box(cx, outer.y0 + hl, k == n ? outer.x1 - hl : rnd(cx + seg_w(v, label)), outer.y1 - hl)
         clicked, hovered, _ = hit(string(v), seg)
         on = v == current
         corners = Int(n == 1 ? lib.ImDrawFlags_RoundAll : k == 1 ? lib.ImDrawFlags_RoundLeft :

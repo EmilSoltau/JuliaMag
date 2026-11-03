@@ -88,6 +88,9 @@ window_testset("layer style pane") do
             ctx.wait_until(() -> style_layer(app, ids.m, ids.ld).style.min == 120.0)
             ctx.frames(2)
             @test style_undo_depth(s) == n + 1 && style_line_draw(app).lo == 120f0
+            ctx.type(style_ref(ids.ld, "##min"), "120.0")    # the value it has: no step (T14 review)
+            ctx.frames(3)
+            @test style_undo_depth(s) == n + 1 && app.ui.style_pending === nothing
             ctx.click(style_ref(ids.ld, "Stretch", "clip"))
             ctx.wait_until(() -> style_layer(app, ids.m, ids.ld).style.stretch == :clip)
             ctx.frames(2)
@@ -178,11 +181,23 @@ window_testset("layer style pane") do
             @test haskey(app.ui.style_pane.boxes, "zfactor hint")
         end
 
-        @testset "own colours start from the grid's style; Nearest shows square cells" begin
+        @testset "own colours start from the colours shown; Nearest shows square cells" begin
+            # The app's "Grid colours" is not the grid's stock table: the untick keeps what shows.
+            ctx.on_render(w -> (app.config.grid_colours = "turbo"))
+            ctx.frames(2)
+            turbo = UI.lut_rgba!(UInt8[], "turbo", false)
+            @test style_grid_draw(app).lut == turbo
             ctx.click(style_ref(ids.lg, "Use the grid's default colours"))
+            p = app.ui.style_preview
+            @test p !== nothing && p[2].colours == "turbo" && style_grid_draw(app).lut == turbo
             ctx.wait_until(() -> style_layer(app, ids.m, ids.lg).own_style)
             l = style_layer(app, ids.m, ids.lg)
-            @test l.style.colours == "geosoft" && l.style.shade
+            @test l.style == p[2] && l.style.colours == "turbo" && l.style.shade
+            ctx.frames(2)
+            @test style_grid_draw(app).lut == turbo
+            ctx.on_render(w -> (app.config.grid_colours = "geosoft"))
+            ctx.frames(2)
+            @test style_grid_draw(app).lut == turbo                  # its own colours now
             ctx.click(style_ref(ids.lg, "Hillshade"))
             ctx.wait_until(() -> !style_layer(app, ids.m, ids.lg).style.shade)
             ctx.click(style_ref(ids.lg, "Cells", "nearest"))
@@ -216,6 +231,32 @@ window_testset("layer style pane") do
             ctx.shot(joinpath(STYLE_SHOTS, "style-missing-light.png"))
             @test isempty(app.draw_errors)
         end
+    end
+
+    # A steady frame of the pane allocates nothing (T14 review): each layer kind, with the number
+    # fields of a linear stretch and the sun sliders shown.
+    s3, ids3 = style_project()
+    Core.set_layer!(s3, ids3.m, ids3.ld; style = Core.LayerStyle(stretch = :linear))
+    Core.set_layer!(s3, ids3.m, ids3.lg; style = Core.LayerStyle(shade = true))
+    with_project_app(s3) do ctx, app
+        for id in (ids3.ld, ids3.lg)
+            ctx.on_render(w -> (app.ui.layer_selected = id; UI.open_layer_style!(app)))
+            ctx.wait_until(() -> map_loaded(app))
+            ctx.frames(3)
+            bytes = Int[]
+            for _ in 1:3
+                ctx.on_render(w -> begin
+                    UI.ig.Begin("pane allocations")
+                    dl = UI.ig.GetWindowDrawList()
+                    b = UI.Box(0, 0, 300, 800)
+                    UI.draw_style_pane(app, dl, b)       # warm
+                    push!(bytes, @allocated UI.draw_style_pane(app, dl, b))
+                    UI.ig.End()
+                end)
+            end
+            @test bytes == [0, 0, 0]
+        end
+        @test isempty(app.draw_errors)
     end
 
     # The pane for a line layer and a grid layer in both themes, at scale 1 and 1.5.

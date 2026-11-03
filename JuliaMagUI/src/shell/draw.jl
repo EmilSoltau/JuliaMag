@@ -52,6 +52,15 @@ The width of `text` in device pixels, in font `role` at `size` logical pixels.
 text_width(role::FontRole, size::Real, text::AbstractString)::Float32 =
     with_font(() -> Float32(ig.CalcTextSize(text).x), role, size)
 
+"The width of the text in a text field's zero-ended byte `buffer`, as `text_width`; makes no string."
+function buffer_width(role::FontRole, size::Real, buf::Vector{UInt8})::Float32
+    n = something(findfirst(iszero, buf), length(buf) + 1) - 1
+    return GC.@preserve buf with_font(role, size) do
+        p = pointer(buf)
+        Float32(lib.igCalcTextSize(p, p + n, false, -1f0).x)
+    end
+end
+
 """
     draw_text(dl, role, size, x, y, col, text)
 
@@ -118,13 +127,20 @@ spaced_width(role::FontRole, size::Real, text::AbstractString, spacing::Real)::F
 """
 function draw_spaced_text(dl, role::FontRole, size::Real, x::Real, mid_y::Real, col::UInt32,
         text::AbstractString, spacing::Real)
+    s = String(text)
     with_font(role, size) do
         y = text_y(role, size, mid_y)
         cx = Float32(x)
-        for c in text
-            ch = string(c)
-            ig.AddText(dl, (round(cx), y), col, ch)
-            cx += Float32(ig.CalcTextSize(ch).x) + Float32(spacing)
+        # Each character as a slice of `s`, so no string is made per character.
+        GC.@preserve s begin
+            i = firstindex(s)
+            while i <= ncodeunits(s)
+                j = nextind(s, i)
+                a, b = pointer(s, i), pointer(s, j)
+                lib.ImDrawList_AddText_Vec2(dl, ig.ImVec2(round(cx), y), col, a, b)
+                cx += Float32(lib.igCalcTextSize(a, b, false, -1f0).x) + Float32(spacing)
+                i = j
+            end
         end
     end
     return nothing

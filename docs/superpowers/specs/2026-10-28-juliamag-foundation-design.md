@@ -215,6 +215,9 @@ Values are stored as a raw array, memory-mapped.
 Claude's call on colour: the grid has a default colour style.
 A map layer uses that style unless the layer sets its own.
 This keeps Oasis's "the grid remembers its colours" and still lets one grid look different on two maps.
+The shading belongs to the map layer: hillshade, the sun, the vertical scale and the cells (nearest or bilinear).
+A new layer starts with its grid's shading, and from then on it keeps its own.
+So "Save as grid default" changes the colours of layers that use the grid's colours, but not their shading.
 
 ### 5.5 Map
 

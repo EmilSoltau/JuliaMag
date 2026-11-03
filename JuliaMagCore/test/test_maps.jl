@@ -91,10 +91,15 @@ end
     layer(id) = only(filter(x -> x.id == id, map_item(s.project, m).layers))
     l = layer(add_layer!(s, m, g))
     @test !l.own_style && l.style.shade && l.style.declination == 300.0 && l.style.inclination == 30.0
-    @test l.style.zfactor == 2.0 && l.style.colours == "geosoft"   # the colours still come from the grid
+    @test l.style.zfactor == 2.0
+    gs = grid(s.project, g).style
+    @test effective_style(l, gs, "turbo").colours == "viridis"   # the colours still come from the grid
     l2 = layer(add_layer!(s, m, g2))
     # An altitude out of range is clamped, and a vertical scale that is not above 0 means auto.
     @test !l2.style.shade && l2.style.inclination == 90.0 && l2.style.declination == 10.0 && isnan(l2.style.zfactor)
+    # An azimuth outside 0 to 360 turns into that range.
+    @test JuliaMagCore.grid_shading(GridStyle("geosoft", :histeq, NaN, NaN, false, true, -30.0, 45.0, 1.0)).declination == 330.0
+    @test JuliaMagCore.grid_shading(GridStyle("geosoft", :histeq, NaN, NaN, false, true, 400.0, 45.0, 1.0)).declination == 40.0
     close_session!(s)
 end
 

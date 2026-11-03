@@ -48,15 +48,19 @@ style_cmd(app, id) = only(filter(c -> c.id == id, commands(app)))
         @test_throws ArgumentError style_edit(G, :channel, "MAG")
         @test_throws ArgumentError style_edit(G, :reverse, true)
         @test_throws ArgumentError style_edit(G, :stretch, :linear)
-        # Unticking "Use the grid's default colours" starts from the grid's stored style, not
-        # the app's colours resolved into it; the layer keeps its own shading.
+        # Unticking "Use the grid's default colours" starts from the style the layer shows: the
+        # app's "Grid colours" for a grid with the stock table, so the colours do not jump. The
+        # layer keeps its own shading.
         gs = Core.GridStyle("geosoft", :linear, 1.0, 9.0, true, false, 45.0, 45.0, 1.0)
         Gs = Core.MapLayer("layer-3", "grid-1", :grid, "", true, 1.0, false, false,
                            Core.LayerStyle(shade = true, inclination = 30.0))
-        e = style_edit(Gs, :own_style, true; grid = gs)
-        @test e.own_style && e.style.colours == "geosoft" && e.style.stretch == :linear
+        e = style_edit(Gs, :own_style, true; grid = gs, app_colours = "turbo")
+        @test e.own_style && e.style.colours == "turbo" && e.style.stretch == :linear
+        @test e.style == Core.effective_style(Gs, gs, "turbo")
         @test e.style.min == 1.0 && e.style.max == 9.0 && e.style.reverse
         @test e.style.shade && e.style.inclination == 30.0
+        own_table = Core.GridStyle("viridis", :histeq, NaN, NaN, false, false, 45.0, 45.0, 1.0)
+        @test style_edit(Gs, :own_style, true; grid = own_table, app_colours = "turbo").style.colours == "viridis"
         @test style_edit(Gs, :own_style, false) == (; own_style = false)
         own = Core.MapLayer("layer-4", "grid-1", :grid, "", true, 1.0, false, true, Core.LayerStyle())
         @test style_edit(own, :colours, "turbo").style.colours == "turbo"   # its own colours can change
@@ -160,6 +164,38 @@ style_cmd(app, id) = only(filter(c -> c.id == id, commands(app)))
             app.ui.style_preview = (l, Core.LayerStyle())
             UI.set_session!(app, s)
             @test app.ui.style_preview === nothing && app.ui.style_pending === nothing
+        end
+    end
+
+    @testset "edits build on a pending one; checkboxes read it; a no-op makes no step (T14 review)" begin
+        s = fresh_session(); g = add_test_grid!(s, Float32[i + j for i in 1:20, j in 1:10]); db = survey_database!(s)
+        m = Core.new_map!(s); lg = Core.add_layer!(s, m, g); ld = Core.add_layer!(s, m, db)
+        with_app(test_app_state(s)) do app
+            app.config.grid_colours = "turbo"
+            refresh_now!(app); app.ui.current_map = m; app.ui.layer_selected = lg
+            layer(id) = only(l for l in app.snap.maps[m].layers if l.id == id)
+            n = length(s.undo_stack)
+            # Untick, then the ribbon's Hillshade before the snapshot has the untick.
+            apply_style_edit!(app, app.snap.maps[m], layer(lg), :own_style, true)
+            @test UI.pending_layer(app, layer(lg)).own_style            # read from the edit on its way
+            style_cmd(app, "map.hillshade").run(app)
+            wait_drained(app); refresh_now!(app); settle_previews!(app)
+            l = layer(lg)
+            @test l.own_style && l.style.shade && l.style.colours == "turbo" && length(s.undo_stack) == n + 2
+            # A second quick click of Line labels sends the other value, not the same one again.
+            app.ui.layer_selected = ld
+            apply_style_edit!(app, app.snap.maps[m], layer(ld), :labels, false)
+            @test !UI.pending_layer(app, layer(ld)).labels
+            apply_style_edit!(app, app.snap.maps[m], layer(ld), :labels, !UI.pending_layer(app, layer(ld)).labels)
+            wait_drained(app); refresh_now!(app); settle_previews!(app)
+            @test layer(ld).labels && length(s.undo_stack) == n + 4
+            # An edit to the value the layer has makes no step and no live style.
+            apply_style_edit!(app, app.snap.maps[m], layer(ld), :labels, true)
+            apply_style_edit!(app, app.snap.maps[m], layer(ld), :colours, layer(ld).style.colours)
+            apply_style_edit!(app, app.snap.maps[m], layer(ld), :min, NaN)
+            @test app.ui.style_pending === nothing && app.ui.style_preview === nothing
+            wait_drained(app); refresh_now!(app)
+            @test length(s.undo_stack) == n + 4
         end
     end
 

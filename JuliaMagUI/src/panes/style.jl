@@ -35,13 +35,22 @@ const STYLE_END = 16          # space under the last row
 const COLOUR_FIELDS = (:colours, :reverse, :stretch, :min, :max, :clip_low, :clip_high)
 const SHADING_FIELDS = (:shade, :inclination, :declination, :zfactor, :resample)
 
-const STRETCH_OPTIONS = ((:linear, "Linear", true), (:clip, "Clip", true), (:histeq, "Equalize", true))
-const CELL_OPTIONS = ((:nearest, "Nearest", true), (:bilinear, "Bilinear", true))
+# The segments of Stretch and Cells. Their values are texts, so a segment's id is made once.
+const STRETCH_OPTIONS = (("linear", "Linear", true), ("clip", "Clip", true), ("histeq", "Equalize", true))
+const CELL_OPTIONS = (("nearest", "Nearest", true), ("bilinear", "Bilinear", true))
+
+# The value text of option list `options` for `v`, as the list holds it (no new string).
+function option_key(options, v::Symbol)::String
+    for o in options
+        Symbol(o[1]) === v && return o[1]
+    end
+    return ""
+end
 
 # --- Edits ---
 
 """
-    style_edit(layer, field, value; grid = nothing) -> NamedTuple
+    style_edit(layer, field, value; grid = nothing, app_colours = "geosoft") -> NamedTuple
 
 The keywords of `Core.set_layer!` for one edit of `layer`: `field` set to `value`. Pure: the
 layer is not changed.
@@ -51,15 +60,17 @@ layer is not changed.
   `:reverse`, `:stretch`, `:min` and `:max` (`NaN` is the data's own), `:clip_low` and
   `:clip_high` (clamped to 0 to 49), `:shade`, `:inclination` (clamped to 0 to 90),
   `:declination` (clamped to 0 to 360), `:zfactor` (`NaN` is automatic) and `:resample`.
-- `:own_style`: off gives `own_style = false`; on gives `own_style = true` and a style that
-  starts from the grid's stored style `grid` (its own colour table, not the app's "Grid
-  colours" resolved into it) with the layer's own shading.
+- `:own_style`: off gives `own_style = false`; on gives `own_style = true` and the style the
+  layer shows now: its effective style with the grid's stored style `grid` and the app's
+  "Grid colours" `app_colours` (`Core.effective_style`), so the colours do not change. The
+  layer keeps its own shading.
 
 Throws `ArgumentError` for a value the style cannot have, a colour field of a grid layer that
 uses its grid's colours (`own_style = false`), a channel of a grid layer, `own_style` of a line
 layer, or an unknown field.
 """
-function style_edit(l::Core.MapLayer, field::Symbol, value; grid::Union{Nothing,Core.GridStyle} = nothing)::NamedTuple
+function style_edit(l::Core.MapLayer, field::Symbol, value; grid::Union{Nothing,Core.GridStyle} = nothing,
+        app_colours::AbstractString = Core.GridStyle().colours)::NamedTuple
     if field === :channel
         l.kind == :lines || throw(ArgumentError("a grid layer has no colour channel"))
         return (; channel = text_value("the channel", value))
@@ -72,7 +83,7 @@ function style_edit(l::Core.MapLayer, field::Symbol, value; grid::Union{Nothing,
     elseif field === :own_style
         l.kind == :lines && throw(ArgumentError("a line layer always has its own colours"))
         flag_value("own_style", value) || return (; own_style = false)
-        st = copy(grid === nothing ? l.style : Core.effective_style(l, grid, grid.colours))
+        st = copy(Core.effective_style(l, grid, app_colours))
         return (; own_style = true, style = st)
     end
     if field in COLOUR_FIELDS
@@ -153,21 +164,21 @@ end
 """
     pending_layer(app, l) -> Core.MapLayer
 
-Layer `l` of the snapshot as it will be once a style edit on its way is in (`ui.style_pending`),
-so a second quick edit builds on the first; `l` itself when none is on its way.
+Layer `l` of the snapshot as it will be once the style edit on its way is in
+(`ui.style_pending`): its colours flag, style, line labels and channel. So a second quick edit
+builds on the first, and a checkbox shows the value it will have. `l` itself when no edit is
+on its way.
 """
 function pending_layer(app, l::Core.MapLayer)::Core.MapLayer
     ed = app.ui.style_pending
     (ed === nothing || ed.layer != l.id) && return l
+    after = ed.after
+    after === nothing && return l
     out = copy(l)
-    if l.kind == :lines || l.own_style
-        out.style = copy(ed.value)
-    else   # the drawn style has the grid's colours; only the shading is the layer's
-        st = out.style
-        v = ed.value
-        st.shade, st.inclination, st.declination, st.zfactor, st.resample =
-            v.shade, v.inclination, v.declination, v.zfactor, v.resample
-    end
+    out.own_style = after.own_style
+    out.style = copy(after.style)
+    out.labels = after.labels
+    out.channel = after.channel
     return out
 end
 
@@ -188,24 +199,29 @@ end
     apply_style_edit!(app, mv, l, field, value; label)
 
 Set `field` of layer `l` of map view `mv` to `value` (`style_edit`), as one undo step on the
-worker. A change of the style draws at once and stays until a snapshot has it
-(`commit_layer_edit!`). The Layer Style pane and the ribbon's Hillshade use it.
+worker, built on an edit still on its way (`pending_layer`). The new look draws at once and
+stays until a snapshot has it (`commit_layer_edit!`). A value the layer has already makes no
+step. The Layer Style pane and the ribbon's Hillshade use it.
 """
 function apply_style_edit!(app, mv, l::Core.MapLayer, field::Symbol, value;
         label::AbstractString = edit_label(field, value))
     gs = layer_grid_style(app, l)
+    colours = app.config.grid_colours
     now = pending_layer(app, l)
-    kw = style_edit(now, field, value; grid = gs)
+    kw = style_edit(now, field, value; grid = gs, app_colours = colours)
     m, id = String(mv.id), l.id
-    if haskey(kw, :style)
-        after = copy(now)
-        after.style = kw.style
-        haskey(kw, :own_style) && (after.own_style = kw.own_style)
-        shown = Core.effective_style(after, gs, app.config.grid_colours)
-        commit_layer_edit!(app, Core.LayerStyle, label, m, id, shown; kw...)
-    else
-        submit!(app, label, s -> Core.set_layer!(s, m, id; kw...))
+    if haskey(kw, :opacity)
+        isequal(kw.opacity, l.opacity) || commit_opacity!(app, m, id, kw.opacity)
+        return nothing
     end
+    after = copy(now)
+    haskey(kw, :style) && (after.style = kw.style)
+    haskey(kw, :own_style) && (after.own_style = kw.own_style)
+    haskey(kw, :labels) && (after.labels = kw.labels)
+    haskey(kw, :channel) && (after.channel = kw.channel)
+    after == now && return nothing   # no change: no step
+    shown = Core.effective_style(after, gs, colours)
+    commit_layer_edit!(app, Core.LayerStyle, label, m, id, shown, after; kw...)
     return nothing
 end
 
@@ -287,11 +303,32 @@ function style_message(app)::Union{Nothing,String}
     return st.missing ? st.error : nothing
 end
 
+# Where the next row of the pane goes: the left and right of the controls, and the top.
+mutable struct StyleFlow
+    x0::Float32
+    x1::Float32
+    y::Float32
+end
+
+"""
+A menu of the pane's combos, made once per `StyleCache`: `kind` is `:channel` (Colour by) or
+`:table` (Colour table). Calling it gives the rows.
+"""
+struct StyleMenu <: Function
+    cache::Any
+    mv::Any
+    kind::Symbol
+end
+
+(m::StyleMenu)() = m.kind === :channel ? channel_menu(m.cache, m.mv) : table_menu(m.cache, m.mv)
+
 """
 What the pane shows of one layer, kept while its key holds: the snapshot, the map, the layer,
 the loader's `version`, the app's grid colours and the style edit on its way.
 
-- `layer`: the layer; `style`: the style shown (`shown_style`); `fields`: `style_fields`.
+- `layer`: the layer of the snapshot; `shown`: as it will be with the edit on its way
+  (`pending_layer`), whose flags the checkboxes show; `style`: the style shown
+  (`shown_style`); `fields`: `style_fields`.
 - `name`: its item's name; `missing`, `error`: as the Layers tab's row (`layer_status`).
 - `channels`: what Colour by lists (`colour_channels`); `table`: the colour table's label.
 - `legend`: the low and high values of the stretch, as text; `note`: why there are none, or `""`.
@@ -299,6 +336,8 @@ the loader's `version`, the app's grid colours and the style edit on its way.
 - `texts`: the text of each number field, by key; `zhint`: the Vertical scale's hint
   (`auto_scale_hint`).
 - `wrap_w`, `wraps`: hints wrapped to the width `wrap_w`, by text.
+- `channel_items`, `table_items`: the menus of Colour by and Colour table, made once.
+- `flow`: where the rows go, set again each frame.
 """
 mutable struct StyleCache
     snap::Any
@@ -308,6 +347,7 @@ mutable struct StyleCache
     colours::String
     pending::Any
     layer::Core.MapLayer
+    shown::Core.MapLayer
     style::Core.LayerStyle
     fields::Vector{Symbol}
     name::String
@@ -323,6 +363,9 @@ mutable struct StyleCache
     zhint::String
     wrap_w::Float32
     wraps::Dict{String,Vector{String}}
+    channel_items::StyleMenu
+    table_items::StyleMenu
+    flow::StyleFlow
 end
 
 """
@@ -355,6 +398,7 @@ function style_cache(app, mv, l::Core.MapLayer)::StyleCache
         end
     end
     style = shown_style(app, l)
+    shown = pending_layer(app, l)
     st = layer_status(snap, mv, l, ms.entries)
     e = get(ms.entries, layer_key(snap, mv, l), nothing)
     d = e === nothing ? nothing : e.data
@@ -378,12 +422,31 @@ function style_cache(app, mv, l::Core.MapLayer)::StyleCache
         "clip_low" => field_num(style.clip_low), "clip_high" => field_num(style.clip_high),
         "zfactor" => field_num(style.zfactor))
     zhint = d isa GridLayerData ? auto_scale_hint(d.mean_gradient) : auto_scale_hint(nothing)
-    c = StyleCache(snap, mv.id, l.id, ms.version, colours, pending, l, style, style_fields(l, style), st.name,
-        st.missing, st.error, channels, table, legend, note, has ? field_num(round(d.hist.lo; sigdigits = 6)) : "",
-        has ? field_num(round(d.hist.hi; sigdigits = 6)) : "", texts, zhint, -1f0, Dict{String,Vector{String}}())
-    pane.cache = c
-    return c
+    out = StyleCache(snap, mv.id, l.id, ms.version, colours, pending, l, shown, style, style_fields(shown, style),
+        st.name, st.missing, st.error, channels, table, legend, note,
+        has ? field_num(round(d.hist.lo; sigdigits = 6)) : "", has ? field_num(round(d.hist.hi; sigdigits = 6)) : "",
+        texts, zhint, -1f0, Dict{String,Vector{String}}(), StyleMenu(nothing, mv, :channel),
+        StyleMenu(nothing, mv, :table), StyleFlow(0f0, 0f0, 0f0))
+    out.channel_items = StyleMenu(out, mv, :channel)
+    out.table_items = StyleMenu(out, mv, :table)
+    pane.cache = out
+    return out
 end
+
+# The rows of Colour by: "One colour", then the channels a line layer can colour by.
+function channel_menu(c::StyleCache, mv)::Vector{MenuItem}
+    l = c.layer
+    rows = [MenuItem(STYLE_ONE_COLOUR; checked = isempty(c.shown.channel), action = a -> apply_style_edit!(a, mv, l, :channel, ""))]
+    for n in c.channels
+        push!(rows, MenuItem(n; checked = n == c.shown.channel, action = a -> apply_style_edit!(a, mv, l, :channel, n)))
+    end
+    return rows
+end
+
+# The rows of Colour table: each table as a strip and its label.
+table_menu(c::StyleCache, mv)::Vector{MenuItem} =
+    [MenuItem(label; ramp = name, checked = name == c.style.colours,
+        action = a -> apply_style_edit!(a, mv, c.layer, :colours, name)) for (name, label) in Core.colour_tables()]
 
 # `text` wrapped to `w` device px, kept in the cache while the width holds.
 function style_lines!(c::StyleCache, role::FontRole, size::Real, text::String, w::Float32)::Vector{String}
@@ -405,32 +468,39 @@ then its fields in sections (Colours; Shading for a grid; Display; Legend), scro
 do not fit. Without a layer to style it says why (`style_message`).
 """
 function draw_style_pane(app, dl, body::Box)
-    s = app.window.scale
-    f(v) = fpx(s, v)
     pane = app.ui.style_pane
     empty!(pane.boxes)
     ig.PushID("style")
-    # As `style_message`, but the selected layer's state comes from the cache.
-    mv = has_session(app) ? shown_map(app) : nothing
-    msg = mv === nothing ? LAYERS_NO_MAP : isempty(mv.error) ? nothing : mv.error
-    l = msg === nothing ? selected_layer(app, something(mv)) : nothing
-    msg === nothing && l === nothing && (msg = STYLE_NO_LAYER)
-    view = body
-    if l !== nothing
-        c = style_cache(app, something(mv), l)
-        head = Box(body.x0, body.y0, body.x1, rnd(body.y0 + f(STYLE_HEAD_H)))
-        draw_style_head(app, dl, head, c)
-        view = Box(body.x0, head.y1, body.x1, body.y1)
-        if !c.missing
-            draw_style_fields(app, dl, view, something(mv), c)
-            ig.PopID()
-            return nothing
-        end
-        msg = c.error
+    # As `style_message`, but the selected layer's state comes from the cache. Not `shown_map`:
+    # its `Union` result boxes the map view, and a steady frame of the pane allocates nothing.
+    snap = app.snap
+    id = app.ui.current_map
+    if has_session(app) && snap !== nothing && haskey(snap.maps, id)
+        draw_style_map!(app, dl, body, snap.maps[id])
+    else
+        draw_style_message!(app, dl, body, LAYERS_NO_MAP)
     end
-    pane.scroll = 0f0
-    draw_layers_empty(app, dl, view, something(msg); add = false)
     ig.PopID()
+    return nothing
+end
+
+function draw_style_map!(app, dl, body::Box, mv::MapView)
+    isempty(mv.error) || return draw_style_message!(app, dl, body, mv.error)
+    l = selected_layer(app, mv)
+    l === nothing && return draw_style_message!(app, dl, body, STYLE_NO_LAYER)
+    c = style_cache(app, mv, l)
+    head = Box(body.x0, body.y0, body.x1, rnd(body.y0 + fpx(app.window.scale, STYLE_HEAD_H)))
+    draw_style_head(app, dl, head, c)
+    view = Box(body.x0, head.y1, body.x1, body.y1)
+    c.missing && return draw_style_message!(app, dl, view, c.error)
+    draw_style_fields(app, dl, view, mv, c)
+    return nothing
+end
+
+# What the pane says in place of the fields, in `view`.
+function draw_style_message!(app, dl, view::Box, text::String)
+    app.ui.style_pane.scroll = 0f0
+    draw_layers_empty(app, dl, view, text; add = false)
     return nothing
 end
 
@@ -456,19 +526,11 @@ function draw_style_head(app, dl, head::Box, c::StyleCache)
     return nothing
 end
 
-# Where the next row of the pane goes: the left and right of the controls, and the top.
-mutable struct StyleFlow
-    x0::Float32
-    x1::Float32
-    y::Float32
-end
-
-# A section title (`.sect`): semibold 11, upper case, spaced, `text_dim`, 26 px high.
-function style_section!(app, dl, g::StyleFlow, title::AbstractString)
+# A section title (`.sect`, `title` in upper case): semibold 11, spaced, `text_dim`, 26 px high.
+function style_section!(app, dl, g::StyleFlow, title::String)
     s = app.window.scale
     h = fpx(s, STYLE_SECT_H)
-    draw_spaced_text(dl, FONT_SEMIBOLD, 11, g.x0, g.y + h / 2, u32(app.tokens.text_dim), uppercase(title),
-        fpx(s, 11 * 0.02))
+    draw_spaced_text(dl, FONT_SEMIBOLD, 11, g.x0, g.y + h / 2, u32(app.tokens.text_dim), title, fpx(s, 11 * 0.02))
     g.y += h
     return nothing
 end
@@ -505,11 +567,12 @@ function draw_style_fields(app, dl, view::Box, mv, c::StyleCache)
     t = app.tokens
     f(v) = fpx(s, v)
     pane = app.ui.style_pane
-    l = c.layer
+    l = c.shown
     st = c.style
     pane.scroll, bar = scroll_area!(app, "scrollbar", view, pane.content_h, pane.scroll)
     right = view.x1 - (bar ? f(SCROLLBAR_W) : 0f0)
-    g = StyleFlow(view.x0 + f(STYLE_PAD), right - f(STYLE_PAD), view.y0 - pane.scroll + f(4))
+    g = c.flow
+    g.x0, g.x1, g.y = view.x0 + f(STYLE_PAD), right - f(STYLE_PAD), view.y0 - pane.scroll + f(4)
     top = g.y
     ig.PushClipRect((view.x0, view.y0), (right, view.y1), true)
     ig.PushID(l.id)
@@ -518,13 +581,13 @@ function draw_style_fields(app, dl, view::Box, mv, c::StyleCache)
         style_hint!(app, dl, g, c, "error", c.error; error = true)
         g.y += f(2)
     end
-    style_section!(app, dl, g, "Colours")
+    style_section!(app, dl, g, "COLOURS")
     if l.kind == :lines
         draw_channel_row!(app, dl, g, mv, c)
     else
         mid = g.y + f(BODY_FONT_SIZE * LABEL_LINE) / 2
         checkbox!(app, "Use the grid's default colours", g.x0, mid, "Use the grid's default colours", !l.own_style) &&
-            apply_style_edit!(app, mv, l, :own_style, !l.own_style)
+            apply_style_edit!(app, mv, c.layer, :own_style, !l.own_style)
         g.y = mid + f(BODY_FONT_SIZE * LABEL_LINE) / 2
         l.own_style || style_hint!(app, dl, g, c, "own hint", STYLE_OWN_HINT)
     end
@@ -545,31 +608,32 @@ function draw_style_fields(app, dl, view::Box, mv, c::StyleCache)
     end
     if l.kind == :grid
         next_row!(app, g)
-        style_section!(app, dl, g, "Shading")
+        style_section!(app, dl, g, "SHADING")
         draw_shading_rows!(app, dl, g, mv, c)
     end
     next_row!(app, g)
-    style_section!(app, dl, g, "Display")
+    style_section!(app, dl, g, "DISPLAY")
     if l.kind == :grid
         y = style_label!(app, dl, g.x0, g.y, "Cells")
-        v = segmented!(app, "Cells", g.x0, Box(g.x0, y, g.x1, y + f(COMBO_H)), CELL_OPTIONS, st.resample)
-        (v === nothing || v === st.resample) || apply_style_edit!(app, mv, l, :resample, v)
+        v = segmented!(app, "Cells", g.x0, Box(g.x0, y, g.x1, y + f(COMBO_H)), CELL_OPTIONS,
+            option_key(CELL_OPTIONS, st.resample))
+        v === nothing || apply_style_edit!(app, mv, c.layer, :resample, Symbol(v))
         g.y = y + f(COMBO_H)
     else
         mid = g.y + f(BODY_FONT_SIZE * LABEL_LINE) / 2
         checkbox!(app, "Line labels", g.x0, mid, "Line labels", l.labels) &&
-            apply_style_edit!(app, mv, l, :labels, !l.labels)
+            apply_style_edit!(app, mv, c.layer, :labels, !l.labels)
         g.y = mid + f(BODY_FONT_SIZE * LABEL_LINE) / 2
     end
     next_row!(app, g)
     y = style_label!(app, dl, g.x0, g.y, "Opacity")
     sb = Box(g.x0, y + f((COMBO_H - STYLE_SLIDER_H) / 2), g.x1, y + f((COMBO_H + STYLE_SLIDER_H) / 2))
-    opacity_slider!(app, mv, l.id, sb)
+    opacity_slider!(app, mv, c.layer.id, sb)
     pane.boxes["opacity"] = Box(sb.x0, sb.y0, sb.x1 - f(SLIDER_VALUE_W + 8), sb.y1)
     g.y = y + f(COMBO_H)
     if :colours in c.fields
         next_row!(app, g)
-        style_section!(app, dl, g, "Legend")
+        style_section!(app, dl, g, "LEGEND")
         draw_style_legend!(app, dl, g, c)
     end
     ig.PopID()
@@ -581,17 +645,10 @@ end
 # Colour by: "One colour" and the channels a line layer can colour by.
 function draw_channel_row!(app, dl, g::StyleFlow, mv, c::StyleCache)
     s = app.window.scale
-    l = c.layer
     y = style_label!(app, dl, g.x0, g.y, "Colour by")
-    text = isempty(l.channel) ? STYLE_ONE_COLOUR : l.channel
-    items = () -> begin
-        rows = [MenuItem(STYLE_ONE_COLOUR; checked = isempty(l.channel), action = a -> apply_style_edit!(a, mv, l, :channel, ""))]
-        for n in c.channels
-            push!(rows, MenuItem(n; checked = n == l.channel, action = a -> apply_style_edit!(a, mv, l, :channel, n)))
-        end
-        rows
-    end
-    combo!(app, "Colour by", Box(g.x0, y, g.x1, y + fpx(s, COMBO_H)), text; items, owner = "style/channel")
+    ch = c.shown.channel
+    combo!(app, "Colour by", Box(g.x0, y, g.x1, y + fpx(s, COMBO_H)), isempty(ch) ? STYLE_ONE_COLOUR : ch;
+        items = c.channel_items, owner = "style/channel")
     g.y = y + fpx(s, COMBO_H)
     return nothing
 end
@@ -609,9 +666,7 @@ function draw_colour_rows!(app, dl, g::StyleFlow, mv, c::StyleCache)
     row = Box(g.x0, y, g.x1, y + f(COMBO_H))
     strip = width(row) >= f(STYLE_RAMP_W + 6 + 100)
     cx1 = strip ? row.x1 - f(STYLE_RAMP_W + 6) : row.x1
-    items = () -> [MenuItem(label; ramp = name, checked = name == st.colours,
-        action = a -> apply_style_edit!(a, mv, l, :colours, name)) for (name, label) in Core.colour_tables()]
-    combo!(app, "Colour table", Box(row.x0, row.y0, cx1, row.y1), c.table; items, owner = "style/colours")
+    combo!(app, "Colour table", Box(row.x0, row.y0, cx1, row.y1), c.table; items = c.table_items, owner = "style/colours")
     if strip
         mid = centre_y(row)
         r = snap(Box(row.x1 - f(STYLE_RAMP_W), mid - f(STYLE_RAMP_H / 2), row.x1, mid + f(STYLE_RAMP_H / 2)))
@@ -626,28 +681,29 @@ function draw_colour_rows!(app, dl, g::StyleFlow, mv, c::StyleCache)
     g.y = mid + f(BODY_FONT_SIZE * LABEL_LINE) / 2
     next_row!(app, g)
     y = style_label!(app, dl, g.x0, g.y, "Stretch")
-    v = segmented!(app, "Stretch", g.x0, Box(g.x0, y, g.x1, y + f(COMBO_H)), STRETCH_OPTIONS, st.stretch)
-    (v === nothing || v === st.stretch) || apply_style_edit!(app, mv, l, :stretch, v)
+    v = segmented!(app, "Stretch", g.x0, Box(g.x0, y, g.x1, y + f(COMBO_H)), STRETCH_OPTIONS,
+        option_key(STRETCH_OPTIONS, st.stretch))
+    v === nothing || apply_style_edit!(app, mv, l, :stretch, Symbol(v))
     g.y = y + f(COMBO_H)
     if st.stretch === :linear
         next_row!(app, g)
         number_pair!(app, dl, g, mv, c, ("min", :min, "Minimum", c.data_lo), ("max", :max, "Maximum", c.data_hi))
-        pair_hint!(app, dl, g, c, ("min", "max"), STYLE_LIMITS_HINT)
+        pair_hint!(app, dl, g, c, ("min", "max"), "min hint", STYLE_LIMITS_HINT)
     elseif st.stretch === :clip
         next_row!(app, g)
         number_pair!(app, dl, g, mv, c, ("clip_low", :clip_low, "Low clip %", ""), ("clip_high", :clip_high, "High clip %", ""))
-        pair_hint!(app, dl, g, c, ("clip_low", "clip_high"), STYLE_CLIP_HINT)
+        pair_hint!(app, dl, g, c, ("clip_low", "clip_high"), "clip hint", STYLE_CLIP_HINT)
     end
     return nothing
 end
 
-# The hint under a pair of fields: the error of one of them, else `text`.
-function pair_hint!(app, dl, g::StyleFlow, c::StyleCache, keys::NTuple{2,String}, text::String)
+# The hint `key` under a pair of fields: the error of one of them, else `text`.
+function pair_hint!(app, dl, g::StyleFlow, c::StyleCache, keys::NTuple{2,String}, key::String, text::String)
     errors = app.ui.style_pane.errors
     for k in keys
-        haskey(errors, k) && return style_hint!(app, dl, g, c, k * " hint", errors[k]; error = true)
+        haskey(errors, k) && return style_hint!(app, dl, g, c, key, errors[k]; error = true)
     end
-    return style_hint!(app, dl, g, c, keys[1] * " hint", text)
+    return style_hint!(app, dl, g, c, key, text)
 end
 
 # Two number fields side by side, each with its label over it: `(key, field, label, placeholder)`.
@@ -675,7 +731,8 @@ not a number, or a value the style cannot have, is refused with a red hint.
 """
 function number_field!(app, mv, c::StyleCache, key::String, field::Symbol, b::Box, placeholder::String)
     pane = app.ui.style_pane
-    new = field!(app, pane, key, b, c.texts[key]; right = true, placeholder, error = haskey(pane.errors, key))
+    new = field!(app, pane, key, b, c.texts[key]; id = FIELD_IDS[key], right = true, placeholder,
+        error = haskey(pane.errors, key))
     new === nothing || delete!(pane.errors, key)
     if ig.IsItemActive()
         pane.active = key
@@ -711,12 +768,12 @@ function draw_shading_rows!(app, dl, g::StyleFlow, mv, c::StyleCache)
     checkbox!(app, "Hillshade", g.x0, mid, "Hillshade", st.shade) && apply_style_edit!(app, mv, l, :shade, !st.shade)
     g.y = mid + f(BODY_FONT_SIZE * LABEL_LINE) / 2
     st.shade || return nothing
-    for (field, label, hi) in ((:inclination, "Sun inclination", 90), (:declination, "Sun declination", 360))
+    for (field, label, hi, key) in SUN_SLIDERS
         next_row!(app, g)
         y = style_label!(app, dl, g.x0, g.y, label)
         sb = Box(g.x0, y + f((COMBO_H - STYLE_SLIDER_H) / 2), g.x1, y + f((COMBO_H + STYLE_SLIDER_H) / 2))
         sun_slider!(app, mv, l, field, label, sb, hi, st)
-        app.ui.style_pane.boxes[String(field)] = Box(sb.x0, sb.y0, sb.x1 - f(SLIDER_VALUE_W + 8), sb.y1)
+        app.ui.style_pane.boxes[key] = Box(sb.x0, sb.y0, sb.x1 - f(SLIDER_VALUE_W + 8), sb.y1)
         g.y = y + f(COMBO_H)
     end
     next_row!(app, g)
@@ -733,7 +790,14 @@ function draw_shading_rows!(app, dl, g::StyleFlow, mv, c::StyleCache)
     return nothing
 end
 
-degrees_text(v::Real) = string(round(Int, v), "°")
+# The ImGui ids of the number fields, made once.
+const FIELD_IDS = Dict(k => "##" * k for k in ("min", "max", "clip_low", "clip_high", "zfactor"))
+
+const SUN_SLIDERS = ((:inclination, "Sun inclination", 90, "inclination"), (:declination, "Sun declination", 360, "declination"))
+
+# The texts of the whole degrees, made once, so a slider's value text allocates nothing.
+const DEGREE_TEXTS = [string(k, "°") for k in 0:360]
+degrees_text(v::Real)::String = DEGREE_TEXTS[clamp(round(Int, v), 0, 360) + 1]
 
 """
     sun_slider!(app, mv, l, field, label, b, hi, base)
