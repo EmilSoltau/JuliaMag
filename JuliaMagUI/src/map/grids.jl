@@ -1,7 +1,7 @@
 # Data of a grid layer for the map: the grid cut into bordered Float32 tiles at every
 # coarser level, a value histogram and the mean gradient. No window, no GL.
-# Every level is cut from the whole level, so the 1-cell border of a tile holds the real
-# neighbour at that level and hillshade and bilinear sampling have no seams.
+# Every level is cut from the whole level, so the border of a tile (`TILE_BORDER` cells) holds
+# the real neighbours at that level and hillshade and bilinear sampling have no seams.
 
 "The georeference of a grid. `x0, y0` is the centre of the lower left cell, `rotation` is in degrees, counter-clockwise."
 struct GridGeo
@@ -19,8 +19,8 @@ GridGeo(g::Core.Grid) = GridGeo(g.nx, g.ny, g.x0, g.y0, g.dx, g.dy, g.rotation)
 """
 One level of a grid: `nx` by `ny` cells (halves of the level below, rounded up). Tile
 `(ti, tj)` holds the `ni` by `nj` cells of the level inside it (at most `tile` each way) with a
-1-cell border from the neighbours at the same level, `NaN` outside the grid: `(ni + 2)` by
-`(nj + 2)` values (`tile_size`). So a small coarse level has small tiles.
+border of `TILE_BORDER` cells from the neighbours at the same level, `NaN` outside the grid:
+`(ni + 2TILE_BORDER)` by `(nj + 2TILE_BORDER)` values (`tile_size`). So a small coarse level has small tiles.
 """
 mutable struct GridLevel
     k::Int
@@ -68,7 +68,7 @@ function grid_extent(geo::GridGeo)::NTuple{4,Float64}
 end
 
 # The values along one side of tile `t` of a level with `n` cells that way: its cells plus the border.
-tile_size(n::Int, t::Int, tile::Int)::Int = min(tile, n - (t - 1) * tile) + 2
+tile_size(n::Int, t::Int, tile::Int)::Int = min(tile, n - (t - 1) * tile) + 2TILE_BORDER
 
 # The tile matrix of a level of `nx` by `ny` cells, reusing the old tiles when every size fits.
 function level_tiles(old::Union{Nothing,GridLevel}, nx::Int, ny::Int, tile::Int)::Matrix{Matrix{Float32}}
@@ -109,11 +109,11 @@ function cut_band!(tiles::Matrix{Matrix{Float32}}, tj::Int, band::Matrix{Float32
     Threads.@threads for ti in 1:nti
         t = tiles[ti, tj]
         @inbounds for b in axes(t, 2)
-            j = (tj - 1) * tile + b - 1
+            j = (tj - 1) * tile + b - TILE_BORDER
             row = j - r1 + 1
             rowok = 1 <= j <= ny && 1 <= row <= n
             for a in axes(t, 1)
-                i = (ti - 1) * tile + a - 1
+                i = (ti - 1) * tile + a - TILE_BORDER
                 t[a, b] = rowok && 1 <= i <= nx ? band[i, row] : NaN32
             end
         end
@@ -124,7 +124,7 @@ end
 # The cell (i, j) of a level, NaN outside it.
 @inline function level_value(tiles::Matrix{Matrix{Float32}}, nx::Int, ny::Int, tile::Int, i::Int, j::Int)::Float32
     (1 <= i <= nx && 1 <= j <= ny) || return NaN32
-    @inbounds return tiles[(i-1)÷tile+1, (j-1)÷tile+1][(i-1)%tile+2, (j-1)%tile+2]
+    @inbounds return tiles[(i-1)÷tile+1, (j-1)÷tile+1][(i-1)%tile+1+TILE_BORDER, (j-1)%tile+1+TILE_BORDER]
 end
 
 # NaN-aware mean of a 2 by 2 block: the sum in order, divided by the number of good cells.
@@ -147,9 +147,9 @@ function cut_level!(lv::Matrix{Matrix{Float32}}, nx::Int, ny::Int, below::GridLe
         tj = (idx - 1) ÷ nti + 1
         t = lv[ti, tj]
         @inbounds for b in axes(t, 2)
-            j = (tj - 1) * tile + b - 1
+            j = (tj - 1) * tile + b - TILE_BORDER
             for a in axes(t, 1)
-                i = (ti - 1) * tile + a - 1
+                i = (ti - 1) * tile + a - TILE_BORDER
                 if 1 <= i <= nx && 1 <= j <= ny
                     i2, j2 = 2i - 1, 2j - 1
                     t[a, b] = mean4(level_value(bt, bnx, bny, tile, i2, j2), level_value(bt, bnx, bny, tile, i2 + 1, j2),
@@ -171,11 +171,12 @@ function tile_stats!(cnt::Vector{Int}, lo::Vector{Float32}, hi::Vector{Float32},
         ti = (idx - 1) % nti + 1
         tj = (idx - 1) ÷ nti + 1
         t = tiles[idx]
-        a2 = min(tile, nx - (ti - 1) * tile) + 1
-        b2 = min(tile, ny - (tj - 1) * tile) + 1
+        a1 = b1 = TILE_BORDER + 1
+        a2 = min(tile, nx - (ti - 1) * tile) + TILE_BORDER
+        b2 = min(tile, ny - (tj - 1) * tile) + TILE_BORDER
         c = 0
         l, h = Inf32, -Inf32
-        @inbounds for b in 2:b2, a in 2:a2
+        @inbounds for b in b1:b2, a in a1:a2
             v = t[a, b]
             isnan(v) && continue
             c += 1
@@ -197,11 +198,12 @@ function tile_gradients!(sums::Vector{Float64}, cnt::Vector{Int}, tiles::Matrix{
         ti = (idx - 1) % nti + 1
         tj = (idx - 1) ÷ nti + 1
         t = tiles[idx]
-        a2 = min(tile, nx - (ti - 1) * tile) + 1
-        b2 = min(tile, ny - (tj - 1) * tile) + 1
+        a1 = b1 = TILE_BORDER + 1
+        a2 = min(tile, nx - (ti - 1) * tile) + TILE_BORDER
+        b2 = min(tile, ny - (tj - 1) * tile) + TILE_BORDER
         s = 0.0
         c = 0
-        @inbounds for b in 2:b2, a in 2:a2
+        @inbounds for b in b1:b2, a in a1:a2
             l, r, dn, up = t[a-1, b], t[a+1, b], t[a, b-1], t[a, b+1]
             (isnan(l) || isnan(r) || isnan(dn) || isnan(up)) && continue
             gx = (Float64(r) - Float64(l)) / (2dx)
@@ -222,10 +224,11 @@ function fill_histogram!(h::Core.ValueHistogram, tiles::Matrix{Matrix{Float32}},
         ti = (idx - 1) % nti + 1
         tj = (idx - 1) ÷ nti + 1
         t = tiles[idx]
-        a2 = min(tile, nx - (ti - 1) * tile) + 1
-        b2 = min(tile, ny - (tj - 1) * tile) + 1
-        for b in 2:b2
-            Core.add_values!(h, view(t, 2:a2, b))
+        a1 = b1 = TILE_BORDER + 1
+        a2 = min(tile, nx - (ti - 1) * tile) + TILE_BORDER
+        b2 = min(tile, ny - (tj - 1) * tile) + TILE_BORDER
+        for b in b1:b2
+            Core.add_values!(h, view(t, a1:a2, b))
         end
     end
     return h
@@ -235,7 +238,7 @@ end
     build_grid_layer!(d, read_band!, geo; tile = TILE) -> d
 
 Fill `d` in place, reusing its tile arrays. `read_band!(buf, j1)` fills `buf` (`nx` by `n`,
-`Float32`) with the rows `j1` on. The grid is read in bands of `tile` rows plus a border row
+`Float32`) with the rows `j1` on. The grid is read in bands of `tile` rows plus the border rows
 on each side, so the memory stays at one band. Each level above is the NaN-aware 2 by 2 mean
 of the level below (a block of all `NaN` gives `NaN`) and is cut into tiles from that same
 level. The histogram runs from the lowest to the highest good value.
@@ -253,8 +256,8 @@ function build_grid_layer!(d::GridLayerData, read_band!::F, geo::GridGeo; tile::
     levels = d.levels
     tiles = level_tiles(isempty(levels) ? nothing : levels[1], nx, ny, tile)
     for tj in 1:ntj
-        r1 = max(1, (tj - 1) * tile)
-        r2 = min(ny, tj * tile + 1)
+        r1 = max(1, (tj - 1) * tile + 1 - TILE_BORDER)
+        r2 = min(ny, tj * tile + TILE_BORDER)
         band = band_buffer!(d.bands, nx, r2 - r1 + 1)
         read_band!(band, r1)
         cut_band!(tiles, tj, band, r1, nx, ny, tile)

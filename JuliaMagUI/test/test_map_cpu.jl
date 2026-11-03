@@ -19,6 +19,43 @@ grid_draw(g; level = 0, lo = 1f0, hi = 12f0, table = nothing, opacity = 1f0, sha
 line_draw(d; level = 1, lo = 0f0, hi = 1f0, table = nothing, plain = (0xff, 0x00, 0x00, 0xff), opacity = 1f0, lut = grey) =
     LineDraw(d, level, lut, lo, hi, table, plain, opacity)
 
+# A colour table that is white everywhere: a shaded pixel is `round(255 m)`, so it shows the shade alone.
+const SHADE_WHITE = repeat(UInt8[0xff, 0xff, 0xff, 0xff], 256)
+const SHADE_SUN = (0.5f0, 0.5f0, 0.7071f0)
+shade_draw(g; level = 0, nearest = false, zfactor = 1f0) =
+    GridDraw(g, level, SHADE_WHITE, 0f0, 1f0, nothing, 1f0, true, SHADE_SUN, zfactor, nearest)
+
+# The shaded pixel worked out on the whole level `M`, without tiles: the slopes of the four
+# bilinear corner cells blended with the value's weights (a NaN or outside neighbour counts as
+# the corner itself), or the nearest cell's slope. `nothing` where the pixel is not drawn.
+function shade_reference(M, fi, fj, cw, ch, c, s, z; nearest)
+    at(i, j) = 1 <= i <= size(M, 1) && 1 <= j <= size(M, 2) ? Float64(M[i, j]) : NaN
+    nb(v, centre) = isnan(v) ? centre : v
+    slope(i, j) = (nb(at(i + 1, j), at(i, j)) - nb(at(i - 1, j), at(i, j)), nb(at(i, j + 1), at(i, j)) - nb(at(i, j - 1), at(i, j)))
+    if nearest
+        i, j = floor(Int, fi + 0.5), floor(Int, fj + 0.5)
+        isnan(at(i, j)) && return nothing
+        du, dv = slope(i, j)
+    else
+        i0, j0 = floor(Int, fi), floor(Int, fj)
+        tx, ty = fi - i0, fj - j0
+        any(isnan, (at(i0, j0), at(i0 + 1, j0), at(i0, j0 + 1), at(i0 + 1, j0 + 1))) && return nothing
+        du, dv = 0.0, 0.0
+        for (di, wx) in ((0, 1 - tx), (1, tx)), (dj, wy) in ((0, 1 - ty), (1, ty))
+            a, b = slope(i0 + di, j0 + dj)
+            du += wx * wy * a
+            dv += wx * wy * b
+        end
+    end
+    gu, gv = du / (2cw) * z, dv / (2ch) * z
+    gx, gy = gu * c - gv * s, gu * s + gv * c
+    h = max((-gx * SHADE_SUN[1] - gy * SHADE_SUN[2] + SHADE_SUN[3]) / sqrt(gx^2 + gy^2 + 1), 0.0)
+    return round(UInt8, 255f0 * Float32(0.25 + 0.75h))
+end
+
+# How much the step from pixel `k` to `k + 1` of `p` stands out from the steps on either side of it.
+step_excess(p, k) = abs((Int(p[k+1]) - Int(p[k])) - ((Int(p[k]) - Int(p[k-1])) + (Int(p[k+2]) - Int(p[k+1]))) / 2)
+
 @testset "map cpu" begin
     A = Float32[i + 4(j - 1) for i in 1:4, j in 1:3]  # 4 by 3 cells, row 3 at the top
     g = grid_data(A)
@@ -56,6 +93,70 @@ line_draw(d; level = 1, lo = 0f0, hi = 1f0, table = nothing, plain = (0xff, 0x00
         a = zeros(UInt32, 6, 6); b = zeros(UInt32, 6, 6)
         render_cpu!(a, east); render_cpu!(b, west)
         @test rgba(a[3, 3])[1] < rgba(b[3, 3])[1]
+    end
+
+    @testset "bilinear hillshade: a plane has one shade, across cells and tiles" begin
+        nx, ny = 13, 11
+        P = Float32[0.3f0 * i - 0.2f0 * j for i in 1:nx, j in 1:ny]
+        for rot in (0.0, 30.0)
+            gp = grid_data(P; rotation = rot, tile = 4)   # tile edges at cells 4.5, 8.5 and 12.5
+            u, v = 6.0, 5.0                               # the middle cell, (7, 6)
+            cam = Camera(0.5 + u * cosd(rot) - v * sind(rot), 0.5 + u * sind(rot) + v * cosd(rot), 1 / 3)
+            w, h = 60, 60
+            im = render_cpu!(zeros(UInt32, w, h), Scene(cam, w, h, black, [shade_draw(gp)], 0))
+            vals = UInt8[]
+            for py in 1:h, px in 1:w
+                fi, fj = UI.level_cell(gp, 0, UI.screen_to_world(cam, w, h, px - 0.5, py - 0.5)...)
+                # The four corner cells and their neighbours are in the grid.
+                (2 <= floor(Int, fi) <= nx - 2 && 2 <= floor(Int, fj) <= ny - 2) && push!(vals, rgba(im[px, py])[1])
+            end
+            want = shade_reference(P, 6.0, 6.0, 1.0, 1.0, cosd(rot), sind(rot), 1.0; nearest = false)
+            @test length(vals) > 600 && all(==(want), vals)
+        end
+    end
+
+    @testset "bilinear hillshade has no step at cell edges; nearest has" begin
+        n = 40
+        G = Float32[10exp(-((i - 20.3)^2 + (j - 19.6)^2) / (2 * 6^2)) for i in 1:n, j in 1:n]
+        gg = grid_data(G; tile = 16)
+        w = h = 90
+        cam = Camera(20.0, 20.0, 1 / 3)   # 3 px per cell, all in the grid
+        worst = map((false, true)) do nearest
+            im = render_cpu!(zeros(UInt32, w, h), Scene(cam, w, h, black, [shade_draw(gg; nearest)], 0))
+            p = [rgba(im[x, y])[1] for x in 1:w, y in 1:h]
+            rows = maximum(step_excess(view(p, :, y), x) for y in 1:h, x in 2:w-2)
+            cols = maximum(step_excess(view(p, x, :), y) for x in 1:w, y in 2:h-2)
+            max(rows, cols)
+        end
+        @info "Bilinear and nearest shade steps" bilinear = worst[1] nearest = worst[2]
+        @test worst[1] <= 2   # rounding each pixel to a byte alone can give 2
+        @test worst[2] >= 6
+    end
+
+    @testset "bilinear hillshade has no seams between tiles at any level" begin
+        n, m = 37, 29
+        R = Float32[3sin(i / 4) * cos(j / 5) + 0.05i for i in 1:n, j in 1:m]
+        R[[40, 333, 600, 901]] .= NaN32
+        gs = grid_data(R; dx = 2.0, dy = 3.0, rotation = 20.0, tile = 4)
+        @test size(gs.levels[1].tiles) == (10, 8) && length(gs.levels) == 7
+        ext = gs.extent
+        bad = 0
+        for k in 0:length(gs.levels)-1, nearest in (false, true)
+            M = UI.level_matrix(gs, k)
+            f = 2.0^k
+            res = 2f / 3                    # 3 px per cell of the level
+            w = ceil(Int, (ext[3] - ext[1]) / res) + 4
+            h = ceil(Int, (ext[4] - ext[2]) / res) + 4
+            cam = Camera((ext[1] + ext[3]) / 2, (ext[2] + ext[4]) / 2, res)
+            im = render_cpu!(zeros(UInt32, w, h), Scene(cam, w, h, black, [shade_draw(gs; level = k, nearest)], 0))
+            for py in 1:h, px in 1:w
+                fi, fj = UI.level_cell(gs, k, UI.screen_to_world(cam, w, h, px - 0.5, py - 0.5)...)
+                want = shade_reference(M, fi, fj, 2f, 3f, cosd(20.0), sind(20.0), 1.0; nearest)
+                got = rgba(im[px, py])
+                bad += want === nothing ? got != black : abs(Int(got[1]) - Int(want)) > 1
+            end
+        end
+        @test bad == 0
     end
 
     @testset "NaN cells show the background" begin
@@ -175,7 +276,9 @@ line_draw(d; level = 1, lo = 0f0, hi = 1f0, table = nothing, plain = (0xff, 0x00
 
     @testset "no allocation" begin
         d = build_line_layer!(LineLayerData(), line_points([[(0.0, 1.5, 0.5), (4.0, 1.5, 0.2)]]))
-        s = Scene(sc.camera, 4, 3, black, [grid_draw(g; shade = true, sun = (0.5f0, 0.5f0, 0.7071f0)), line_draw(d)], 0)
+        s = Scene(sc.camera, 4, 3, black, [grid_draw(g; shade = true, sun = (0.5f0, 0.5f0, 0.7071f0)),
+                                           grid_draw(g; shade = true, sun = (0.5f0, 0.5f0, 0.7071f0), nearest = false),
+                                           line_draw(d)], 0)
         render_cpu!(img, s; threads = 1)
         @test (@allocated render_cpu!(img, s; threads = 1)) == 0
         @test (@allocated scene_key(s)) == 0

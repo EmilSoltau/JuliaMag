@@ -209,7 +209,7 @@ end
 # time through the loader's one buffer. A short chunk reads into the front of that buffer.
 function read_converted!(buf::Matrix{Float32}, g::Core.Grid, j1::Int, cb::ConvertBuffer)
     nx, n = size(buf)
-    rows = clamp(cb.limit ÷ nx, 1, TILE + 2)
+    rows = clamp(cb.limit ÷ nx, 1, TILE + 2TILE_BORDER)
     size(cb.block) == (nx, rows) || (cb.block = Matrix{Float64}(undef, nx, rows))
     block = cb.block
     r = 0

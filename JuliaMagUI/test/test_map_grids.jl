@@ -23,7 +23,7 @@ build(A, geo; tile) = build_grid_layer!(GridLayerData(), band_reader(A), geo; ti
         @test [(l.nx, l.ny) for l in d.levels] == [(5, 4), (3, 2), (2, 1), (1, 1)]
         @test isequal(level_matrix(d, 0), A)
         @test level_matrix(d, 1)[1, 1] == sum(Float32[A[2, 1], A[1, 2], A[2, 2]]) / 3
-        @test isnan(d.levels[1].tiles[1, 1][1, 2]) && d.levels[1].tiles[1, 1][4, 2] == A[3, 1]
+        @test isnan(d.levels[1].tiles[1, 1][2, 3]) && d.levels[1].tiles[1, 1][5, 3] == A[3, 1] && d.levels[1].tiles[1, 1][6, 3] == A[4, 1]
         @test d.count == 19 && d.hist.total == 19
         @test d.extent == (95.0, 195.0, 145.0, 235.0)
         @test d.version == 1
@@ -59,18 +59,19 @@ build(A, geo; tile) = build_grid_layer!(GridLayerData(), band_reader(A), geo; ti
         R[noise(n, m, 8.0) .< 0.1f0] .= NaN32
         ds = build(R, GridGeo(n, m, 0.0, 0.0, 1.0, 1.0, 0.0); tile = 4)
         @test length(ds.levels) >= 4
+        # Every value of a tile, its 2-cell border included, is the level's value there (NaN outside).
         for (k, l) in enumerate(ds.levels)
             M = level_matrix(ds, k - 1)
+            at(ii, jj) = 1 <= ii <= l.nx && 1 <= jj <= l.ny ? M[ii, jj] : NaN32
             ok = true
-            for j in 1:l.ny, i in 1:l.nx
-                t = l.tiles[(i-1)÷4+1, (j-1)÷4+1]
-                a = (i - 1) % 4 + 2
-                b = (j - 1) % 4 + 2
-                at(ii, jj) = 1 <= ii <= l.nx && 1 <= jj <= l.ny ? M[ii, jj] : NaN32
-                ok &= isequal(t[a-1, b], at(i - 1, j)) && isequal(t[a+1, b], at(i + 1, j)) &&
-                      isequal(t[a, b-1], at(i, j - 1)) && isequal(t[a, b+1], at(i, j + 1)) &&
-                      isequal(cell_value(ds, k - 1, i, j), M[i, j])
+            for tj in axes(l.tiles, 2), ti in axes(l.tiles, 1)
+                t = l.tiles[ti, tj]
+                ok &= size(t) == (min(4, l.nx - (ti - 1) * 4) + 4, min(4, l.ny - (tj - 1) * 4) + 4)
+                for b in axes(t, 2), a in axes(t, 1)
+                    ok &= isequal(t[a, b], at((ti - 1) * 4 + a - 2, (tj - 1) * 4 + b - 2))
+                end
             end
+            ok &= all(isequal(cell_value(ds, k - 1, i, j), M[i, j]) for i in 1:l.nx, j in 1:l.ny)
             @test ok
         end
         # a coarse cell is the NaN-aware mean of the 2 by 2 block below
@@ -111,8 +112,8 @@ build(A, geo; tile) = build_grid_layer!(GridLayerData(), band_reader(A), geo; ti
         R = noise(600, 400, 3.0)
         dt = build_grid_layer!(GridLayerData(), band_reader(R), GridGeo(600, 400, 0.0, 0.0, 1.0, 1.0, 0.0))
         @test dt.tile == UI.TILE
-        @test [size(only(l.tiles)) for l in dt.levels] == [(l.nx + 2, l.ny + 2) for l in dt.levels]
-        @test size(only(dt.levels[end].tiles)) == (3, 3)
+        @test [size(only(l.tiles)) for l in dt.levels] == [(l.nx + 4, l.ny + 4) for l in dt.levels]
+        @test size(only(dt.levels[end].tiles)) == (5, 5)
         # All levels together: the data, a third more for the coarse levels, and the borders. Bound: 1.4 times the data.
         bytes = sum(sizeof(t) for l in dt.levels for t in l.tiles)
         @test bytes < 1.4 * sizeof(R)
@@ -120,7 +121,7 @@ build(A, geo; tile) = build_grid_layer!(GridLayerData(), band_reader(A), geo; ti
         # Edge tiles of a level with several tiles are cut to the level
         ds = build(noise(37, 29, 7.0), GridGeo(37, 29, 0.0, 0.0, 1.0, 1.0, 0.0); tile = 4)
         @test size(ds.levels[1].tiles) == (10, 8)
-        @test size(ds.levels[1].tiles[1, 1]) == (6, 6) && size(ds.levels[1].tiles[10, 8]) == (3, 3)
+        @test size(ds.levels[1].tiles[1, 1]) == (8, 8) && size(ds.levels[1].tiles[10, 8]) == (5, 5)
     end
 
     @testset "rebuilding reuses the tiles" begin

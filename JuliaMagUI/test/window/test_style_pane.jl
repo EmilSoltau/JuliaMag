@@ -42,6 +42,24 @@ function edge_columns(path, b::UI.Box)
     return count(x -> any(y -> diff(img[y, x], img[y, x-1]) > 0.02f0, rows), cols)
 end
 
+# The pixels of box `b` of a shot where the step to the next pixel (along a row or a column) stands
+# out from the steps on either side by more than `limit` of 255 in some channel: the edges of a staircase.
+function step_pixels(path, b::UI.Box; limit = 6)
+    img = PNGFiles.load(path)
+    ch(p) = (round(Int, 255 * Float32(p.r)), round(Int, 255 * Float32(p.g)), round(Int, 255 * Float32(p.b)))
+    ys, xs = round(Int, b.y0)+1:round(Int, b.y1), round(Int, b.x0)+1:round(Int, b.x1)
+    c = [ch(img[y, x]) for y in ys, x in xs]
+    stands_out(a, b, c, d) = any(abs((c[k] - b[k]) - ((b[k] - a[k]) + (d[k] - c[k])) / 2) > limit for k in 1:3)
+    n = 0
+    for x in 2:size(c, 2)-2, y in axes(c, 1)
+        n += stands_out(c[y, x-1], c[y, x], c[y, x+1], c[y, x+2])
+    end
+    for x in axes(c, 2), y in 2:size(c, 1)-2
+        n += stands_out(c[y-1, x], c[y, x], c[y+1, x], c[y+2, x])
+    end
+    return n
+end
+
 window_testset("layer style pane") do
     s, ids = style_project()
     with_project_app(s; timeout = 300) do ctx, app
@@ -273,6 +291,39 @@ window_testset("layer style pane") do
             ctx.on_render(w -> (app.ui.layer_selected = ids2.lg))
             ctx.frames(3)
             ctx.shot(joinpath(STYLE_SHOTS, "style-grid-$name$sfx.png"))
+            @test isempty(app.draw_errors)
+        end
+    end
+
+    # Hillshade with Bilinear and Nearest cells at 3 and 24 device pixels per cell (T14b). Bilinear
+    # shades smoothly: no staircase on diagonals, no steps at cell edges.
+    for (theme, name) in ((THEME_LIGHT, "light"), (THEME_DARK, "dark"))
+        s5, ids5 = style_project()
+        Core.set_layer!(s5, ids5.m, ids5.ld; visible = false)
+        Core.set_layer!(s5, ids5.m, ids5.lg; style = Core.LayerStyle(shade = true))
+        with_project_app(s5; theme) do ctx, app
+            ctx.click("JuliaMag/left/Layers")
+            ctx.on_render(w -> (app.ui.layer_selected = ids5.lg; UI.open_layer_style!(app)))
+            ctx.wait_until(() -> map_loaded(app))
+            steps = Dict{Tuple{Symbol,Int},Int}()
+            for cells in (:bilinear, :nearest)
+                ctx.click(style_ref(ids5.lg, "Cells", String(cells)))
+                ctx.wait_until(() -> style_layer(app, ids5.m, ids5.lg).style.resample == cells)
+                for px in (3, 24)
+                    ctx.on_render(w -> (st = app.map.views[ids5.m]; st.camera = UI.Camera(st.camera.cx, st.camera.cy, 10 / px)))
+                    te.MouseMoveToPos((5f0, 5f0))
+                    ctx.frames(3)
+                    @test style_grid_draw(app).shade && style_grid_draw(app).nearest == (cells === :nearest)
+                    v = app.map.view
+                    box = UI.Box(((v.x0 + v.x1) / 2) - 100, UI.centre_y(v) - 100, ((v.x0 + v.x1) / 2) + 100, UI.centre_y(v) + 100)
+                    path = ctx.shot(joinpath(STYLE_SHOTS, "style-shade-$cells-$(px)px-$name.png"))
+                    steps[(cells, px)] = step_pixels(path, box)
+                end
+            end
+            @info "Hillshade steps in the shots" name steps
+            # Shading per cell gave 5291 steps at 3 px per cell and 33 at 24 (Nearest: 13004 and 35).
+            @test steps[(:bilinear, 3)] < steps[(:nearest, 3)] ÷ 50
+            @test steps[(:bilinear, 24)] < steps[(:nearest, 24)] ÷ 4
             @test isempty(app.draw_errors)
         end
     end

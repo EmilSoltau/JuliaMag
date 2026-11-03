@@ -100,10 +100,10 @@ end
 const GEOSOFT = lut_rgba!(UInt8[], "geosoft", false)
 const TURBO = lut_rgba!(UInt8[], "turbo", false)
 
-function grid_layer(d::GridLayerData, cam, w, h; nearest, shade, level = grid_level(d, cam.res))
+function grid_layer(d::GridLayerData, cam, w, h; nearest, shade, level = grid_level(d, cam.res),
+                    z = Float32(Core.auto_zfactor(d.mean_gradient)))
     table = Core.equalize_table(d.hist)
     sun = Float32.(Core.sun_vector(45, 45))
-    z = Float32(Core.auto_zfactor(d.mean_gradient))
     return GridDraw(d, level, GEOSOFT, Float32(d.hist.lo), Float32(d.hist.hi), table, 1f0, shade, sun, z, nearest)
 end
 
@@ -133,10 +133,15 @@ window_testset("map GL pass") do
         queue_uploads!(r, "lines", lines)
         upload_all!(ctx, r)
 
-        @testset "parity with the CPU renderer: $name" for (name, res, nearest, shade) in (
-                ("bilinear-shade", 52.0, false, true), ("nearest", 52.0, true, false), ("level-2", 104.0, false, true))
+        # The middle of the grid, and a corner of four tiles of level 0 (cell edge 128.5).
+        mid = (500_000.0 + 7500.0 + 13.7, 7_000_000.0 + 5000.0 - 9.1)
+        corner = (500_000.0 + 127.5 * 25 + 3.1, 7_000_000.0 + 127.5 * 25 - 2.3)
+        @testset "parity with the CPU renderer: $name" for (name, at, res, nearest, shade) in (
+                ("bilinear-shade", mid, 52.0, false, true), ("nearest", mid, 52.0, true, false),
+                ("level-2", mid, 104.0, false, true), ("bilinear-shade-3px", corner, 25 / 3, false, true),
+                ("bilinear-shade-24px", corner, 25 / 24, false, true), ("nearest-shade-24px", corner, 25 / 24, true, true))
             w, h = 300, 200
-            cam = Camera(500_000.0 + 7500.0 + 13.7, 7_000_000.0 + 5000.0 - 9.1, res)
+            cam = Camera(at..., res)
             sc = parity_scene(cam, w, h, [grid_layer(grid, cam, w, h; nearest, shade), line_layer(lines, cam, w, h)])
             name == "level-2" && @test sc.layers[1].level == 2
             cpu = render_cpu!(zeros(UInt32, w, h), sc)
@@ -166,6 +171,37 @@ window_testset("map GL pass") do
             @test outliers == 0
             gl_run(w -> free_layer!(r, "rotated"), ctx)
         end
+
+        # The same grid in tiles of 128 cells and in one tile per level, at a corner of the tiles of level k.
+        # A moderate vertical scale: with the automatic one some of these corners are all in shadow.
+        whole = parity_grid(; tile = UI.TILE)
+        queue_uploads!(r, "one tile", whole)
+        upload_all!(ctx, r)
+        @testset "bilinear hillshade has no seams between tiles: level $k, $px px per cell" for k in 0:2, px in (3, 24)
+            # Cell edge 128.5 of level k each way; level 2 has 100 rows, one tile row, so its middle row there.
+            f = 2.0^k
+            cj = grid.levels[k+1].ny > 128 ? 128 : grid.levels[k+1].ny ÷ 2
+            w, h = 300, 200
+            cam = Camera(500_000.0 + (128f - 0.5) * 25 + 3.1, 7_000_000.0 + (cj * f - 0.5) * 25 - 2.3, 25f / px)
+            imgs = map((grid, whole)) do d
+                sc = parity_scene(cam, w, h, [grid_layer(d, cam, w, h; nearest = false, shade = true, level = k, z = 40f0)])
+                out = Ref{Matrix{UInt32}}()
+                gl_run(w -> (gl_draw!(r, sc); out[] = read_texture(r)), ctx)
+                out[]
+            end
+            dump_parity("seam-$k-$px", imgs...)
+            # The tile edges cross at (ex, ey) on the screen. Within 3 px of them the images agree;
+            # a 1-cell border gave steps of 5 to 11 there. Elsewhere a few pixels take the next
+            # colour entry on rounding (3 at most, measured), as the two quads place cells apart by a rounding.
+            ex, ey = w / 2 - 3.1 / cam.res, h / 2 - 2.3 / cam.res
+            off = [maximum(abs.(px_rgb(imgs[1][x, y]) .- px_rgb(imgs[2][x, y]))) for x in 1:w, y in 1:h]
+            edge = [abs(x - 0.5 - ex) <= 3 || abs(y - 0.5 - ey) <= 3 for x in 1:w, y in 1:h]
+            worst = maximum(off[edge])
+            @info "Map GL tile seams" level = k px_per_cell = px worst flips = count(>(1), off)
+            @test worst <= 1
+            @test maximum(off) <= 4
+        end
+        gl_run(w -> free_layer!(r, "one tile"), ctx)
 
         @testset "the GL state is restored after the pass" begin
             w, h = 300, 200
@@ -262,7 +298,7 @@ window_testset("map GL pass") do
             gl_run(w -> free_layer!(r, "tiles"), ctx)
 
             # With the default TILE each level is one tile as small as the level: the coarsest
-            # tile is 3 by 3 values, and all tiles together are under 1.4 times the grid's values.
+            # tile is 5 by 5 values, and all tiles together are under 1.4 times the grid's values.
             gd = parity_grid(; tile = UI.TILE)
             queue_uploads!(r, "default", gd)
             sizes = Int[]
@@ -270,7 +306,7 @@ window_testset("map GL pass") do
                 gl_run(w -> upload_step!(r), ctx)
                 push!(sizes, r.uploaded_last_frame)
             end
-            @test first(sizes) == 3 * 3 * 4
+            @test first(sizes) == 5 * 5 * 4
             @test sum(sizes) == sum(sizeof(t) for l in gd.levels for t in l.tiles)
             @test sum(sizes) < 1.4 * 4 * 600 * 400
             gl_run(w -> free_layer!(r, "default"), ctx)

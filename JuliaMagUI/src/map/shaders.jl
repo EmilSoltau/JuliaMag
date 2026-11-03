@@ -57,8 +57,8 @@ void main() {
 
 # One quad per tile. `u_corner` holds the corners in the order of `gl_VertexID` (a triangle
 # strip): low i low j, high i low j, low i high j, high i high j. `u_cells` is the cell range
-# of the quad in the tile's texel numbers: texel k holds cell k of the tile, texel 0 and the
-# last texel (`u_last`, one past the tile's cells) are the border.
+# of the quad in the tile's texel numbers: texel `k + TILE_BORDER - 1` holds cell k of the tile,
+# the first and last `TILE_BORDER` texels each way (the last is `u_last`) are the border.
 const GRID_VS = """
 #version 330 core
 uniform vec2 u_c;
@@ -73,15 +73,15 @@ void main() {
 }
 """
 
-# Nearest: the cell's value. Bilinear: all four cells, NaN if any is NaN. Hillshade: central
-# differences of the nearest cell's neighbours (a NaN one counts as the centre), turned by
-# the grid rotation, as `shade_factor` in cpu.jl. The shaded colour is rounded to a byte as
-# the CPU rounds it before it blends.
+# Nearest: the cell's value. Bilinear: all four cells, NaN if any is NaN. Hillshade: the slope
+# of the nearest cell, or the slopes of the four corner cells blended with the value's weights,
+# turned by the grid rotation, as `shade_nearest` and `shade_bilinear` in cpu.jl. The shaded
+# colour is rounded to a byte as the CPU rounds it before it blends.
 const GRID_FS = """
 #version 330 core
 in vec2 v_cell;
-uniform sampler2D u_cells_tex;   // the tile's cells plus a 1-cell border, R32F
-uniform ivec2 u_last;            // the last texel of the tile
+uniform sampler2D u_cells_tex;   // the tile's cells plus a $(TILE_BORDER)-cell border, R32F
+uniform ivec2 u_last;            // the last texel of the tile; no read goes past it
 uniform int u_nearest;
 uniform int u_shade;
 uniform vec2 u_cell_size;        // world size of a cell at this level
@@ -91,21 +91,32 @@ uniform float u_z;
 uniform float u_opacity;
 out vec4 colour;
 """ * COLOUR_GLSL * """
+// Every read is inside the tile and its border; the clamp only guards against a rounding at the quad's edge.
 float cell(ivec2 p) {
     return texelFetch(u_cells_tex, clamp(p, ivec2(0), u_last), 0).r;
 }
 
 float neighbour(float v, float centre) { return isnan(v) ? centre : v; }
 
+// Right minus left and up minus down at cell p; a NaN neighbour counts as the cell itself.
+vec2 slope(ivec2 p) {
+    float c0 = cell(p);
+    float l = neighbour(cell(p - ivec2(1, 0)), c0);
+    float r = neighbour(cell(p + ivec2(1, 0)), c0);
+    float dn = neighbour(cell(p - ivec2(0, 1)), c0);
+    float up = neighbour(cell(p + ivec2(0, 1)), c0);
+    return vec2(r - l, up - dn);
+}
+
 void main() {
     ivec2 near = ivec2(floor(v_cell + 0.5));
+    vec2 f0 = floor(v_cell);
+    ivec2 p = ivec2(f0);
+    vec2 t = v_cell - f0;
     float v;
     if (u_nearest != 0) {
         v = cell(near);
     } else {
-        vec2 f0 = floor(v_cell);
-        ivec2 p = ivec2(f0);
-        vec2 t = v_cell - f0;
         float v00 = cell(p);
         float v10 = cell(p + ivec2(1, 0));
         float v01 = cell(p + ivec2(0, 1));
@@ -116,13 +127,15 @@ void main() {
     if (isnan(v)) discard;
     vec3 rgb = lut_colour(colour_position(v));
     if (u_shade != 0) {
-        float c0 = cell(near);
-        float l = neighbour(cell(near - ivec2(1, 0)), c0);
-        float r = neighbour(cell(near + ivec2(1, 0)), c0);
-        float dn = neighbour(cell(near - ivec2(0, 1)), c0);
-        float up = neighbour(cell(near + ivec2(0, 1)), c0);
-        float gu = (r - l) / (2.0 * u_cell_size.x) * u_z;
-        float gv = (up - dn) / (2.0 * u_cell_size.y) * u_z;
+        vec2 d;
+        if (u_nearest != 0) {
+            d = slope(near);
+        } else {
+            d = (1.0 - t.x) * (1.0 - t.y) * slope(p) + (1.0 - t.x) * t.y * slope(p + ivec2(0, 1))
+              + t.x * (1.0 - t.y) * slope(p + ivec2(1, 0)) + t.x * t.y * slope(p + ivec2(1, 1));
+        }
+        float gu = d.x / (2.0 * u_cell_size.x) * u_z;
+        float gv = d.y / (2.0 * u_cell_size.y) * u_z;
         float gx = gu * u_rot.x - gv * u_rot.y;
         float gy = gu * u_rot.y + gv * u_rot.x;
         float h = max((-gx * u_sun.x - gy * u_sun.y + u_sun.z) / sqrt(gx * gx + gy * gy + 1.0), 0.0);

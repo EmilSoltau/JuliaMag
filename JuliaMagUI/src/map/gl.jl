@@ -807,8 +807,9 @@ function draw_gl_layer!(r::GlMap, sc::Scene, gd::GridDraw)
             corners[2n] = Float32(gu * s + gv * c)
         end
         GL.glUniform2fv(u.corner, 4, corners)
-        GL.glUniform4f(u.cells, 0.5f0, 0.5f0, Float32(ni + 0.5), Float32(nj + 0.5))
-        GL.glUniform2i(u.last, ni + 1, nj + 1)
+        GL.glUniform4f(u.cells, TILE_BORDER - 0.5f0, TILE_BORDER - 0.5f0, Float32(ni + TILE_BORDER - 0.5),
+                       Float32(nj + TILE_BORDER - 0.5))
+        GL.glUniform2i(u.last, ni + 2TILE_BORDER - 1, nj + 2TILE_BORDER - 1)
         GL.glBindTexture(GL.GL_TEXTURE_2D, textures[ti, tj])
         GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
     end

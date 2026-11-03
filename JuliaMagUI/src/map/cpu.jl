@@ -79,7 +79,8 @@ function draw_grid_rows!(img::Matrix{UInt32}, sc::Scene, g::GridDraw, r1::Int, r
         k = 4 * (lut_entry(t) - 1)
         r, gr, b, a = g.lut[k+1], g.lut[k+2], g.lut[k+3], g.lut[k+4]
         if g.shade
-            m = shade_factor(tiles, nx, ny, tile, fi, fj, cw, ch, c, s, g)
+            m = g.nearest ? shade_nearest(tiles, nx, ny, tile, fi, fj, cw, ch, c, s, g) :
+                shade_bilinear(tiles, nx, ny, tile, fi, fj, cw, ch, c, s, g)
             r, gr, b = round(UInt8, Float32(r) * m), round(UInt8, Float32(gr) * m), round(UInt8, Float32(b) * m)
         end
         img[px, py] = blend_pixel(img[px, py], r, gr, b, a, op)
@@ -110,21 +111,50 @@ end
     return Float32(acc)
 end
 
-# `0.25 + 0.75 h` for the nearest cell: the slope from central differences of its neighbours at
-# this level (a NaN neighbour counts as the centre value), divided by two cell sizes, times the
-# vertical scale. The slope is along the grid axes; it is turned by the grid rotation to meet
-# the sun, which is given as east, north, up.
-@inline function shade_factor(tiles, nx::Int, ny::Int, tile::Int, fi::Float64, fj::Float64,
-                              cw::Float64, ch::Float64, c::Float64, s::Float64, g::GridDraw)::Float32
-    i, j = cell_floor(fi + 0.5), cell_floor(fj + 0.5)
+# The slope of cell `(i, j)` along the grid axes: right minus left and up minus down, not yet
+# divided by two cell sizes. The rule next to blanks: a neighbour that is NaN or outside the
+# level counts as the cell itself, so the difference there is one-sided at half weight.
+@inline function cell_slope(tiles, nx::Int, ny::Int, tile::Int, i::Int, j::Int)::NTuple{2,Float64}
     centre = level_value(tiles, nx, ny, tile, i, j)
     l = neighbour(level_value(tiles, nx, ny, tile, i - 1, j), centre)
     r = neighbour(level_value(tiles, nx, ny, tile, i + 1, j), centre)
     dn = neighbour(level_value(tiles, nx, ny, tile, i, j - 1), centre)
     up = neighbour(level_value(tiles, nx, ny, tile, i, j + 1), centre)
+    return (Float64(r) - Float64(l), Float64(up) - Float64(dn))
+end
+
+@inline neighbour(v::Float32, centre::Float32)::Float32 = isnan(v) ? centre : v
+
+# Nearest cells: the shade of the nearest cell's slope, one shade per cell.
+@inline function shade_nearest(tiles, nx::Int, ny::Int, tile::Int, fi::Float64, fj::Float64,
+                               cw::Float64, ch::Float64, c::Float64, s::Float64, g::GridDraw)::Float32
+    du, dv = cell_slope(tiles, nx, ny, tile, cell_floor(fi + 0.5), cell_floor(fj + 0.5))
+    return shade_of_slope(du, dv, cw, ch, c, s, g)
+end
+
+# Bilinear cells: the slopes of the four corner cells blended with the weights of the value,
+# so the shade is as smooth as the value. The pixel is drawn only when no corner is NaN.
+@inline function shade_bilinear(tiles, nx::Int, ny::Int, tile::Int, fi::Float64, fj::Float64,
+                                cw::Float64, ch::Float64, c::Float64, s::Float64, g::GridDraw)::Float32
+    i0, j0 = cell_floor(fi), cell_floor(fj)
+    tx, ty = fi - i0, fj - j0
+    u00, v00 = cell_slope(tiles, nx, ny, tile, i0, j0)
+    u01, v01 = cell_slope(tiles, nx, ny, tile, i0, j0 + 1)
+    u10, v10 = cell_slope(tiles, nx, ny, tile, i0 + 1, j0)
+    u11, v11 = cell_slope(tiles, nx, ny, tile, i0 + 1, j0 + 1)
+    du = (1 - tx) * (1 - ty) * u00 + (1 - tx) * ty * u01 + tx * (1 - ty) * u10 + tx * ty * u11
+    dv = (1 - tx) * (1 - ty) * v00 + (1 - tx) * ty * v01 + tx * (1 - ty) * v10 + tx * ty * v11
+    return shade_of_slope(du, dv, cw, ch, c, s, g)
+end
+
+# `0.25 + 0.75 h` for a slope from `cell_slope`: divided by two cell sizes, times the vertical
+# scale. The slope is along the grid axes; it is turned by the grid rotation to meet the sun,
+# which is given as east, north, up.
+@inline function shade_of_slope(du::Float64, dv::Float64, cw::Float64, ch::Float64, c::Float64, s::Float64,
+                                g::GridDraw)::Float32
     z = Float64(g.zfactor)
-    gu = (Float64(r) - Float64(l)) / (2cw) * z
-    gv = (Float64(up) - Float64(dn)) / (2ch) * z
+    gu = du / (2cw) * z
+    gv = dv / (2ch) * z
     gx = gu * c - gv * s
     gy = gu * s + gv * c
     inv = 1 / sqrt(gx * gx + gy * gy + 1)
@@ -132,8 +162,6 @@ end
     hh = max((-gx * sun[1] - gy * sun[2] + sun[3]) * inv, 0.0)
     return Float32(0.25 + 0.75 * hh)
 end
-
-@inline neighbour(v::Float32, centre::Float32)::Float32 = isnan(v) ? centre : v
 
 # --- Lines ---
 

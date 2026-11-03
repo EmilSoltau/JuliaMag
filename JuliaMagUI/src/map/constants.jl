@@ -19,7 +19,8 @@ const POINT_BUDGET = 0.5          # drawn points per view pixel, at most
 const CULL_MARGIN = 0.5           # share of the view size kept on each side
 
 # Grid tiles and uploads
-const TILE = 2048                 # cells per tile side, plus a 1-cell border on each side
+const TILE = 2048                 # cells per tile side, plus a border on each side
+const TILE_BORDER = 2             # border cells: bilinear hillshade reads 2 cells past a tile's own
 const UPLOAD_BYTES = 8 * 2^20     # per frame, one tile or one line batch at most
 
 # Pick and labels
