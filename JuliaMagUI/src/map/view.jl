@@ -283,7 +283,8 @@ end
     map_gl_pass!(app, w)
 
 The GL pass of the app frame: on the render thread, after ImGui's render. It takes the Map
-Drawing setting (`sync_mode!`). While a map is shown it builds the scene of the map and runs
+Drawing setting (`sync_mode!`) and uploads a CPU picture that came back (`upload_cpu_frame!`,
+for the next frame to place). While a map is shown it builds the scene of the map and runs
 the part of its renderer: `gl_frame!` (one `upload_step!` each frame, and a full picture with
 `gl_draw!` when one is planned) or `cpu_frame!` (a full picture in a task). A GL failure moves
 the map to the CPU (`fall_back!`). Any other error never ends the app: it is noted with
@@ -294,6 +295,7 @@ function map_gl_pass!(app, w::Window)
     r = ms.renderer
     try
         sync_mode!(app, r)
+        upload_cpu_frame!(app, w, r)
         snap = app.snap
         id = app.ui.current_map
         # Not `shown_map`: its `Union` result boxes the map view, and the pass allocates nothing.
@@ -320,20 +322,21 @@ end
 
 The shown map in box `b` of the central area: `canvas` fill, an invisible button over `b`
 that takes the mouse for `step_view!`, the map image, then the overlays (`draw_overlays`).
-The map image is the last full picture: a CPU picture that came back goes in first
-(`take_cpu_frame!`), `plan_frame!` says where it goes, and a full GL picture is drawn by this
-frame's GL pass. The camera starts at the full extent once a layer has an extent. `Home`
+The map image is the last full picture (`draw_map_image`); a full GL picture is drawn by
+this frame's GL pass. The camera starts at the full extent once a layer has an extent. `Home`
 fits the full extent. A map with no layers says so.
 """
 function draw_map_view(app, dl, b::Box)
     w = app.window::Window
     t = app.tokens
     ms = app.map
-    mv = shown_map(app)
-    mv === nothing && return nothing
+    snap_ = app.snap
+    id = app.ui.current_map
+    # Not `shown_map`: its `Union` result boxes the map view (see `map_gl_pass!`).
+    (snap_ === nothing || !haskey(snap_.maps, id)) && return nothing
+    mv = snap_.maps[id]
     b = snap(b)
     ms.view = b
-    take_cpu_frame!(ms.renderer)   # before the picture is placed
     ig.AddRectFilled(dl, (b.x0, b.y0), (b.x1, b.y1), u32(t.canvas))
     if isempty(mv.layers) && isempty(mv.error)
         draw_empty_map(app, dl, b)
@@ -365,15 +368,8 @@ function draw_map_view(app, dl, b::Box)
         ext = map_extent(app, mv)
         ext === nothing || full_extent!(st, ext, vw, vh; inset = px(w.scale, BAND))
     end
-    r = ms.renderer
-    rect = plan_frame!(r, st, vw, vh, mv.id)
-    if rect !== nothing
-        # The texture's rows start at the bottom. A moved picture leaves `canvas` where it is not.
-        tex = ig.ImTextureRef(ig.ImTextureID(r.image.texture))
-        ig.PushClipRect(dl, (b.x0, b.y0), (b.x1, b.y1), true)
-        ig.AddImage(dl, tex, (b.x0 + rect[1], b.y0 + rect[2]), (b.x0 + rect[3], b.y0 + rect[4]), (0f0, 1f0), (1f0, 0f0))
-        ig.PopClipRect(dl)
-    end
+    draw_map_image(ms.renderer, dl, b, st, vw, vh, mv.id)
     draw_overlays(app, dl, b, mv, st)
     return nothing
 end
+

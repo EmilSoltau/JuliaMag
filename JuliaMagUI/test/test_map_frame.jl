@@ -59,6 +59,7 @@ image_rect_alloc(img, cam) = (image_rect(img, cam, 800, 600); @allocated image_r
         r = UI.MapRenderer()
         r.image = MapImage(UInt32(1), Camera(0.0, 0.0, 1.0), (800, 600), UInt64(7), 0.05, "m")
         st = MapViewState(Camera(-10.0, 0.0, 1.0))
+        r.gl = UI.GlMap()                                   # made, no GL calls
         @test UI.plan_frame!(r, st, 800, 600, "m") == (0f0, 0f0, 800f0, 600f0) && r.full   # GL draws now
         st.gesture = :pan
         @test UI.plan_frame!(r, st, 800, 600, "m") == (10f0, 0f0, 810f0, 600f0) && !r.full
@@ -69,9 +70,25 @@ image_rect_alloc(img, cam) = (image_rect(img, cam, 800, 600); @allocated image_r
         @test UI.plan_frame!(r, st, 800, 600, "other map") === nothing
         r.mode = MAP_GL
         r.handover = true                                   # a CPU picture: GL waits for its uploads
+        @test UI.plan_frame!(r, st, 800, 600, "m") == (0f0, 0f0, 800f0, 600f0) && r.full   # none wait
+        r.gl = nothing                                      # not made yet: not ready
         @test UI.plan_frame!(r, st, 800, 600, "m") == (10f0, 0f0, 810f0, 600f0) && !r.full
         r.image.cost = 0.05
         @test plan_alloc(r, st) == 0
+        # A GL frame with no GL objects yet cannot draw: the picture stays where it is.
+        r.handover = false
+        r.image.cost = 0.005
+        @test UI.plan_frame!(r, st, 800, 600, "m") == (10f0, 0f0, 810f0, 600f0) && r.full
+
+        # A CPU picture uploaded in the pass is swapped in by the next view: texture and camera together.
+        r.mode = MAP_CPU
+        r.back_texture, r.back_size = UInt32(5), (40, 30)
+        r.texture_size = (800, 600)
+        r.ready = UI.CpuFrameDone(UInt64(9), Matrix{UInt32}(undef, 0, 0), 0.02, Camera(1.0, 2.0, 3.0), (40, 30), "m", 0, nothing)
+        UI.take_cpu_frame!(r)
+        @test r.ready === nothing && r.image.texture == 5 && r.back_texture == 1 && r.texture_size == (40, 30)
+        @test r.back_size == (800, 600) && r.image.key == 9 && r.image.camera == Camera(1.0, 2.0, 3.0)
+        @test r.image.size == (40, 30) && r.image.cost == 0.02
     end
 
     @testset "the status bar render item" begin

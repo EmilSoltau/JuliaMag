@@ -97,7 +97,9 @@ What draws the map. Changed on the render thread only.
   again only when the view grows past it.
 - `cpu_task`: the CPU frame in flight, or `nothing`; `cpu_scene`, `cpu_lines`, `cpu_grids`:
   the copy of the scene it draws, which the render thread does not touch until it is back.
-- `done`: a CPU picture back but not in the texture yet (`take_cpu_frame!`).
+- `done`: a CPU picture back but not uploaded yet (`upload_cpu_frame!`, in the pass).
+- `back_texture`, `back_size`: the second texture, which a CPU picture is uploaded into;
+  `ready`: the picture in it, which the next frame's view swaps in (`take_cpu_frame!`).
 - `full`: the view planned a full picture this frame (`plan_frame!`).
 - `handover`: the picture is of the other renderer; GL keeps it until its uploads are done.
 - `drawn_pending`: the uploads that were waiting when GL drew the picture.
@@ -105,9 +107,11 @@ What draws the map. Changed on the render thread only.
 - `failed_key`: the scene a CPU frame failed on; it is not drawn again.
 - `gpu_noted`: the Graphics Card setting that cannot be had was said in a toast.
 - `full_draws`: the full pictures drawn so far (tests count them).
-- `fail_next`, `cost_override`, `cpu_hold`: test hooks. The first makes the next GL frame
-  throw; the second replaces the cost of the picture; while the third is set, a CPU frame
-  waits for a `put!` on it.
+- `fail_next`, `cost_override`, `cpu_hold`, `fail_upload`, `gl_error_next`: test hooks.
+  `fail_next` makes the next GL frame throw; `cost_override` replaces the cost of the
+  picture; while `cpu_hold` is set, a CPU frame waits for a `put!` on it; `fail_upload`
+  makes the next CPU picture upload fail as on a GL error; `gl_error_next` makes the next
+  copy of a GL picture meet a real GL error.
 """
 mutable struct MapRenderer
     mode::MapMode
@@ -122,6 +126,9 @@ mutable struct MapRenderer
     cpu_lines::Vector{LineDraw}
     cpu_grids::Vector{GridDraw}
     done::Union{Nothing,CpuFrameDone}
+    back_texture::UInt32
+    back_size::NTuple{2,Int}
+    ready::Union{Nothing,CpuFrameDone}
     full::Bool
     handover::Bool
     drawn_pending::Int
@@ -132,12 +139,14 @@ mutable struct MapRenderer
     fail_next::Bool
     cost_override::Union{Nothing,Float64}
     cpu_hold::Union{Nothing,Channel{Nothing}}
+    fail_upload::Bool
+    gl_error_next::Bool
 end
 
 MapRenderer() = MapRenderer(MAP_GL, nothing, "", MapImage(), (0, 0),
     (Matrix{UInt32}(undef, 0, 0), Matrix{UInt32}(undef, 0, 0)), 1, nothing,
     Scene(Camera(0, 0, 1), 1, 1, (0x00, 0x00, 0x00, 0xff), LineDraw[], 0), LineDraw[], GridDraw[],
-    nothing, false, false, 0, 0, 0, false, 0, false, nothing, nothing)
+    nothing, 0, (0, 0), nothing, false, false, 0, 0, 0, false, 0, false, nothing, nothing, false, false)
 
 "The cost of the last full picture, or the test hook's."
 frame_cost(r::MapRenderer)::Float64 = something(r.cost_override, r.image.cost)
@@ -227,6 +236,7 @@ Forget the picture and any CPU picture still to come, as for another project.
 function clear_image!(r::MapRenderer)
     r.generation += 1
     r.done = nothing
+    r.ready = nothing
     r.image.key = 0
     r.image.size = (0, 0)
     r.image.map = ""
@@ -242,8 +252,8 @@ end
 
 Plan this frame of map `map` in a `w` by `h` view: may it draw a full picture (`r.full`),
 and where the picture goes (`image_rect`), or `nothing` when there is none to show. GL
-draws in full in this frame's pass, so a full GL frame fills the view. Call it while the view
-draws, before the pass.
+draws in full in this frame's pass, so a full GL frame fills the view; only when the GL
+objects are there, so the pass can draw. Call it while the view draws, before the pass.
 """
 function plan_frame!(r::MapRenderer, st::MapViewState, w::Int, h::Int, map::String)::Union{Nothing,NTuple{4,Float32}}
     cam = st.camera
@@ -252,9 +262,28 @@ function plan_frame!(r::MapRenderer, st::MapViewState, w::Int, h::Int, map::Stri
     gl = r.mode == MAP_GL
     r.full = !should_transform(pending_gesture(st), frame_cost(r)) && !(gl && r.handover && !gl_ready(r))
     img = r.image
-    gl && r.full && img.texture != 0 && return (0f0, 0f0, Float32(w), Float32(h))
+    gl && r.full && r.gl !== nothing && img.texture != 0 && return (0f0, 0f0, Float32(w), Float32(h))
     (has_picture(img) && img.map == map) || return nothing
     return image_rect(img, cam, w, h)
+end
+
+"""
+    draw_map_image(r, dl, b, st, vw, vh, map)
+
+The map image in box `b`: a CPU picture uploaded in the last pass goes in first
+(`take_cpu_frame!`), then `plan_frame!` says where the picture goes. It is clipped to `b`,
+so a moved picture leaves `canvas` where it is not. Allocates nothing.
+"""
+function draw_map_image(r::MapRenderer, dl, b::Box, st::MapViewState, vw::Int, vh::Int, map::String)
+    take_cpu_frame!(r)
+    rect = plan_frame!(r, st, vw, vh, map)
+    rect === nothing && return nothing
+    # The texture's rows start at the bottom.
+    tex = ig.ImTextureRef(ig.ImTextureID(r.image.texture))
+    ig.PushClipRect(dl, (b.x0, b.y0), (b.x1, b.y1), true)
+    ig.AddImage(dl, tex, (b.x0 + rect[1], b.y0 + rect[2]), (b.x0 + rect[3], b.y0 + rect[4]), (0f0, 1f0), (1f0, 0f0))
+    ig.PopClipRect(dl)
+    return nothing
 end
 
 """
@@ -266,7 +295,7 @@ is not of it, or uploads went on since it was drawn. Any error falls back to the
 """
 function gl_frame!(app, w::Window, r::MapRenderer, sc::Union{Nothing,Scene}, map::String)
     try
-        gl = map_gl!(app, r)
+        gl = map_gl!(app, w, r)
         gl === nothing && return nothing
         if r.fail_next
             r.fail_next = false
@@ -290,13 +319,13 @@ function gl_frame!(app, w::Window, r::MapRenderer, sc::Union{Nothing,Scene}, map
 end
 
 """
-    map_gl!(app, r) -> Union{Nothing,GlMap}
+    map_gl!(app, w, r) -> Union{Nothing,GlMap}
 
 The GL objects of the map, made on first use; then every layer with data queues its uploads.
 `nothing` when GL cannot draw the map here: the reason goes into `gl_problem` and the map
-draws on the CPU.
+draws on the CPU, from the next frame on.
 """
-function map_gl!(app, r::MapRenderer)::Union{Nothing,GlMap}
+function map_gl!(app, w::Window, r::MapRenderer)::Union{Nothing,GlMap}
     gl = r.gl
     gl === nothing || return gl
     gl = GlMap()
@@ -309,6 +338,7 @@ function map_gl!(app, r::MapRenderer)::Union{Nothing,GlMap}
     if !isempty(problem)
         r.gl_problem = problem
         switch_mode!(r, MAP_CPU)
+        request_frames!(w)
         @warn "The map cannot draw with OpenGL; it draws on the CPU" problem
         return nothing
     end
@@ -328,7 +358,8 @@ function cpu_frame!(app, w::Window, r::MapRenderer, sc::Union{Nothing,Scene}, ma
         request_frames!(w)
         return nothing
     end
-    (sc === nothing || !r.full || r.done !== nothing || sc.key == r.failed_key) && return nothing
+    (sc === nothing || !r.full || r.done !== nothing || r.ready !== nothing || sc.key == r.failed_key) &&
+        return nothing
     img = r.image
     (sc.key == img.key && img.map == map) && return nothing
     start_cpu_frame!(app, r, sc, map)
@@ -493,26 +524,60 @@ function handle_result!(app, m::CpuFrameDone)
 end
 
 """
-    take_cpu_frame!(r)
+    upload_cpu_frame!(app, w, r)
 
-Put a CPU picture that came back into the map image (`glTexSubImage2D`), on the render thread,
-before the view places the image. A picture that came back after a move to GL is dropped.
+Upload a CPU picture that came back into the back texture (`glTexSubImage2D`), in the map
+pass, so `run_gl_pass` restores the GL state whatever happens. The next frame's view swaps it
+in (`take_cpu_frame!`), so the picture and where it goes change in the same frame. A picture
+that came back after a move to GL is dropped. When the upload fails, the error is noted once
+(`note_draw_error!`) and that scene is not drawn on the CPU again.
 """
-function take_cpu_frame!(r::MapRenderer)
+function upload_cpu_frame!(app, w::Window, r::MapRenderer)
     m = r.done
     m === nothing && return nothing
     r.done = nothing
     r.mode == MAP_CPU || return nothing
-    w, h = m.size
-    tex = image_texture!(r, w, h)
-    GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
-    GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 4)
-    GL.glPixelStorei(GL.GL_UNPACK_ROW_LENGTH, 0)
-    buf = m.buffer
-    GC.@preserve buf GL.glTexSubImage2D(GL.GL_TEXTURE_2D, 0, 0, 0, w, h, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, pointer(buf))
-    GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
-    err = GL.glGetError()
-    err == GL.GL_NO_ERROR || error("The map picture could not be shown: " * gl_error_text(err) * ".")
+    try
+        clear_gl_errors()
+        w_, h_ = m.size
+        r.back_texture, r.back_size = sized_texture!(r.back_texture, r.back_size, w_, h_)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, r.back_texture)
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 4)
+        GL.glPixelStorei(GL.GL_UNPACK_ROW_LENGTH, 0)
+        buf = m.buffer
+        GC.@preserve buf GL.glTexSubImage2D(GL.GL_TEXTURE_2D, 0, 0, 0, w_, h_, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE,
+                                            pointer(buf))
+        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+        err = GL.glGetError()
+        if r.fail_upload
+            r.fail_upload = false
+            err = GL.GL_OUT_OF_MEMORY
+        end
+        err == GL.GL_NO_ERROR || error("The map picture could not be shown: " * gl_error_text(err) * ".")
+        r.ready = m
+        request_frames!(w)   # the next frame places it
+    catch e
+        e isa InterruptException && rethrow()
+        r.failed_key = m.key
+        note_draw_error!(app, e, catch_backtrace(); log = "The map picture could not be shown; the app goes on")
+    end
+    return nothing
+end
+
+"""
+    take_cpu_frame!(r)
+
+Swap a CPU picture uploaded in the last pass into the map image: its texture and what it
+shows. No GL calls. Call it in the view, before the image is placed.
+"""
+function take_cpu_frame!(r::MapRenderer)
+    m = r.ready
+    m === nothing && return nothing
+    r.ready = nothing
+    r.mode == MAP_CPU || return nothing
+    img = r.image
+    img.texture, r.back_texture = r.back_texture, img.texture
+    r.texture_size, r.back_size = r.back_size, r.texture_size
     set_image!(r, m.key, m.camera, m.size, m.seconds, m.map)
     r.drawn_pending = 0
     return nothing
@@ -531,38 +596,42 @@ function set_image!(r::MapRenderer, key::UInt64, cam::Camera, size::NTuple{2,Int
     return nothing
 end
 
-# The texture of the map image, made once and sized `w` by `h`. Linear, so a moved and scaled
-# picture is smooth; drawn at its own size it shows each pixel as it is.
-function image_texture!(r::MapRenderer, w::Int, h::Int)::UInt32
-    tex = r.image.texture
+# A texture `tex` (made when 0) of `size`, sized again to `w` by `h` when it differs: the
+# texture and its size. Linear, so a moved and scaled picture is smooth; drawn at its own size
+# it shows each pixel as it is.
+function sized_texture!(tex::UInt32, size::NTuple{2,Int}, w::Int, h::Int)::Tuple{UInt32,NTuple{2,Int}}
     if tex == 0
         tex = gl_gen(GL.glGenTextures)
         GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
         set_texture_params!(GL.GL_LINEAR)
         GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
-        r.image.texture = tex
-        r.texture_size = (0, 0)
+        size = (0, 0)
     end
-    if r.texture_size != (w, h)
+    if size != (w, h)
         GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
         GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGBA8, w, h, 0, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, C_NULL)
         GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
         err = GL.glGetError()
         err == GL.GL_NO_ERROR ||
             error("The map image of $w by $h pixels could not be made: " * gl_error_text(err) * ".")
-        r.texture_size = (w, h)
+        size = (w, h)
     end
-    return tex
+    return tex, size
 end
 
 # Copy the colour texture GL just drew into the map image.
 function copy_gl_image!(r::MapRenderer, gl::GlMap)
     w, h = gl.width, gl.height
-    tex = image_texture!(r, w, h)
+    img = r.image
+    img.texture, r.texture_size = sized_texture!(img.texture, r.texture_size, w, h)
     GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, gl.fbo)
-    GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
+    GL.glBindTexture(GL.GL_TEXTURE_2D, img.texture)
     GL.glCopyTexSubImage2D(GL.GL_TEXTURE_2D, 0, 0, 0, 0, 0, w, h)
     GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+    if r.gl_error_next
+        r.gl_error_next = false
+        GL.glEnable(GL.GLenum(0xffff))   # not a capability: GL_INVALID_ENUM
+    end
     err = GL.glGetError()
     err == GL.GL_NO_ERROR || error("The map picture could not be copied: " * gl_error_text(err) * ".")
     return nothing
