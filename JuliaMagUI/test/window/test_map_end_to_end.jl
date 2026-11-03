@@ -8,9 +8,9 @@ using JuliaMagUI: THEME_LIGHT, THEME_DARK, LIGHT, DARK, ToolDialog
 # A user's first map, in one window session: a new project, a line import and a grid import,
 # Show on Map for both, the view moved and walked back, a Layer Style for each layer with undo
 # and redo, a click that moves the cursor, the Map Drawing setting, and the project closed and
-# opened again. Light first, dark from the Settings step on. Steps 2, 6 and 7 are also shot in
-# the other theme, so each theme has shots of every kind of picture. Every step goes through the
-# window as a user does it; only the native file and folder dialogs are replaced.
+# opened again. Light first, dark from the Settings step on; every step is also shot in the
+# other theme. Every step goes through the window as a user does it; only the native file and
+# folder dialogs are replaced.
 
 const MAP_E2E_SHOTS = joinpath(@__DIR__, "..", "shots")
 const MAP_E2E_GRID = joinpath(@__DIR__, "..", "..", "..", "JuliaMagCore", "test", "data", "grids", "mag_4126.grd")
@@ -162,6 +162,7 @@ function first_map(; scale::Real, size, sfx::AbstractString)
         moved = st.camera
         map_e2e_wait(ctx, app, m)
         shot(ctx, "02-moved-light")
+        other_theme(ctx, app, m, "02-moved-dark", THEME_DARK)
         ctx.key("Home")
         ctx.frames(2)
         @test st.camera == full
@@ -188,6 +189,7 @@ function first_map(; scale::Real, size, sfx::AbstractString)
         ctx.wait_until(() -> map_e2e_layer(app, m, :grid).style.shade; timeout = 10)
         map_e2e_wait(ctx, app, m)
         shot(ctx, "03-styled-light")
+        other_theme(ctx, app, m, "03-styled-dark", THEME_DARK)
         te.MouseMoveToPos(Float32.(centre))
         ctx.key("Ctrl+Z")
         ctx.wait_until(() -> !map_e2e_layer(app, m, :grid).style.shade; timeout = 10)
@@ -196,6 +198,7 @@ function first_map(; scale::Real, size, sfx::AbstractString)
         @test length(app.snap.maps[m].layers) == 2
         map_e2e_wait(ctx, app, m)
         shot(ctx, "04-undone-light")
+        other_theme(ctx, app, m, "04-undone-dark", THEME_DARK)
         ctx.key("Ctrl+Y")
         ctx.key("Ctrl+Y")
         ctx.wait_until(() -> map_e2e_layer(app, m, :lines).style.colours == "viridis" &&
@@ -221,6 +224,7 @@ function first_map(; scale::Real, size, sfx::AbstractString)
         cx, cy = round.(Int, map_e2e_screen(app, p))
         ring = UI.px(s, UI.MARKER_SIZE / 2) - UI.px(s, UI.MARKER_RING) / 2
         @test near(rgb255(img[cy+1, cx+round(Int, ring)+1]), rgb255(LIGHT.accent); tol = 12)
+        other_theme(ctx, app, m, "05-cursor-dark", THEME_DARK)
 
         # 6. Dark, then Map Drawing: CPU and Auto; the map draws each time.
         ctx.click("JuliaMag/tabs/Settings")
