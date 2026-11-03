@@ -301,12 +301,14 @@ centre of cell `(i, j)` is at position `(i, j)`; a cell of level `k` is `2^k` ce
 """
 function level_cell(d::GridLayerData, k::Int, x::Real, y::Real)::NTuple{2,Float64}
     g = d.geo
-    c = cosd(g.rotation)
-    s = sind(g.rotation)
+    return cell_position(g, cosd(g.rotation), sind(g.rotation), 2.0^k, x, y)
+end
+
+# `level_cell` with the rotation's cosine and sine and the level's cell width `f` given, for loops over pixels.
+@inline function cell_position(g::GridGeo, c::Float64, s::Float64, f::Float64, x::Real, y::Real)::NTuple{2,Float64}
     px, py = x - g.x0, y - g.y0
     u = (px * c + py * s) / g.dx   # cells of level 0 from the centre of cell (1, 1)
     v = (-px * s + py * c) / g.dy
-    f = 2.0^k
     return ((u + 0.5) / f + 0.5, (v + 0.5) / f + 0.5)
 end
 
