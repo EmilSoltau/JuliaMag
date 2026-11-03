@@ -336,3 +336,14 @@ window_testset("map GL pass") do
         end
     end
 end
+
+@testset "the app frame loads the layers of the shown map" begin
+    s = fresh_session(); db = survey_database!(s); m = Core.new_map!(s); Core.add_layer!(s, m, db)
+    with_project_app(s) do ctx, app
+        ctx.on_render(w -> (app.ui.current_map = m))
+        ctx.wait_until(() -> !isempty(app.map.entries) && all(e -> e.data !== nothing && !e.loading, values(app.map.entries)))
+        e = only(values(app.map.entries))
+        @test e.data isa LineLayerData && e.error == "" && length(e.data.points.x) == 15
+        @test isempty(app.draw_errors)
+    end
+end

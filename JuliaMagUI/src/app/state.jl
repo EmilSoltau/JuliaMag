@@ -19,13 +19,15 @@ struct ItemRow
     busy::String
 end
 
-"A line of a database."
+"A line of a database. Row `r` has the fiducial `fid_start + (r - 1) * fid_step`."
 struct LineRow
     id::Core.LineId
     name::String
     selected::Bool
     flight::Int
     nrows::Int
+    fid_start::Float64
+    fid_step::Float64
 end
 
 "A channel of a database. `eltype` is the element type's name, such as `\"Float64\"`."
@@ -62,7 +64,7 @@ DatabaseView(id::String, error::String) =
 
 """
 A grid item, read once per snapshot. When it cannot be read, `error` holds the
-message and the numbers are 0.
+message and the numbers are 0. `style` is a copy of the grid's default style.
 """
 struct GridView
     id::String
@@ -79,11 +81,26 @@ struct GridView
     vmin::Float64
     vmax::Float64
     count::Int
+    style::Core.GridStyle
     error::String
 end
 
 GridView(id::String, error::String) =
-    GridView(id, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, "", "", "", NaN, NaN, 0, error)
+    GridView(id, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, "", "", "", NaN, NaN, 0, Core.GridStyle(), error)
+
+"""
+A map item, read once per snapshot: its name, coordinate system and layers (copies), in
+draw order. When it cannot be read, `error` holds the message and it has no layers.
+"""
+struct MapView
+    id::String
+    name::String
+    crs::String
+    layers::Vector{Core.MapLayer}
+    error::String
+end
+
+MapView(id::String, name::String, error::String) = MapView(id, name, "", Core.MapLayer[], error)
 
 """
 A job of the session, as the Jobs tab shows it.
@@ -132,11 +149,13 @@ What the UI shows of a session at one revision. Never changed after it is built.
 
 - `revision`: `Core.revision(s)` when the build started. A change during the build
   makes the next `refresh!` build again.
-- `items`: in project order. `databases` and `grids`: by item id.
+- `items`: in project order. `databases`, `grids` and `maps`: by item id.
 - `jobs`: newest first.
 - `undo_label`, `redo_label`: the label of the step `undo!` or `redo!` would run, or `nothing`.
 - `cursor`: a copy of the session cursor, or `nothing`; `marked`: `(first, last)` or `nothing`.
 - `crs`: a `CrsInfo` for every coordinate system code of the pairs and grids.
+- `item_revisions`: `Core.item_revision` of every item (0 for one never changed); a map
+  layer loads again when it differs from the revision its data was read at.
 """
 struct Snapshot
     revision::Int
@@ -145,6 +164,7 @@ struct Snapshot
     items::Vector{ItemRow}
     databases::Dict{String,DatabaseView}
     grids::Dict{String,GridView}
+    maps::Dict{String,MapView}
     jobs::Vector{JobRow}
     undo_label::Union{Nothing,String}
     redo_label::Union{Nothing,String}
@@ -152,6 +172,7 @@ struct Snapshot
     cursor::Union{Nothing,Core.Cursor}
     marked::Union{Nothing,Tuple{Int,Int}}
     crs::Dict{String,CrsInfo}
+    item_revisions::Dict{String,Int}
 end
 
 copy_item(it::Core.ProjectItem) =
@@ -174,14 +195,14 @@ core writes the rows before `database.json` names them.
 function snapshot(s::Core.Session)::Snapshot
     rev = Core.revision(s)   # first, so a change during the build is seen as new
     p = s.project
-    name, items, busy, undo_label, redo_label, cursor, marked, jobs = lock(s.lock) do
+    name, items, busy, undo_label, redo_label, cursor, marked, jobs, revs = lock(s.lock) do
         busy = Dict{String,String}(id => Core.busy_reason(m) for (id, m) in s.busy)
         c = s.cursor
         (p.name, map(copy_item, p.items), busy,
             isempty(s.undo_stack) ? nothing : last(s.undo_stack).label,
             isempty(s.redo_stack) ? nothing : last(s.redo_stack).label,
             c === nothing ? nothing : Core.Cursor(c.item, c.line, c.row),
-            s.marked, [(j, deepcopy(j.args)) for j in Core.jobs(s)])
+            s.marked, [(j, deepcopy(j.args)) for j in Core.jobs(s)], Core.item_revisions(s))
     end
     warns = Core.warnings(s)
 
@@ -190,7 +211,9 @@ function snapshot(s::Core.Session)::Snapshot
     rows = ItemRow[]
     databases = Dict{String,DatabaseView}()
     grids = Dict{String,GridView}()
+    maps = Dict{String,MapView}()
     for it in items
+        get!(revs, it.id, 0)
         gone = Core.item_missing(p, it)
         push!(rows, ItemRow(it.id, it.kind, it.name, it.path, gone, it.made_by, get(busy, it.id, "")))
         if it.kind == Core.ITEM_DATABASE
@@ -201,6 +224,10 @@ function snapshot(s::Core.Session)::Snapshot
             grids[it.id] = cached_view(cache, p, it, gone, Core.GRID_META_FILE) do
                 grid_view(p, it, gone, relock)
             end
+        elseif it.kind == Core.ITEM_MAP
+            maps[it.id] = cached_view(cache, p, it, gone, Core.MAP_FILE) do
+                map_view(p, it, gone, relock)
+            end
         end
     end
     ids = Set(it.id for it in items)
@@ -208,8 +235,8 @@ function snapshot(s::Core.Session)::Snapshot
     names = Dict{String,String}(it.id => it.name for it in items)
     infos = command_infos()
     job_rows = JobRow[job_row(j, args, infos, names) for (j, args) in jobs]
-    return Snapshot(rev, name, p.folder, rows, databases, grids, job_rows, undo_label,
-        redo_label, warns, cursor, marked, crs_infos(databases, grids))
+    return Snapshot(rev, name, p.folder, rows, databases, grids, maps, job_rows, undo_label,
+        redo_label, warns, cursor, marked, crs_infos(databases, grids), revs)
 end
 
 # The name and unit of every coordinate system the pairs and grids use.
@@ -322,8 +349,8 @@ function database_view(p::Core.Project, it::Core.ProjectItem, gone::Bool,
     gone && return DatabaseView(it.id, missing_text(it))
     db = open_item(Core.open_database, p, it, relock)
     db isa Core.LineDatabase || return DatabaseView(it.id, read_error(db))
-    lines = LineRow[LineRow(l.id, Core.line_name(l.id), l.selected, l.flight, l.nrows)
-                    for l in db.lines]
+    lines = LineRow[LineRow(l.id, Core.line_name(l.id), l.selected, l.flight, l.nrows, l.fid_start,
+        l.fid_step) for l in db.lines]
     channels = ChannelRow[ChannelRow(c.name, c.label, c.units, c.role, string(c.eltype),
         c.protected, c.arraylen, c.decimals, c.format, c.width) for c in db.channels]
     pairs = Core.PositionPair[Core.PositionPair(q.x, q.y, q.crs) for q in db.pairs]
@@ -335,7 +362,16 @@ function grid_view(p::Core.Project, it::Core.ProjectItem, gone::Bool, relock::Fu
     g = open_item(Core.open_grid, p, it, relock)
     g isa Core.Grid || return GridView(it.id, read_error(g))
     return GridView(it.id, g.nx, g.ny, g.dx, g.dy, g.x0, g.y0, g.rotation, g.crs, g.units,
-        string(g.eltype), g.vmin, g.vmax, g.count, "")
+        string(g.eltype), g.vmin, g.vmax, g.count, copy_grid_style(g.style), "")
+end
+
+copy_grid_style(st::Core.GridStyle) = Core.GridStyle((getfield(st, f) for f in fieldnames(Core.GridStyle))...)
+
+function map_view(p::Core.Project, it::Core.ProjectItem, gone::Bool, relock::Function)::MapView
+    gone && return MapView(it.id, it.name, missing_text(it))
+    m = open_item(Core.open_map, p, it, relock)
+    m isa Core.MapItem || return MapView(it.id, it.name, read_error(m))
+    return MapView(it.id, m.name, m.crs, Core.MapLayer[copy(l) for l in m.layers], "")
 end
 
 """
@@ -443,6 +479,7 @@ What the UI shows and where, apart from the project data. Changed on the render 
 - `left_tab`: `:data` or `:jobs`; `right_tabs`, `right_active`: the open right panes (such
   as `:tools`) in the order they opened, and the one shown (`:none` when none is open).
 - `current_db`: the database item the Database tab acts on, or `""`.
+- `current_map`: the map item shown in the central area, or `""`.
 - `selected`: `(kind, item id, sub key)` of the selection in the Data tree, where the sub
   key is a line or channel name or `""`; or `nothing`.
 - `expanded`: the keys of expanded tree nodes (see `row_key`); `filter`: the Data tree
@@ -500,6 +537,7 @@ Base.@kwdef mutable struct UiState
     right_tabs::Vector{Symbol} = Symbol[]
     right_active::Symbol = :none
     current_db::String = ""
+    current_map::String = ""
     selected::Union{Nothing,Tuple{Symbol,String,String}} = nothing
     expanded::Set{String} = Set{String}()
     filter::String = ""
@@ -594,6 +632,7 @@ and the worker hands results back through `drain!`.
   (see `advance_quit!`). An app-level flag, so a project switch never drops it.
 - `quit_hook`: called once to end the app, as `quit_hook(app)`. By default it ends the
   render loop; tests record the call instead.
+- `map`: the map's layer data (a `MapState`, see loader.jl).
 
 The constructor starts the worker. Stop it with `stop_worker!(app.queue)`.
 """
@@ -617,13 +656,14 @@ mutable struct AppState
     switching::Union{Nothing,String}
     quit_pending::Bool
     quit_hook::Function
+    map::MapState
 end
 
 AppState(config::AppConfig, tokens::Tokens; session::Union{Nothing,Core.Session} = nothing,
         config_dir::AbstractString = JuliaMagUI.config_dir()) =
     AppState(config, tokens, session, nothing, false, Worker(), UiState(), Toast[], nothing, 0,
         nothing, String(config_dir), nothing, 0, DrawError[], native_pick_file, nothing, false,
-        end_loop)
+        end_loop, MapState(session))
 
 # The default quit hook: end the render loop after this frame.
 function end_loop(app)
@@ -640,7 +680,8 @@ Make `s` (a session or `nothing`) the app's project. This is the only way to cha
 build of the old session that comes back later is dropped too), the count of shown
 warnings, a failed build, the Data tree's current database, selection, expanded
 nodes, filter, scroll and cached rows, the open dialogs and menu, the requests not
-handled yet (they were made for the old project), whether a job has shown the Jobs pane,
+handled yet (they were made for the old project), the shown map and its layer data (their
+GL objects are freed on the next frame), whether a job has shown the Jobs pane,
 what the Jobs tab knew of the old jobs (so the new project's finished jobs make no
 toasts), and the old project's script on the Run Script page. Call it on the render
 thread. It does not close the old session.
@@ -654,6 +695,12 @@ function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     app.queue.failed = nothing
     ui = app.ui
     ui.current_db = ""
+    ui.current_map = ""
+    ms = app.map
+    ms.gl === nothing || append!(ms.freed, keys(ms.entries))
+    empty!(ms.entries)
+    ms.session = s
+    ms.seen = nothing
     ui.selected = nothing
     empty!(ui.expanded)
     ui.filter = ""

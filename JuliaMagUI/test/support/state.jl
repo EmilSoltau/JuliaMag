@@ -96,6 +96,33 @@ function refresh_now!(app::UI.AppState; timeout::Real = 10)
 end
 
 """
+    wait_layers(app; timeout = 20)
+
+Drain worker results and run `update_layers!` until no map layer load runs and every
+visible layer of the shown map (`app.ui.current_map`) has an entry. An error after `timeout` seconds.
+"""
+function wait_layers(app::UI.AppState; timeout::Real = 20)
+    deadline = time() + timeout
+    while true
+        UI.drain!(app)
+        UI.update_layers!(app)
+        !any(e -> e.loading, values(app.map.entries)) && all_layers_have_entries(app) && return nothing
+        left = deadline - time()
+        left > 0 || error("wait_layers: the map layers did not load within $timeout s")
+        timedwait(() -> isready(app.queue.results), left; pollint = 0.002)
+    end
+end
+
+# Does every visible layer of the shown map have an entry?
+function all_layers_have_entries(app::UI.AppState)::Bool
+    snap = app.snap
+    snap === nothing && return true
+    mv = get(snap.maps, app.ui.current_map, nothing)
+    mv === nothing && return true
+    return all(l -> !l.visible || haskey(app.map.entries, UI.layer_key(snap, mv, l)), mv.layers)
+end
+
+"""
     app_with_database() -> AppState
 
 `test_app_state` on a fresh session with `make_test_database!`, the snapshot taken and
