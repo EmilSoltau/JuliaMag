@@ -8,6 +8,9 @@ function band_reader(A)
     return (buf, j1) -> (buf .= A[:, j1:j1+size(buf, 2)-1]; buf)
 end
 
+# Fixed pseudo-random values in [0, 1), so the tests need no extra package.
+noise(n, m, seed) = Float32[mod(sin(12.9898 * i + 78.233 * j + seed) * 43758.5453, 1.0) for i in 1:n, j in 1:m]
+
 build(A, geo; tile) = build_grid_layer!(GridLayerData(), band_reader(A), geo; tile)
 
 @testset "map grids" begin
@@ -31,7 +34,13 @@ build(A, geo; tile) = build_grid_layer!(GridLayerData(), band_reader(A), geo; ti
         @test grid_value(d, 115.0, 205.0; nearest = false) == sum(A[2:3, 1:2]) / 4
         @test isnan(grid_value(d, 105.0, 205.0; nearest = false))
         @test isnan(grid_value(d, 0.0, 0.0; nearest = true))
-        @test grid_value(d, 140.0, 230.0; nearest = false) == A[5, 4]
+        # strict rule: a cell outside the grid counts as NaN, whatever its weight
+        @test isnan(grid_value(d, 140.0, 230.0; nearest = false))
+        @test isnan(grid_value(d, 110.0, 210.0; nearest = false)) == false
+        B = copy(A); B[3, 2] = NaN32
+        db = build(B, geo; tile = 2)
+        @test isnan(grid_value(db, 110.0, 210.0; nearest = false))   # cell (2, 2) centre, NaN neighbour at weight 0
+        @test grid_value(db, 110.0, 210.0; nearest = true) == B[2, 2]
         @test cell_value(d, 0, 3, 2) == A[3, 2] && isnan(cell_value(d, 0, 6, 1))
         @test grid_level(d, 10.0) == 0 && grid_level(d, 25.0) == 1 && grid_level(d, 1e6) == 3
         @test grid_level(d, 1.0) == 0
@@ -46,8 +55,8 @@ build(A, geo; tile) = build_grid_layer!(GridLayerData(), band_reader(A), geo; ti
 
     @testset "no seams between tiles" begin
         n = 37; m = 29
-        R = rand(Float32, n, m)
-        R[rand(1:n*m, 60)] .= NaN32
+        R = noise(n, m, 7.0)
+        R[noise(n, m, 8.0) .< 0.1f0] .= NaN32
         ds = build(R, GridGeo(n, m, 0.0, 0.0, 1.0, 1.0, 0.0); tile = 4)
         @test length(ds.levels) >= 4
         for (k, l) in enumerate(ds.levels)
@@ -74,7 +83,7 @@ build(A, geo; tile) = build_grid_layer!(GridLayerData(), band_reader(A), geo; ti
         mktempdir() do dir
             g = Core.create_grid(joinpath(dir, "g"), "g", Float32, 6, 5; dx = 10.0, dy = 20.0, x0 = 1000.0,
                                  y0 = 2000.0, rotation = 30.0)
-            dr = build(rand(Float32, 6, 5), GridGeo(g); tile = 4)
+            dr = build(noise(6, 5, 2.0), GridGeo(g); tile = 4)
             @test dr.geo == GridGeo(6, 5, 1000.0, 2000.0, 10.0, 20.0, 30.0)
             for (i, j) in ((3, 2), (1, 1), (6, 5))
                 x, y = Core.cell_centre(g, i, j)
@@ -101,5 +110,14 @@ build(A, geo; tile) = build_grid_layer!(GridLayerData(), band_reader(A), geo; ti
         t = d.levels[1].tiles[1, 1]
         build_grid_layer!(d, band_reader(A), geo; tile = 2)
         @test d.levels[1].tiles[1, 1] === t && d.version == 2 && d.hist.total == 19
+        # a second build of a larger grid into the same data allocates little (bound: 16 KB plus 10 KB per thread for the @threads tasks; measured 26 KB at 4 threads, 284 KB at 32. A band or tile is 79 KB or more)
+        R = noise(300, 200, 1.0)
+        dr = build(R, GridGeo(300, 200, 0.0, 0.0, 1.0, 1.0, 0.0); tile = 64)
+        rd = (buf, j1) -> copyto!(buf, view(R, :, j1:j1+size(buf, 2)-1))   # does not allocate itself
+        g = GridGeo(300, 200, 0.0, 0.0, 1.0, 1.0, 0.0)
+        build_grid_layer!(dr, rd, g; tile = 64)
+        bytes = @allocated build_grid_layer!(dr, rd, g; tile = 64)
+        @test bytes < 16 * 1024 + 10 * 1024 * Threads.nthreads()
+        @test isequal(level_matrix(dr, 0), R)
     end
 end

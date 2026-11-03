@@ -21,7 +21,7 @@ One level of a grid: `nx` by `ny` cells (halves of the level below, rounded up).
 `(ti, tj)` is `(tile + 2)` by `(tile + 2)` values: its cells with a 1-cell border from the
 neighbours at the same level, `NaN` outside the grid.
 """
-struct GridLevel
+mutable struct GridLevel
     k::Int
     nx::Int
     ny::Int
@@ -43,10 +43,15 @@ mutable struct GridLayerData
     mean_gradient::Float64
     extent::NTuple{4,Float64}
     version::Int
+    bands::Vector{Matrix{Float32}}   # scratch: the band buffers, one per row count
+    tcount::Vector{Int}              # scratch: per tile
+    tlo::Vector{Float32}
+    thi::Vector{Float32}
+    tsum::Vector{Float64}
 end
 
 GridLayerData() = GridLayerData(GridGeo(0, 0, 0.0, 0.0, 1.0, 1.0, 0.0), 0, GridLevel[], Core.ValueHistogram(),
-                                0, NaN, (NaN, NaN, NaN, NaN), 0)
+                                0, NaN, (NaN, NaN, NaN, NaN), 0, Matrix{Float32}[], Int[], Float32[], Float32[], Float64[])
 
 # --- Build ---
 
@@ -66,6 +71,27 @@ function level_tiles(old::Union{Nothing,GridLevel}, nti::Int, ntj::Int, tile::In
     size_ok = old !== nothing && size(old.tiles) == (nti, ntj) && all(t -> size(t) == (tile + 2, tile + 2), old.tiles)
     size_ok && return old.tiles
     return [Matrix{Float32}(undef, tile + 2, tile + 2) for _ in 1:nti, _ in 1:ntj]
+end
+
+# The band buffer with `n` rows: one of the kept buffers, or a new one added to them.
+function band_buffer!(bands::Vector{Matrix{Float32}}, nx::Int, n::Int)::Matrix{Float32}
+    for b in bands
+        size(b, 2) == n && return b
+    end
+    b = Matrix{Float32}(undef, nx, n)
+    push!(bands, b)
+    return b
+end
+
+# Put level `k` (1-based) in the list, reusing its object when there is one.
+function set_level!(levels::Vector{GridLevel}, k::Int, nx::Int, ny::Int, tiles::Matrix{Matrix{Float32}})
+    if k <= length(levels)
+        l = levels[k]
+        l.nx, l.ny, l.tiles = nx, ny, tiles
+    else
+        push!(levels, GridLevel(k - 1, nx, ny, tiles))
+    end
+    return levels
 end
 
 # Cut the tiles of tile row `tj` of level 0 from `band`, which holds grid rows `r1` on.
@@ -205,51 +231,56 @@ Fill `d` in place, reusing its tile arrays. `read_band!(buf, j1)` fills `buf` (`
 on each side, so the memory stays at one band. Each level above is the NaN-aware 2 by 2 mean
 of the level below (a block of all `NaN` gives `NaN`) and is cut into tiles from that same
 level. The histogram runs from the lowest to the highest good value.
+
+Build only into data that no other thread reads: the tiles are rewritten in place, and
+after a throw the data is not usable. The loader builds into a spare and swaps.
 """
 function build_grid_layer!(d::GridLayerData, read_band!::F, geo::GridGeo; tile::Int = TILE)::GridLayerData where {F}
     tile > 0 || throw(ArgumentError("tile must be positive, not $tile"))
     (geo.nx > 0 && geo.ny > 0) || throw(ArgumentError("a grid needs at least one cell in each direction"))
-    old = d.levels
-    levels = GridLevel[]
+    d.tile != tile && (empty!(d.levels); empty!(d.bands))
     nx, ny = geo.nx, geo.ny
     nti, ntj = cld(nx, tile), cld(ny, tile)
-    tiles = level_tiles(isempty(old) || d.tile != tile ? nothing : old[1], nti, ntj, tile)
-    band = Matrix{Float32}(undef, nx, 0)
+    isempty(d.bands) || size(d.bands[1], 1) == nx || empty!(d.bands)
+    levels = d.levels
+    tiles = level_tiles(isempty(levels) ? nothing : levels[1], nti, ntj, tile)
     for tj in 1:ntj
         r1 = max(1, (tj - 1) * tile)
         r2 = min(ny, tj * tile + 1)
-        size(band) == (nx, r2 - r1 + 1) || (band = Matrix{Float32}(undef, nx, r2 - r1 + 1))
+        band = band_buffer!(d.bands, nx, r2 - r1 + 1)
         read_band!(band, r1)
         cut_band!(tiles, tj, band, r1, nx, ny, tile)
     end
-    push!(levels, GridLevel(0, nx, ny, tiles))
+    set_level!(levels, 1, nx, ny, tiles)
+    nlev = 1
     while nx > 1 || ny > 1
-        k = length(levels)
+        k = nlev
         nx, ny = cld(nx, 2), cld(ny, 2)
         nti, ntj = cld(nx, tile), cld(ny, tile)
-        lv = level_tiles(d.tile != tile || length(old) <= k ? nothing : old[k+1], nti, ntj, tile)
+        lv = level_tiles(length(levels) > k ? levels[k+1] : nothing, nti, ntj, tile)
         cut_level!(lv, nx, ny, levels[k], tile)
-        push!(levels, GridLevel(k, nx, ny, lv))
+        set_level!(levels, k + 1, nx, ny, lv)
+        nlev += 1
     end
+    resize!(levels, nlev)
 
     t0 = levels[1].tiles
-    cnt = Vector{Int}(undef, length(t0))
-    lo = Vector{Float32}(undef, length(t0))
-    hi = Vector{Float32}(undef, length(t0))
+    cnt = resize!(d.tcount, length(t0))
+    lo = resize!(d.tlo, length(t0))
+    hi = resize!(d.thi, length(t0))
     tile_stats!(cnt, lo, hi, t0, geo.nx, geo.ny, tile)
     total = sum(cnt)
     vmin, vmax = minimum(lo), maximum(hi)
     total == 0 ? Core.reset!(d.hist, NaN, NaN) : Core.reset!(d.hist, vmin, vmax)
     fill_histogram!(d.hist, t0, geo.nx, geo.ny, tile)
 
-    gs = Vector{Float64}(undef, length(t0))
+    gs = resize!(d.tsum, length(t0))
     tile_gradients!(gs, cnt, t0, geo.nx, geo.ny, tile, geo.dx, geo.dy)
     n = sum(cnt)
     d.mean_gradient = n == 0 ? NaN : sum(gs) / n
 
     d.geo = geo
     d.tile = tile
-    d.levels = levels
     d.count = total
     d.extent = grid_extent(geo)
     d.version += 1
@@ -289,8 +320,7 @@ end
     grid_value(d, x, y; nearest) -> Float32
 
 The value at level 0 at the world point `(x, y)`: the nearest cell, or the bilinear value
-of the four cells around it. `NaN` outside the grid, and `NaN` when a cell with weight is
-`NaN` (the Oasis readout rule).
+of the four cells around it. Rule: `NaN` when any of the four cells is `NaN` or outside the grid, whatever the weights.
 """
 function grid_value(d::GridLayerData, x::Real, y::Real; nearest::Bool)::Float32
     fi, fj = level_cell(d, 0, x, y)
@@ -303,7 +333,6 @@ function grid_value(d::GridLayerData, x::Real, y::Real; nearest::Bool)::Float32
     acc = 0.0
     for (di, wx) in ((0, 1 - tx), (1, tx)), (dj, wy) in ((0, 1 - ty), (1, ty))
         w = wx * wy
-        w == 0 && continue
         v = cell_value(d, 0, i0 + di, j0 + dj)
         isnan(v) && return NaN32
         acc += w * v
