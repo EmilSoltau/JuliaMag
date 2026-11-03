@@ -37,6 +37,7 @@ include("support/state.jl")
     include("window/test_search.jl")
     include("window/test_backstage.jl")
     include("window/test_end_to_end.jl")
+    include("window/test_map_gl.jl")
 end
 
 end

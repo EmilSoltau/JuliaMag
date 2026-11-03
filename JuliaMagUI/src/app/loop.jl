@@ -246,7 +246,7 @@ function draw_frame!(w::Window, @nospecialize(ui), @nospecialize(on_close),
     ig.Render()
 
     fb_w, fb_h = GLFW.GetFramebufferSize(w.handle)
-    GL.glViewport(0, 0, fb_w, fb_h)
+    run_gl_pass(ui, w, fb_w, fb_h)
     GL.glClearColor(w.tokens.canvas...)
     GL.glClear(GL.GL_COLOR_BUFFER_BIT)
     lib.ImGui_ImplOpenGL3_RenderDrawData(Ptr{Cint}(ig.GetDrawData()))
@@ -259,6 +259,46 @@ function draw_frame!(w::Window, @nospecialize(ui), @nospecialize(on_close),
     engine !== nothing && engine_call(ig._post_swap, engine)
     w.frame += 1
     return !w.quit
+end
+
+"""
+    gl_pass(ui, w)
+
+Draw with OpenGL after ImGui's render and before its draw data goes to the screen, such as
+the map into its texture. The app frame adds a method; anything else draws nothing.
+"""
+gl_pass(@nospecialize(ui), w::Window) = nothing
+
+"""
+    run_gl_pass(ui, w, fb_w, fb_h)
+
+Run `gl_pass(ui, w)`. Whatever it does or throws, the GL state ImGui expects comes back
+after it (`restore_gl_state`).
+"""
+function run_gl_pass(@nospecialize(ui), w::Window, fb_w::Integer, fb_h::Integer)
+    try
+        gl_pass(ui, w)
+    finally
+        restore_gl_state(fb_w, fb_h)
+    end
+    return nothing
+end
+
+"""
+    restore_gl_state(fb_w, fb_h)
+
+Bind framebuffer 0 with the viewport over all of it, and unbind the program, the vertex
+array, the array buffer and the texture, with `GL_TEXTURE0` active.
+"""
+function restore_gl_state(fb_w::Integer, fb_h::Integer)
+    GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
+    GL.glViewport(0, 0, fb_w, fb_h)
+    GL.glUseProgram(0)
+    GL.glBindVertexArray(0)
+    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+    GL.glActiveTexture(GL.GL_TEXTURE0)
+    GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+    return nothing
 end
 
 # The OpenGL renderer of the current context, or "" when OpenGL does not say.
