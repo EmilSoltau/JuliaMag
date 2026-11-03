@@ -45,6 +45,14 @@ end
 
 LayerEntry(key::LayerKey) = LayerEntry(key, -1, -1, nothing, nothing, false, "", 0.0)
 
+"A visible layer of the shown map: the layer, its entry (`nothing` until made), its look and its effective style."
+struct LayerPlan
+    layer::Core.MapLayer
+    entry::Union{Nothing,LayerEntry}
+    look::LayerLook
+    style::Core.LayerStyle
+end
+
 """
     MapState(session)
 
@@ -58,6 +66,14 @@ The map's layer data. Changed on the render thread only.
 - `seen`: the snapshot whose maps `update_layers!` last checked for unused entries.
 - `dropped`: how many loads of another session came back and were dropped (tests read it).
 - `hold`: a test hook. While it is set, each load started waits for a `put!` on it.
+- `views`: the view of each map by id (a `MapViewState`); `view`: where the map view was drawn
+  last, in device pixels.
+- `scene`: the scene of the shown map, filled again each frame (`build_scene!`); `plan`,
+  `plan_snap`, `plan_map`, `plan_colours`, `plan_complete`, `looks`: what it is built from (see
+  `refresh_plan!`).
+- `gl_problem`: why the GL map pass cannot run here (`probe_gl!`), or `""`.
+- `drawn`: the key of the scene in the map texture (0 for none); `drawn_pending`: the uploads
+  that were waiting when it was drawn.
 """
 mutable struct MapState
     entries::Dict{LayerKey,LayerEntry}
@@ -67,10 +83,24 @@ mutable struct MapState
     seen::Any
     dropped::Int
     hold::Union{Nothing,Channel{Nothing}}
+    views::Dict{String,MapViewState}
+    view::Box
+    scene::Scene
+    plan::Vector{LayerPlan}
+    plan_snap::Any
+    plan_map::String
+    plan_colours::String
+    plan_complete::Bool
+    looks::Dict{String,LayerLook}
+    gl_problem::String
+    drawn::UInt64
+    drawn_pending::Int
 end
 
 MapState(session::Union{Nothing,Core.Session}) =
-    MapState(Dict{LayerKey,LayerEntry}(), nothing, session, LayerKey[], nothing, 0, nothing)
+    MapState(Dict{LayerKey,LayerEntry}(), nothing, session, LayerKey[], nothing, 0, nothing,
+             Dict{String,MapViewState}(), Box(0, 0, 0, 0), Scene(Camera(0, 0, 1), 1, 1, (0x00, 0x00, 0x00, 0xff), LineDraw[], 0),
+             LayerPlan[], nothing, "", "", false, Dict{String,LayerLook}(), "", 0, 0)
 
 # A load for the loader task. `folder` is the item's absolute folder; `name` its name.
 struct LayerLoad
@@ -274,12 +304,14 @@ function update_layers!(app)
     return nothing
 end
 
-# Drop the entries no map of the snapshot uses, and free their GL objects.
+# Drop the entries no map of the snapshot uses, and free their GL objects, and the views of
+# maps the snapshot does not have.
 function drop_unused!(ms::MapState, snap)
     used = Set{LayerKey}()
     for mv in values(snap.maps), l in mv.layers
         push!(used, layer_key(snap, mv, l))
     end
+    filter!(kv -> haskey(snap.maps, first(kv)), ms.views)   # the views of maps that went
     gl = ms.gl
     for k in collect(keys(ms.entries))
         k in used && continue

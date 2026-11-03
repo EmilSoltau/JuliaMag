@@ -25,6 +25,7 @@ include("app/toasts.jl")
 include("app/worker.jl")
 include("map/constants.jl")
 include("map/camera.jl")
+include("map/view.jl")
 include("map/lines.jl")
 include("map/grids.jl")
 include("map/scene.jl")
@@ -32,6 +33,7 @@ include("map/cpu.jl")
 include("map/shaders.jl")
 include("map/gl.jl")
 include("map/loader.jl")
+include("map/overlays.jl")
 include("app/state.jl")
 include("commands/commands.jl")
 include("commands/keys.jl")
@@ -191,6 +193,9 @@ struct AppFrame
     app::AppState
     extra_ui::Any
 end
+
+# The GL pass of the app frame draws the shown map into its texture.
+gl_pass(a::AppFrame, w::Window) = map_gl_pass!(a.app, w)
 
 function (a::AppFrame)(w::Window)
     app = a.app

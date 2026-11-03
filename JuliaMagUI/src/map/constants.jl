@@ -25,3 +25,6 @@ const UPLOAD_BYTES = 8 * 2^20     # per frame, one tile or one line batch at mos
 # Pick and labels
 const PICK_RADIUS = 20            # logical px, for pick and readout
 const LABEL_LIMIT = 300           # line labels per frame
+
+# Map view
+const ZOOM_STEP = 2.0             # Zoom In and Zoom Out, about the centre

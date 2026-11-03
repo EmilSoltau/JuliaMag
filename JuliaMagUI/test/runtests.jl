@@ -29,6 +29,7 @@ include("support/state.jl")
     include("test_map_grids.jl")
     include("test_map_cpu.jl")
     include("test_map_loader.jl")
+    include("test_map_view.jl")
     include("window/test_harness.jl")
     include("window/test_shell.jl")
     include("window/test_ribbon.jl")
@@ -39,6 +40,7 @@ include("support/state.jl")
     include("window/test_backstage.jl")
     include("window/test_end_to_end.jl")
     include("window/test_map_gl.jl")
+    include("window/test_map_view.jl")
 end
 
 end

@@ -135,8 +135,12 @@ build(A, geo; tile) = build_grid_layer!(GridLayerData(), band_reader(A), geo; ti
         build_grid_layer!(dr, rd, g; tile = 64)
         # @allocated counts what finalizers allocate when a GC runs inside it. Collect first, so
         # garbage from earlier tests (sessions, files, images) is not finalized in the measurement.
-        GC.gc()
-        bytes = @allocated build_grid_layer!(dr, rd, g; tile = 64)
+        # @allocated reads process-wide counters, so another task's allocations can land in one
+        # measurement; the least of three is the build's own.
+        bytes = minimum(1:3) do _
+            GC.gc()
+            @allocated build_grid_layer!(dr, rd, g; tile = 64)
+        end
         @test bytes < 16 * 1024 + 10 * 1024 * Threads.nthreads()
         @test isequal(level_matrix(dr, 0), R)
     end

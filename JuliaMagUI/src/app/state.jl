@@ -480,6 +480,8 @@ What the UI shows and where, apart from the project data. Changed on the render 
   as `:tools`) in the order they opened, and the one shown (`:none` when none is open).
 - `current_db`: the database item the Database tab acts on, or `""`.
 - `current_map`: the map item shown in the central area, or `""`.
+- `opacity_preview`: a live opacity `(layer id, opacity)` for one layer of the shown map,
+  drawn before it is set on the layer (the Layers tab sets it while its slider moves), or `nothing`.
 - `selected`: `(kind, item id, sub key)` of the selection in the Data tree, where the sub
   key is a line or channel name or `""`; or `nothing`.
 - `expanded`: the keys of expanded tree nodes (see `row_key`); `filter`: the Data tree
@@ -538,6 +540,7 @@ Base.@kwdef mutable struct UiState
     right_active::Symbol = :none
     current_db::String = ""
     current_map::String = ""
+    opacity_preview::Union{Nothing,Tuple{String,Float64}} = nothing
     selected::Union{Nothing,Tuple{Symbol,String,String}} = nothing
     expanded::Set{String} = Set{String}()
     filter::String = ""
@@ -680,8 +683,8 @@ Make `s` (a session or `nothing`) the app's project. This is the only way to cha
 build of the old session that comes back later is dropped too), the count of shown
 warnings, a failed build, the Data tree's current database, selection, expanded
 nodes, filter, scroll and cached rows, the open dialogs and menu, the requests not
-handled yet (they were made for the old project), the shown map and its layer data (their
-GL objects are freed on the next frame), whether a job has shown the Jobs pane,
+handled yet (they were made for the old project), the shown map, its layer data (their
+GL objects are freed on the next frame), the map views and a live opacity, whether a job has shown the Jobs pane,
 what the Jobs tab knew of the old jobs (so the new project's finished jobs make no
 toasts), and the old project's script on the Run Script page. Call it on the render
 thread. It does not close the old session.
@@ -701,6 +704,13 @@ function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     empty!(ms.entries)
     ms.session = s
     ms.seen = nothing
+    empty!(ms.views)
+    empty!(ms.plan)
+    empty!(ms.looks)
+    ms.plan_snap = nothing
+    ms.plan_complete = false
+    ms.drawn = 0
+    ui.opacity_preview = nothing
     ui.selected = nothing
     empty!(ui.expanded)
     ui.filter = ""

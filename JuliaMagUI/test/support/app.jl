@@ -63,6 +63,10 @@ What a test function of `with_test_app` gets. Each action is a field you call:
 - `ctx.shot(path)`: save the next frame as a PNG.
 - `ctx.wait_until(pred; timeout = 10)`: draw frames until `pred()`; an error after `timeout` s.
 - `ctx.on_render(f)`: run `f(window)` on the render thread in the next frame, and wait for it.
+- `ctx.mouse_to(pos)`: move the mouse to `pos` (device pixels).
+- `ctx.drag(from, to; button = 0, mods = "", steps = 6)`: press `button` at `from` with the
+  modifier keys `mods` held (such as `"Shift"`), move to `to` in `steps` frames, release.
+- `ctx.wheel(pos, notches)`: turn the wheel at `pos`; up is positive.
 - `ctx.window`: the app's `Window`.
 - `ctx.app_state()`: the app's `AppState`. Read and change it only in the test function or
   in `on_render`, which both run while the render loop waits.
@@ -100,7 +104,8 @@ const TEST_TIMEOUT = Ref(0.0)   # the `timeout` of the running `with_test_app`
 # One frame, after checking the time limit.
 next_frame(ctx::TestContext, n::Integer = 1) = (check_time(ctx); te.Yield(n); nothing)
 
-const TEST_ACTIONS = (:click, :type, :key, :frames, :shot, :wait_until, :on_render, :app_state)
+const TEST_ACTIONS = (:click, :type, :key, :frames, :shot, :wait_until, :on_render, :app_state, :mouse_to,
+    :drag, :wheel)
 
 function Base.getproperty(ctx::TestContext, name::Symbol)
     name in TEST_ACTIONS || return getfield(ctx, name)
@@ -155,6 +160,41 @@ function on_render(ctx::TestContext, f)
     push!(ctx.render_queue, w -> (f(w); done[] = true))
     wait_until(ctx, () -> done[]; timeout = 10)
     return nothing
+end
+
+mouse_to(ctx::TestContext, pos) = (check_time(ctx); te.MouseMoveToPos(Float32.(Tuple(pos))); nothing)
+
+function drag(ctx::TestContext, from, to; button::Integer = 0, mods::AbstractString = "", steps::Integer = 6)
+    check_time(ctx)
+    chord = mod_chord(mods)
+    mouse_to(ctx, from)
+    chord == 0 || te.KeyDown(chord)
+    te.MouseDown(button)
+    a, b = Float32.(Tuple(from)), Float32.(Tuple(to))
+    for k in 1:steps
+        mouse_to(ctx, a .+ (b .- a) .* (k / steps))
+    end
+    te.MouseUp(button)
+    chord == 0 || te.KeyUp(chord)
+    return nothing
+end
+
+function wheel(ctx::TestContext, pos, notches::Real)
+    mouse_to(ctx, pos)
+    te.MouseWheelY(Float32(notches))
+    return nothing
+end
+
+# The ImGui chord of modifier names such as `"Ctrl+Shift"`; 0 for `""`.
+function mod_chord(mods::AbstractString)::Int
+    chord = 0
+    isempty(mods) && return chord
+    for m in split(mods, '+')
+        mod = get(KEY_MODS, lowercase(m), nothing)
+        mod === nothing && throw(ArgumentError("unknown key modifier \"$m\" in \"$mods\""))
+        chord |= Int(mod)
+    end
+    return chord
 end
 
 const KEY_MODS = Dict(
