@@ -186,14 +186,13 @@ end
     open_map!(app, id)
 
 Show map `id` in the central area. Another map's selected layer is no longer selected, and a
-live opacity of the map shown before goes.
+live opacity or style of the map shown before goes.
 """
 function open_map!(app, id::AbstractString)
     app.ui.current_map == id && return nothing
     app.ui.current_map = String(id)
     app.ui.layer_selected = ""
-    app.ui.opacity_preview = nothing
-    app.ui.opacity_edit = nothing
+    clear_previews!(app.ui)
     return nothing
 end
 
@@ -310,21 +309,20 @@ function move_selected_layer!(app, up::Bool)
 end
 
 hillshade_on(app) = (mv = shown_map(app); l = mv === nothing ? nothing : toggle_target(app, mv, :grid);
-    l !== nothing && grid_layer_style(app, l).shade)
+    l !== nothing && shown_style(app, l).shade)
 
 line_labels_on(app) = (mv = shown_map(app); l = mv === nothing ? nothing : toggle_target(app, mv, :lines);
     l !== nothing && l.labels)
 
-# Shade the grid layer that `toggle_target` names, or stop. The layer then has its own style.
+# Shade the grid layer that `toggle_target` names, or stop: the Layer Style pane's edit of its
+# Hillshade (`apply_style_edit!`). The shading is the layer's own, so a layer that uses its
+# grid's colours keeps them.
 function toggle_hillshade!(app)
     mv, _ = map_target(app)
     l = mv === nothing ? nothing : toggle_target(app, mv, :grid)
     l === nothing && return nothing
-    style = copy(grid_layer_style(app, l))
-    style.shade = !style.shade
-    m, id = mv.id, l.id
-    submit!(app, style.shade ? "Hillshade on" : "Hillshade off",
-        s -> Core.set_layer!(s, m, id; own_style = true, style))
+    on = !shown_style(app, l).shade
+    apply_style_edit!(app, mv, l, :shade, on; label = on ? "Hillshade on" : "Hillshade off")
     return nothing
 end
 

@@ -245,7 +245,7 @@ end
             # The top grid layer, as no grid layer is selected.
             @test !cmd(app, "map.hillshade").checked(app)
             run!(app, "map.hillshade"); settled!(app)
-            @test layer(lg2).own_style && layer(lg2).style.shade && !layer(lg).style.shade
+            @test !layer(lg2).own_style && layer(lg2).style.shade && !layer(lg).style.shade   # it keeps its grid's colours
             @test cmd(app, "map.hillshade").checked(app)
             # The selected grid layer.
             app.ui.layer_selected = lg

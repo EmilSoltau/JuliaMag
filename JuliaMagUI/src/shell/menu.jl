@@ -12,10 +12,11 @@ const MENU_MAX_WIDTH = 360
 
 """
     MenuItem(label; icon = "", shortcut = "", checked = nothing, reason = nothing, help = "",
-             id = "", danger = false, stay = false, action = app -> nothing)
+             id = "", danger = false, stay = false, ramp = "", action = app -> nothing)
 
 One row of a menu. `checked` is `nothing` for a plain row, else the row shows a check
-mark or a blank. `reason` is why the row cannot run (it is greyed), or `nothing`.
+mark or a blank. `ramp` names a colour table the row shows as a strip before its label (the
+rows of a Colour table combo). `reason` is why the row cannot run (it is greyed), or `nothing`.
 `shortcut` is the dim text at the right: a key chord, or a hint such as a channel's units.
 `help` and `id` go into its tooltip. A `danger` row (such as Remove) is red.
 `action(app)` runs on a click; the menu then closes, unless the row says `stay` (the rows
@@ -35,27 +36,30 @@ struct MenuItem
     stay::Bool
     action::Function
     head::Bool
+    ramp::String
 end
 
 MenuItem(label::AbstractString; icon::AbstractString = "", shortcut::AbstractString = "",
         checked::Union{Nothing,Bool} = nothing, reason::Union{Nothing,AbstractString} = nothing,
         help::AbstractString = "", id::AbstractString = "", danger::Bool = false,
-        stay::Bool = false, action::Function = app -> nothing) =
+        stay::Bool = false, ramp::AbstractString = "", action::Function = app -> nothing) =
     MenuItem(String(label), String(icon), String(shortcut), checked,
         reason === nothing ? nothing : String(reason), String(help), String(id), danger, false,
-        stay, action, false)
+        stay, action, false, String(ramp))
 
 "The line between two groups of menu rows (the prototype's `.msep`)."
-menu_separator() = MenuItem("", "", "", nothing, nothing, "", "", false, true, false, app -> nothing, false)
+menu_separator() = MenuItem("", "", "", nothing, nothing, "", "", false, true, false, app -> nothing, false, "")
 
 "A small title over a group of menu rows (the prototype's `.mhead`), such as \"Tabs\"."
 menu_head(label::AbstractString) =
-    MenuItem(String(label), "", "", nothing, nothing, "", "", false, false, false, app -> nothing, true)
+    MenuItem(String(label), "", "", nothing, nothing, "", "", false, false, false, app -> nothing, true, "")
 
 const MENU_ROW_H = 24
 const MENU_SEPARATOR_H = 9   # 1 px line, 4 px above and below
 const MENU_HEAD_H = 22
 const MENU_HEAD_SIZE = 10.5f0   # semibold, upper case, 0.03 em apart
+const MENU_RAMP_W = 48          # a row's colour table strip, 10 high, 8 px before the label
+const MENU_RAMP_H = 10
 
 """
     OpenMenu
@@ -107,8 +111,8 @@ end
 Lay out a menu as the prototype's `openMenu`: under `anchor` with `gap` px between, or
 above it when there is no room below; moved left to stay 8 px inside `viewport`. A
 context menu passes the mouse point as an empty `anchor` and `gap = 0`. Padding 4, 1 px
-border, rows 24 high, separators 9. A row is 6 + icon 16 + 8 + label + (16 + shortcut) +
-10 wide. The menu is `min_width` to 360 wide. `measure(text, size)` is the regular text
+border, rows 24 high, separators 9. A row is 6 + icon 16 + 8 + (ramp 48 + 8) + label +
+(16 + shortcut) + 10 wide. The menu is `min_width` to 360 wide. `measure(text, size)` is the regular text
 width in device pixels. It is at most the viewport's height less 16 px (the prototype's
 `max-height: calc(100vh - 16px)`); its rows then scroll by `scroll`, clamped.
 """
@@ -125,7 +129,8 @@ function menu_layout(anchor::Box, items::AbstractVector{MenuItem}, viewport::Box
             row_w = max(row_w, p(16) + measure(uppercase(it.label), MENU_HEAD_SIZE))
             continue
         end
-        w = p(6) + (icons ? p(24) : 0f0) + measure(it.label, BODY_FONT_SIZE) + p(10)
+        w = p(6) + (icons ? p(24) : 0f0) + (isempty(it.ramp) ? 0f0 : p(MENU_RAMP_W + 8)) +
+            measure(it.label, BODY_FONT_SIZE) + p(10)
         isempty(it.shortcut) || (w += p(16) + measure(it.shortcut, 11))
         row_w = max(row_w, w)
     end
@@ -373,6 +378,12 @@ function draw_menu_rows(app, m::OpenMenu, l::MenuLayout)
         isempty(icon) || draw_icon(dl, icon, (x, round(mid - p(8))), 16;
             style = !enabled ? :disabled : it.danger ? :danger : :normal)
         icons && (x += p(24))
+        if !isempty(it.ramp)
+            r = snap(Box(x, mid - fpx(s, MENU_RAMP_H / 2), x + p(MENU_RAMP_W), mid + fpx(s, MENU_RAMP_H / 2)))
+            draw_table_ramp(dl, inset(r, hl, hl), it.ramp, false)
+            ig.AddRect(dl, (r.x0, r.y0), (r.x1, r.y1), u32(t.border_strong), p(2), hl)
+            x += p(MENU_RAMP_W + 8)
+        end
         draw_text_mid(dl, FONT_REGULAR, BODY_FONT_SIZE, x, mid,
             u32(!enabled ? t.text_disabled : it.danger ? t.red : t.text), it.label)
         if !isempty(it.shortcut)

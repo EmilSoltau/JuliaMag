@@ -179,11 +179,12 @@ Fill `sc` with the scene of map view `mv` at the camera of `st` and `w` by `h` d
 On the render thread, from the snapshot and the loaded layer entries only. The visible layers
 whose data has levels go in, in draw order, each with its level (`choose_level`, `grid_level`),
 look-up table, stretch (`Core.stretch_range` on the layer's histogram, and `Core.equalize_table!`
-for `:histeq`), opacity (or `ui.opacity_preview` for its layer) and resolved hillshade. Then
-`sc.key = scene_key(sc)`. `st.camera` must be set.
+for `:histeq`), opacity (or `ui.opacity_preview` for its layer) and resolved hillshade, all from
+its style (or `ui.style_preview` for its layer, see `plan_style`). Then `sc.key = scene_key(sc)`,
+which changes with a live style as with any other. `st.camera` must be set.
 
 Allocates nothing after warm-up: each layer keeps one draw, changed in place, and its look-up
-and equalization tables, made again only when the style or the data changes (`refresh_plan!`).
+and equalization tables, made again only when the style or the data changes (`look_lut!`).
 """
 function build_scene!(sc::Scene, app, mv, st::MapViewState, w::Integer, h::Integer)::Scene
     ms = app.map
@@ -204,10 +205,12 @@ function build_scene!(sc::Scene, app, mv, st::MapViewState, w::Integer, h::Integ
         (d === nothing || isempty(d.levels)) && continue
         opacity = Float32(p.layer.opacity)
         preview !== nothing && preview[1] == p.layer.id && (opacity = Float32(preview[2]))
+        style = plan_style(app, p)
+        look_lut!(p.look, style)
         if d isa LineLayerData
-            push!(sc.layers, line_draw!(p.look, p.style, d, cam, sc.width, sc.height, plain, opacity))
+            push!(sc.layers, line_draw!(p.look, style, d, cam, sc.width, sc.height, plain, opacity))
         else
-            push!(sc.layers, grid_draw!(p.look, p.style, d::GridLayerData, cam, opacity))
+            push!(sc.layers, grid_draw!(p.look, style, d::GridLayerData, cam, opacity))
         end
     end
     sc.key = scene_key(sc)
@@ -264,6 +267,28 @@ function grid_draw!(look::LayerLook, style::Core.LayerStyle, d::GridLayerData, c
     return g
 end
 
+"""
+    plan_style(app, p) -> Core.LayerStyle
+
+The style planned layer `p` is drawn with now: the live style of the Layer Style pane
+(`app.ui.style_preview`) when it is for this layer, else its effective style.
+"""
+function plan_style(app, p)::Core.LayerStyle
+    live = app.ui.style_preview
+    return live !== nothing && live[1] == p.layer.id ? live[2] : p.style
+end
+
+# Make the look-up table of `look` again when the colour table or its direction of `style`
+# changed. Allocates nothing when they did not.
+function look_lut!(look::LayerLook, style::Core.LayerStyle)
+    if look.lut_name != style.colours || look.lut_reverse != style.reverse || isempty(look.lut)
+        lut_rgba!(look.lut, style.colours, style.reverse)
+        look.lut_name = style.colours
+        look.lut_reverse = style.reverse
+    end
+    return nothing
+end
+
 # The equalization table of `d`'s histogram, made again only for another build of the data.
 function equalized!(look::LayerLook, d::Union{LineLayerData,GridLayerData})::Vector{Float32}
     if look.eq_data !== d || look.eq_version != d.version
@@ -280,7 +305,8 @@ end
 Make the list of the shown map's visible layers (`ms.plan`) again when the snapshot, the map
 or the app's grid colours changed, or when a layer had no entry yet. Each layer gets its entry,
 its effective style (`Core.effective_style`) and its `LayerLook`, whose look-up table is made
-again when the colour table or its direction changed. Looks of layers not in the list go.
+again when the colour table or its direction changed (`look_lut!`; `build_scene!` checks it
+again for a live style). Looks of layers not in the list go.
 """
 function refresh_plan!(ms, app, mv)
     snap = app.snap
@@ -298,11 +324,7 @@ function refresh_plan!(ms, app, mv)
         style = Core.effective_style(l, gv === nothing ? nothing : gv.style, colours)
         id = string(mv.id, "/", l.id)
         look = get!(LayerLook, ms.looks, id)
-        if look.lut_name != style.colours || look.lut_reverse != style.reverse || isempty(look.lut)
-            lut_rgba!(look.lut, style.colours, style.reverse)
-            look.lut_name = style.colours
-            look.lut_reverse = style.reverse
-        end
+        look_lut!(look, style)
         push!(ms.plan, LayerPlan(l, e, look, style))
         push!(used, id)
     end

@@ -305,7 +305,7 @@ function legend_of(app, p)
         g = get(snap.grids, p.layer.item, nothing)
         g === nothing || (units = g.units)
     end
-    p.style.stretch === :histeq && (units = isempty(units) ? "hist. eq." : units * ", hist. eq.")
+    plan_style(app, p).stretch === :histeq && (units = isempty(units) ? "hist. eq." : units * ", hist. eq.")
     return name, units, d
 end
 
@@ -335,8 +335,9 @@ function draw_legend(app, dl, card::Box, p, title::String, units::String, d)
     ramp = snap(Box(x, y, x + inner, y + f(10)))
     draw_ramp(dl, Box(ramp.x0 + hl, ramp.y0 + hl, ramp.x1 - hl, ramp.y1 - hl), p.look.lut)
     ig.AddRect(dl, (ramp.x0, ramp.y0), (ramp.x1, ramp.y1), u32(t.border_strong), f(2), hl)
-    lo, hi = Core.stretch_range(p.style, d.hist)
-    middle = p.style.stretch === :histeq ? Core.quantile_value(d.hist, 0.5) : (lo + hi) / 2
+    style = plan_style(app, p)
+    lo, hi = Core.stretch_range(style, d.hist)
+    middle = style.stretch === :histeq ? Core.quantile_value(d.hist, 0.5) : (lo + hi) / 2
     y += f(10 + 2)
     mid = y + f(13) / 2
     col = u32(t.text_dim)

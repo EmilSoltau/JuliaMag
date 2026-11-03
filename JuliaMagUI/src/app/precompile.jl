@@ -23,7 +23,7 @@
             for k in 1:5
                 k == 2 && open_search!(app)
                 k == 3 && (app.ui.left_tab = :jobs)   # the Jobs tab too
-                k == 4 && (app.ui.left_tab = :layers) # and the Layers tab
+                k == 4 && (app.ui.left_tab = :layers; open_right_pane!(app, :style))   # the Layers tab and Layer Style
                 k == 5 && (app.ui.backstage = true)   # and the backstage's Start page
                 ig.NewFrame()
                 AppFrame(app, nothing)(w)

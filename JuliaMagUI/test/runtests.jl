@@ -33,6 +33,7 @@ include("support/state.jl")
     include("test_map_frame.jl")
     include("test_map_commands.jl")
     include("test_layers.jl")
+    include("test_style_pane.jl")
     include("window/test_harness.jl")
     include("window/test_shell.jl")
     include("window/test_ribbon.jl")
@@ -47,6 +48,7 @@ include("support/state.jl")
     include("window/test_map_fallback.jl")
     include("window/test_map_commands.jl")
     include("window/test_layers.jl")
+    include("window/test_style_pane.jl")
 end
 
 end

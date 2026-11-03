@@ -1,7 +1,7 @@
 using Test
 import JuliaMagCore as Core
 import JuliaMagUI as UI
-using JuliaMagUI: layer_rows, drop_position, LayerRow, commands, open_map!, settle_opacity_preview!,
+using JuliaMagUI: layer_rows, drop_position, LayerRow, commands, open_map!, settle_previews!,
     commit_opacity!, Camera, MapViewState, shown_opacity, layers_cache, view_reason
 
 layer_cmd(app, id) = only(filter(c -> c.id == id, commands(app)))
@@ -172,17 +172,17 @@ end
         with_app(test_app_state(s)) do app
             refresh_now!(app); app.ui.current_map = m; app.ui.layer_selected = l
             app.ui.opacity_preview = (l, 0.4)
-            settle_opacity_preview!(app)
+            settle_previews!(app)
             @test app.ui.opacity_preview === nothing          # no drag and no edit: a stale preview goes
             app.ui.opacity_preview = (l, 0.4)
             commit_opacity!(app, m, l, 0.4)
-            settle_opacity_preview!(app)
+            settle_previews!(app)
             @test app.ui.opacity_preview == (l, 0.4)          # the edit is on its way: the map keeps the new look
             wait_drained(app)
-            settle_opacity_preview!(app)
+            settle_previews!(app)
             @test app.ui.opacity_preview == (l, 0.4)          # the snapshot is still the old one
             refresh_now!(app)
-            settle_opacity_preview!(app)
+            settle_previews!(app)
             @test app.ui.opacity_preview === nothing && app.snap.maps[m].layers[1].opacity == 0.4
             Core.undo!(s); refresh_now!(app)
             @test app.snap.maps[m].layers[1].opacity == 1.0   # one undo step
@@ -190,7 +190,7 @@ end
             app.ui.opacity_preview = ("layer-9", 0.3)
             commit_opacity!(app, m, "layer-9", 0.3)
             wait_drained(app); refresh_now!(app)
-            settle_opacity_preview!(app)
+            settle_previews!(app)
             @test app.ui.opacity_preview === nothing
             @test length(app.toasts) == 1 && app.toasts[1].kind == :error && isempty(app.draw_errors)
             # Another map: the preview goes.
@@ -247,9 +247,9 @@ end
             @test app.ui.opacity_preview == (l, 0.3) && shown_opacity(app, mv, l) == 0.3
             wait_drained(app)
             @test app.ui.opacity_edit.token == 2 && app.ui.opacity_edit.revision == Core.revision(s)
-            settle_opacity_preview!(app)
+            settle_previews!(app)
             @test app.ui.opacity_preview == (l, 0.3)          # the snapshot is still the old one
-            refresh_now!(app); settle_opacity_preview!(app)
+            refresh_now!(app); settle_previews!(app)
             @test app.ui.opacity_preview === nothing && app.ui.opacity_edit === nothing
             @test app.snap.maps[m].layers[1].opacity == 0.3
         end

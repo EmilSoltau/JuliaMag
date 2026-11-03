@@ -106,7 +106,8 @@ end
 
 # ---- layers --------------------------------------------------------------------
 
-# The source of a new layer: its kind, the colour channel and the coordinate system.
+# The source of a new layer: its kind, the colour channel, the coordinate system and the
+# style it starts with (a grid layer takes its grid's shading).
 function layer_source(s::Session, source::AbstractString, channel::Union{Nothing,AbstractString})
     k = findfirst(i -> i.id == source, s.project.items)
     k === nothing && throw(ArgumentError("there is no item $source in the project"))
@@ -116,10 +117,11 @@ function layer_source(s::Session, source::AbstractString, channel::Union{Nothing
         db.current_pair == 0 && throw(ArgumentError("database $(it.name) has no current X, Y pair"))
         pair = db.pairs[db.current_pair]
         ch = channel === nothing ? default_colour_channel(db, pair) : check_colour_channel(db, String(channel))
-        return :lines, ch, pair.crs
+        return :lines, ch, pair.crs, LayerStyle()
     elseif it.kind == ITEM_GRID
         channel === nothing || throw(ArgumentError("a grid layer has no colour channel"))
-        return :grid, "", grid(s.project, source).crs
+        g = grid(s.project, source)
+        return :grid, "", g.crs, grid_shading(g.style)
     end
     throw(ArgumentError("item $source is not a database or a grid"))
 end
@@ -141,7 +143,8 @@ end
 Add a layer for database or grid `item_id` and return its id, such as `"layer-1"`.
 A line layer goes on top and colours by `channel`, by default the first channel
 `default_colour_channel` finds for the current position pair. A grid layer goes above the
-other grid layers and below the line layers, and uses the default style of its grid.
+other grid layers and below the line layers, and uses the default colours of its grid; it
+starts with the grid's shading (`grid_shading`), which is the layer's own from then on.
 When the map has no coordinate system yet, it takes that of the pair or the grid.
 Undoable and recorded as `"map.add_layer"`.
 Throws `ArgumentError` for an unknown map or item, a channel that is not a numeric
@@ -154,9 +157,9 @@ function add_layer!(s::Session, map_id::AbstractString, item_id::AbstractString;
         check_open(s)
         m = edit_target(s, key)
         check_not_busy(s, key)
-        kind, ch, crs = layer_source(s, src, channel)
+        kind, ch, crs, style = layer_source(s, src, channel)
         old = map_state(m)
-        layer = MapLayer("layer-$(m.next_layer)", src, kind, ch, true, 1.0, kind == :lines, kind == :lines, LayerStyle())
+        layer = MapLayer("layer-$(m.next_layer)", src, kind, ch, true, 1.0, kind == :lines, kind == :lines, style)
         m.next_layer += 1
         if kind == :lines
             push!(m.layers, layer)

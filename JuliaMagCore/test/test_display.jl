@@ -57,9 +57,16 @@
 
     @testset "effective style" begin
         ly = MapLayer("layer-1", "grid-1", :grid, "", true, 1.0, false, false, LayerStyle())
-        e = effective_style(ly, GridStyle("viridis", :linear, 1.0, 9.0, true, true, 300.0, 30.0, 2.0), "geosoft")
-        @test (e.colours, e.stretch, e.min, e.max, e.reverse, e.shade, e.declination, e.inclination, e.zfactor) ==
-              ("viridis", :linear, 1.0, 9.0, true, true, 300.0, 30.0, 2.0)
+        gs = GridStyle("viridis", :linear, 1.0, 9.0, true, true, 300.0, 30.0, 2.0)
+        e = effective_style(ly, gs, "geosoft")
+        @test (e.colours, e.stretch, e.min, e.max, e.reverse) == ("viridis", :linear, 1.0, 9.0, true)
+        # The shading is the layer's own: a grid layer that follows its grid's colours keeps it.
+        @test !e.shade && e.inclination == 45.0 && e.declination == 45.0 && isnan(e.zfactor)
+        lit = MapLayer("layer-4", "grid-1", :grid, "", true, 1.0, false, false,
+                       LayerStyle(colours = "grey", shade = true, inclination = 30.0, declination = 300.0, zfactor = 2.0))
+        e3 = effective_style(lit, gs, "geosoft")
+        @test (e3.colours, e3.shade, e3.inclination, e3.declination, e3.zfactor) == ("viridis", true, 30.0, 300.0, 2.0)
+        @test effective_style(lit, GridStyle(), "turbo").colours == "turbo"   # the app's colours still reach it
         e2 = effective_style(ly, GridStyle(), "turbo")
         @test e2.colours == "turbo" && e2.stretch == :histeq && isnan(e2.zfactor)
         @test effective_style(ly, nothing, "turbo") === ly.style

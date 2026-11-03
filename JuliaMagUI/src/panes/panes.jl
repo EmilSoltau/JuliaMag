@@ -1,7 +1,7 @@
 # The side panes: their widths, the frames of the left and right pane with their header
 # bands of text tabs, the splitters that resize them, and the search box they share. The
 # Data tab body is in data.jl, the Layers tab body in layers.jl, the Jobs tab body in jobs.jl,
-# the Tools pane in tools.jl.
+# the Tools pane in tools.jl, the Layer Style pane in style.jl.
 
 # Sizes in logical pixels (prototype CSS).
 const PANE_HEAD_H = 34
@@ -232,9 +232,9 @@ end
 
 # --- The right pane ---
 
-const RIGHT_TABS = (:tools => "Tools",)
+const RIGHT_TABS = (:tools => "Tools", :style => "Layer Style")
 
-"Show the right pane `which` (`:tools`), opening its tab when it is not open."
+"Show the right pane `which` (`:tools` or `:style`), opening its tab when it is not open."
 function open_right_pane!(app, which::Symbol)
     ui = app.ui
     which in ui.right_tabs || push!(ui.right_tabs, which)
@@ -316,6 +316,7 @@ function draw_right_pane(app, dl, b::Box)::Bool
     all_hot && item_tip!(app, "Close all panes")
     body = Box(head.x0, head.y1, b.x1, b.y1)
     ui.right_active === :tools && draw_tools_pane(app, dl, body)
+    ui.right_active === :style && draw_style_pane(app, dl, body)
     ig.PopID()
     closing === nothing || close_right_pane!(app, closing)
     close_all && (empty!(ui.right_tabs); ui.right_active = :none)

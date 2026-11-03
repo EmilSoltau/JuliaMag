@@ -471,15 +471,57 @@ Base.@kwdef mutable struct BackstageState
 end
 
 """
-An opacity edit of the Layers tab's slider on its way: its `token` (one per release), the
-`layer` and the `value`, and the project `revision` it was done at (-1 while it is on the
-worker). The live opacity stays until a snapshot of that revision is in.
+A layer edit on its way that the map already draws live: its `token` (one per edit), the
+`layer` and the `value` drawn (an opacity, or the style the layer will be drawn with), and
+the project `revision` it was done at (-1 while it is on the worker). The live value stays
+until a snapshot of that revision is in (see `commit_layer_edit!`).
 """
-mutable struct OpacityEdit
+mutable struct LayerEdit{T}
     token::Int
     layer::String
-    value::Float64
+    value::T
     revision::Int
+end
+
+"""
+What the Layer Style pane (style.jl) keeps between frames.
+
+- `buffers`, `focus`, `caret`, `field_ids`: what `field!` keeps of the number fields, by key.
+- `active`: the key of the number field being typed in, or `""`; `errors`: why a typed
+  value was not taken, by key.
+- `scroll`: how far the pane is scrolled; `content_h`: the height of its content in the
+  last frame, in device pixels.
+- `boxes`: where the last frame drew the sliders and hints, by key, in device pixels (tests
+  read them). `cache`: the pane's numbers and texts for the last key (a `StyleCache`).
+"""
+mutable struct StylePane
+    buffers::Dict{String,Vector{UInt8}}
+    focus::String
+    caret::Union{Nothing,Tuple{String,Int}}
+    field_ids::Dict{String,UInt32}
+    active::String
+    errors::Dict{String,String}
+    scroll::Float32
+    content_h::Float32
+    boxes::Dict{String,Box}
+    cache::Any
+end
+
+StylePane() = StylePane(Dict{String,Vector{UInt8}}(), "", nothing, Dict{String,UInt32}(), "",
+    Dict{String,String}(), 0f0, 0f0, Dict{String,Box}(), nothing)
+
+"Forget what the Layer Style pane kept: its typed texts, errors, scroll and cache."
+function reset_style_pane!(p::StylePane)
+    empty!(p.buffers)
+    p.focus = ""
+    p.caret = nothing
+    p.active = ""
+    empty!(p.errors)
+    p.scroll = 0f0
+    p.content_h = 0f0
+    empty!(p.boxes)
+    p.cache = nothing
+    return nothing
 end
 
 """
@@ -499,10 +541,14 @@ What the UI shows and where, apart from the project data. Changed on the render 
   act on it (map_commands.jl).
 - `colour_bars`: the shown map draws a colour bar (legend) for each coloured layer.
 - `opacity_preview`: a live opacity `(layer id, opacity)` for one layer of the shown map,
-  drawn before it is set on the layer (the Layers tab sets it while its slider moves), or `nothing`.
-  `opacity_edit`: the last release's edit (an `OpacityEdit`) until a snapshot has it, so the
-  map never shows the old opacity for a frame (see `settle_opacity_preview!`), or `nothing`;
-  `opacity_edits` counts the releases, for their tokens.
+  drawn before it is set on the layer (an opacity slider sets it while it moves), or `nothing`.
+  `opacity_edit`: the last release's edit (a `LayerEdit{Float64}`) until a snapshot has it, so
+  the map never shows the old opacity for a frame (see `settle_previews!`), or `nothing`.
+- `style_preview`: a live style `(layer id, style)` for one layer of the shown map: the style
+  it is drawn with (its effective style) while a Layer Style slider moves or an edit is on its
+  way, or `nothing`. `style_pending`: that edit (a `LayerEdit{Core.LayerStyle}`), as `opacity_edit`.
+  `layer_edits` counts the edits of both, for their tokens.
+- `style_pane`: what the Layer Style pane keeps between frames (a `StylePane`, see style.jl).
 - `layers_scroll`: how far the Layers tab's list is scrolled, in device pixels.
   `layer_boxes`: where the last frame drew each layer row of the Layers tab, by layer id, and
   the selected layer's opacity slider (`"opacity"`), in device pixels (tests read it).
@@ -571,8 +617,11 @@ Base.@kwdef mutable struct UiState
     layer_selected::String = ""
     colour_bars::Bool = true
     opacity_preview::Union{Nothing,Tuple{String,Float64}} = nothing
-    opacity_edit::Union{Nothing,OpacityEdit} = nothing
-    opacity_edits::Int = 0
+    opacity_edit::Union{Nothing,LayerEdit{Float64}} = nothing
+    style_preview::Union{Nothing,Tuple{String,Core.LayerStyle}} = nothing
+    style_pending::Union{Nothing,LayerEdit{Core.LayerStyle}} = nothing
+    layer_edits::Int = 0
+    style_pane::StylePane = StylePane()
     layers_cache::Any = nothing
     layers_scroll::Float32 = 0f0
     layer_boxes::Dict{String,Box} = Dict{String,Box}()
@@ -722,7 +771,7 @@ nodes, filter, scroll and cached rows, the open dialogs and menu, the requests n
 handled yet (they were made for the old project), the shown map (a project shows its
 first map once its first snapshot is in), the selected layer, the colour bars (on again),
 its layer data (their GL objects are freed on the next frame), the map picture, the map
-views and a live opacity, whether a job has shown the Jobs pane,
+views, a live opacity or style and what the Layer Style pane kept, whether a job has shown the Jobs pane,
 what the Jobs tab knew of the old jobs (so the new project's finished jobs make no
 toasts), and the old project's script on the Run Script page. Call it on the render
 thread. It does not close the old session.
@@ -752,8 +801,8 @@ function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     ms.plan_snap = nothing
     ms.plan_complete = false
     clear_image!(ms.renderer)
-    ui.opacity_preview = nothing
-    ui.opacity_edit = nothing
+    clear_previews!(ui)
+    reset_style_pane!(ui.style_pane)
     ui.layers_cache = nothing
     ui.layers_scroll = 0f0
     empty!(ui.layer_boxes)

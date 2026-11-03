@@ -50,7 +50,8 @@ Base.copy(st::LayerStyle) = LayerStyle((getfield(st, f) for f in fieldnames(Laye
 """
 One layer of a map. `item` is a database (`:lines`) or a grid (`:grid`).
 `channel` is the colour channel of a line layer, `""` for one plain colour.
-A grid layer with `own_style = false` uses the default style of its grid.
+A grid layer with `own_style = false` uses the default colours of its grid; its shading
+and `resample` are always its own (`effective_style`).
 """
 mutable struct MapLayer
     id::String

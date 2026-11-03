@@ -81,6 +81,23 @@ end
     @test !isdir(folder)
 end
 
+@testset "map items: a grid layer starts with its grid's shading" begin
+    s = fresh_session()
+    g = add_test_grid!(s, Float32[1 2; 3 4])
+    g2 = add_test_grid!(s, Float32[1 2; 3 4])
+    set_grid_style!(s, g, GridStyle("viridis", :linear, NaN, NaN, false, true, 300.0, 30.0, 2.0))
+    set_grid_style!(s, g2, GridStyle("geosoft", :histeq, NaN, NaN, false, false, 10.0, 120.0, -1.0))
+    m = new_map!(s)
+    layer(id) = only(filter(x -> x.id == id, map_item(s.project, m).layers))
+    l = layer(add_layer!(s, m, g))
+    @test !l.own_style && l.style.shade && l.style.declination == 300.0 && l.style.inclination == 30.0
+    @test l.style.zfactor == 2.0 && l.style.colours == "geosoft"   # the colours still come from the grid
+    l2 = layer(add_layer!(s, m, g2))
+    # An altitude out of range is clamped, and a vertical scale that is not above 0 means auto.
+    @test !l2.style.shade && l2.style.inclination == 90.0 && l2.style.declination == 10.0 && isnan(l2.style.zfactor)
+    close_session!(s)
+end
+
 @testset "map items: add_layer! rules" begin
     s = fresh_session()
     db = survey_database!(s)

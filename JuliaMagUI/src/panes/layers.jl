@@ -180,26 +180,55 @@ with `n` layers. A drop before its own row or the next one keeps its place.
 """
 drop_position(from::Int, to_row::Int, n::Int)::Int = n + 1 - (to_row > from ? to_row - 1 : to_row)
 
-# --- The opacity slider's edit ---
+# --- Live edits: the opacity and the style ---
+
+# An edit the map draws live has a slot of its own in `app.ui`: the opacity (`Float64`) or the
+# style (`Core.LayerStyle`). Each slot has the live value (`opacity_preview`, `style_preview`)
+# and the edit on its way (`opacity_edit`, `style_pending`), with tokens from one counter.
+live_preview(ui, ::Type{Float64}) = ui.opacity_preview
+live_preview(ui, ::Type{Core.LayerStyle}) = ui.style_preview
+live_edit(ui, ::Type{Float64}) = ui.opacity_edit
+live_edit(ui, ::Type{Core.LayerStyle}) = ui.style_pending
+
+function set_live!(ui, ::Type{Float64}, p::Union{Nothing,Tuple{String,Float64}}, e::Union{Nothing,LayerEdit{Float64}})
+    ui.opacity_preview = p
+    ui.opacity_edit = e
+    return nothing
+end
+
+function set_live!(ui, ::Type{Core.LayerStyle}, p::Union{Nothing,Tuple{String,Core.LayerStyle}},
+        e::Union{Nothing,LayerEdit{Core.LayerStyle}})
+    ui.style_preview = p
+    ui.style_pending = e
+    return nothing
+end
+
+"End every live value and forget the edits on their way: on a map switch and a project switch."
+function clear_previews!(ui)
+    set_live!(ui, Float64, nothing, nothing)
+    set_live!(ui, Core.LayerStyle, nothing, nothing)
+    return nothing
+end
 
 """
-    commit_opacity!(app, map_id, layer_id, opacity)
+    commit_layer_edit!(app, T, label, map_id, layer_id, shown::T; kwargs...)
 
-Set the opacity of a layer on the worker: one undo step. The live opacity
-(`app.ui.opacity_preview`) shows the new value until a snapshot has this edit: the edit is
-`app.ui.opacity_edit`, with a token of its own, so an older edit that comes back later
-never ends the live opacity of a newer one (see `settle_opacity_preview!`). A failed edit is
-reported as other edits are, and ends the live opacity too.
+Run `Core.set_layer!(s, map_id, layer_id; kwargs...)` on the worker: one undo step. The map
+draws `shown` (an opacity when `T` is `Float64`, the style the layer will be drawn with when
+`T` is `Core.LayerStyle`) at once, and keeps it until a snapshot has this edit: the edit has a
+token of its own, so an older edit that comes back later never ends the live value of a newer
+one (see `settle_previews!`). A failed edit is reported as other edits are, and ends the live
+value too.
 """
-function commit_opacity!(app, map_id::AbstractString, layer_id::AbstractString, opacity::Real)
+function commit_layer_edit!(app, ::Type{T}, label::AbstractString, map_id::AbstractString,
+        layer_id::AbstractString, shown::T; kwargs...) where {T}
     ui = app.ui
-    m, id, o = String(map_id), String(layer_id), Float64(opacity)
-    token = (ui.opacity_edits += 1)
-    ui.opacity_edit = OpacityEdit(token, id, o, -1)
-    ui.opacity_preview = (id, o)
-    submit!(app, "Change opacity", s -> begin
+    m, id = String(map_id), String(layer_id)
+    token = (ui.layer_edits += 1)
+    set_live!(ui, T, (id, shown), LayerEdit{T}(token, id, shown, -1))
+    submit!(app, label, s -> begin
             try
-                Core.set_layer!(s, m, id; opacity = o)
+                Core.set_layer!(s, m, id; kwargs...)
                 (Core.revision(s), nothing)
             catch e
                 e isa InterruptException && rethrow()
@@ -207,7 +236,7 @@ function commit_opacity!(app, map_id::AbstractString, layer_id::AbstractString, 
             end
         end;
         done = (a, r) -> begin
-            ed = a.ui.opacity_edit
+            ed = live_edit(a.ui, T)
             ed !== nothing && ed.token == token && (ed.revision = r[1])
             r[2] === nothing || report_error!(a, r[2]...)
             nothing
@@ -216,10 +245,19 @@ function commit_opacity!(app, map_id::AbstractString, layer_id::AbstractString, 
 end
 
 """
+    commit_opacity!(app, map_id, layer_id, opacity)
+
+Set the opacity of a layer on the worker: one undo step, drawn live until a snapshot has it
+(`commit_layer_edit!`).
+"""
+commit_opacity!(app, map_id::AbstractString, layer_id::AbstractString, opacity::Real) =
+    commit_layer_edit!(app, Float64, "Change opacity", map_id, layer_id, Float64(opacity); opacity = Float64(opacity))
+
+"""
     shown_opacity(app, mv, layer_id) -> Float64
 
-The opacity the Layers tab shows for a layer of map view `mv`: the value of an edit still on
-its way (`app.ui.opacity_edit`), so the slider does not jump back after its release; else the
+The opacity a slider shows for a layer of map view `mv`: the value of an edit still on its
+way (`app.ui.opacity_edit`), so the slider does not jump back after its release; else the
 layer's own.
 """
 function shown_opacity(app, mv, id::AbstractString)::Float64
@@ -246,22 +284,29 @@ function settle_drags!(app)
 end
 
 """
-    settle_opacity_preview!(app)
+    settle_previews!(app)
 
-End the live opacity (`app.ui.opacity_preview`) once nothing needs it: when the snapshot has
-the last release's edit (`app.ui.opacity_edit`), unless a slider drags again, or at once when
-no slider drags and no edit is on its way (the slider was let go with no change, Esc
-cancelled it, or it went away). Call it once per frame.
+End the live opacity and the live style once nothing needs them: each when the snapshot has
+its slot's last edit, unless a slider drags again, or at once when no slider drags and no
+edit is on its way (the slider was let go with no change, Esc cancelled it, or it went
+away). Call it once per frame.
 """
-function settle_opacity_preview!(app)
+function settle_previews!(app)
+    settle_live!(app, Float64)
+    settle_live!(app, Core.LayerStyle)
+    return nothing
+end
+
+function settle_live!(app, ::Type{T}) where {T}
     ui = app.ui
-    ed = ui.opacity_edit
+    ed = live_edit(ui, T)
     snap = app.snap
     if ed !== nothing && ed.revision >= 0 && snap !== nothing && snap.revision >= ed.revision
-        ui.opacity_edit = ed = nothing
+        ed = nothing
+        set_live!(ui, T, live_preview(ui, T), nothing)
     end
-    ui.opacity_preview === nothing && return nothing
-    ed === nothing && !slider_dragging(app) && (ui.opacity_preview = nothing)
+    live_preview(ui, T) === nothing && return nothing
+    ed === nothing && !slider_dragging(app) && set_live!(ui, T, nothing, nothing)
     return nothing
 end
 
@@ -686,9 +731,7 @@ end
     draw_opacity_row(app, dl, mv, row, b)
 
 The selected layer's opacity row (`.opac`, 28 px) in box `b`: "Opacity" in 11.5 `text_dim`
-from 74 px in, then the slider and its value ("85 %") 12 px before the right edge. A drag
-draws the map live through `app.ui.opacity_preview`; the release sets the opacity, one undo
-step (`commit_opacity!`).
+from 74 px in, then its `opacity_slider!` and its value ("85 %") 12 px before the right edge.
 """
 function draw_opacity_row(app, dl, mv, r::LayerRow, b::Box)
     s = app.window.scale
@@ -699,22 +742,35 @@ function draw_opacity_row(app, dl, mv, r::LayerRow, b::Box)
     x = b.x0 + f(LAYER_INDENT)
     draw_text_mid(dl, FONT_REGULAR, LAYER_TEXT_SIZE, x, mid, u32(t.text_dim), "Opacity")
     x += f(OPACITY_LABEL_W)
-    base = shown_opacity(app, mv, r.id)   # an edit still on its way shows its value
-    pending = ui.opacity_edit !== nothing && ui.opacity_edit.layer == r.id
     sb = Box(x, mid - f(8), max(x + f(SLIDER_THUMB + SLIDER_VALUE_W + 8), b.x1 - f(12)), mid + f(8))
     ig.PushID(r.id)
+    opacity_slider!(app, mv, r.id, sb)
+    ig.PopID()
+    ui.layer_boxes["opacity"] = Box(sb.x0, sb.y0, sb.x1 - f(SLIDER_VALUE_W + 8), sb.y1)
+    return nothing
+end
+
+"""
+    opacity_slider!(app, mv, layer_id, b)
+
+The opacity slider of a layer of map view `mv` in box `b`, with its value ("85 %") at the
+right: the Layers tab's and the Layer Style pane's. A drag draws the map live through
+`app.ui.opacity_preview`; the release sets the opacity, one undo step (`commit_opacity!`).
+"""
+function opacity_slider!(app, mv, id::AbstractString, sb::Box)
+    ui = app.ui
+    base = shown_opacity(app, mv, id)   # an edit still on its way shows its value
+    pending = ui.opacity_edit !== nothing && ui.opacity_edit.layer == id
     value = 100 * base
     v, changed, released = slider!(app, "Opacity", sb, value, 0, 100;
         format = v -> string(round(Int, v), " %"), step = 1)
-    ig.PopID()
-    ui.layer_boxes["opacity"] = Box(sb.x0, sb.y0, sb.x1 - f(SLIDER_VALUE_W + 8), sb.y1)
     same = v == value
-    changed && (ui.opacity_preview = same && !pending ? nothing : (r.id, same ? base : v / 100))
+    changed && (ui.opacity_preview = same && !pending ? nothing : (String(id), same ? base : v / 100))
     if released
         if same
-            ui.opacity_preview = pending ? (r.id, base) : nothing
+            ui.opacity_preview = pending ? (String(id), base) : nothing
         else
-            commit_opacity!(app, mv.id, r.id, v / 100)
+            commit_opacity!(app, mv.id, id, v / 100)
         end
     end
     return nothing

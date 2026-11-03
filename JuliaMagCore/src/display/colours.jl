@@ -214,24 +214,41 @@ end
     effective_style(layer, grid_style, app_colours) -> LayerStyle
 
 The style a layer is drawn with. A layer with its own style, or without a grid style,
-uses `layer.style`. Else the style comes from the grid's own style. A grid style that
-still has the stock colour table uses `app_colours`, the app's "Grid colours" setting.
+uses `layer.style`. Else the colours (table, stretch, limits, direction) come from the
+grid's own style; a grid style that still has the stock colour table uses `app_colours`,
+the app's "Grid colours" setting. The shading (`shade`, the sun, `zfactor`) and `resample`
+are always the layer's own, so they can change without freezing the grid's colours.
 """
 function effective_style(layer::MapLayer, grid_style::Union{Nothing,GridStyle}, app_colours::AbstractString)::LayerStyle
     (layer.own_style || grid_style === nothing) && return layer.style
     stock = GridStyle()
+    own = layer.style
     return LayerStyle(;
         colours = grid_style.colours == stock.colours ? String(app_colours) : grid_style.colours,
         stretch = grid_style.method === :linear ? :linear : :histeq,
         min = grid_style.min,
         max = grid_style.max,
         reverse = grid_style.reverse,
-        shade = grid_style.shade,
-        inclination = grid_style.altitude,
-        declination = grid_style.azimuth,
-        zfactor = grid_style.zfactor == stock.zfactor ? NaN : grid_style.zfactor,
-        resample = layer.style.resample,
+        shade = own.shade,
+        inclination = own.inclination,
+        declination = own.declination,
+        zfactor = own.zfactor,
+        resample = own.resample,
     )
+end
+
+"""
+    grid_shading(grid_style) -> LayerStyle
+
+A layer style with the shading of a grid's style: its `shade`, the sun (`altitude` as the
+inclination, clamped to 0 to 90, and `azimuth` as the declination) and its vertical scale
+(the stock 1, or a value not above 0, means automatic). The rest is the default. A new
+grid layer starts with it.
+"""
+function grid_shading(gs::GridStyle)::LayerStyle
+    z = gs.zfactor
+    return LayerStyle(; shade = gs.shade, inclination = clamp(gs.altitude, 0.0, 90.0), declination = gs.azimuth,
+                      zfactor = (z == GridStyle().zfactor || !(z > 0) || !isfinite(z)) ? NaN : z)
 end
 
 "The vertical scale of a shaded relief: 2.5 over the mean gradient (Oasis). 1 when there is no gradient."
