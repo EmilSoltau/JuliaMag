@@ -19,7 +19,7 @@ Base.@kwdef mutable struct AppConfig
     open_last::Bool = false
     hidden_tabs::Vector{String} = String[]
     distance_units::String = "m"
-    grid_colours::String = "rainbow"
+    grid_colours::String = "geosoft"
     temp_folder::String = ""
     software_rendering::Bool = false
     window::NTuple{4,Int} = (0, 0, 1480, 920)

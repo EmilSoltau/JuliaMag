@@ -8,7 +8,7 @@ using JuliaMagUI: AppConfig, load_config, save_config, add_recent!, config_dir,
             c, err = load_config()
             @test err === nothing && c.theme == THEME_SYSTEM
             @test c.window == (0, 0, 1480, 920) && c.left_width == 272f0 && c.right_width == 300f0
-            @test c.distance_units == "m" && c.grid_colours == "rainbow" && c.temp_folder == ""
+            @test c.distance_units == "m" && c.grid_colours == "geosoft" && c.temp_folder == ""
             @test !c.open_last && !c.software_rendering && !c.ribbon_collapsed
             c.theme = THEME_DARK
             add_recent!(c, pwd())

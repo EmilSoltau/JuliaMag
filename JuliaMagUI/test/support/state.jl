@@ -278,8 +278,8 @@ every_setting_tool(; id::AbstractString = "test.every_setting", mode::Symbol = :
             Core.TextSetting("note", "Note"; default = "Survey 2024", help = "Free text."),
             Core.ExprSetting("expr", "Expression"; default = "OUT = MAG * 2"),
             Core.ChoiceSetting("method", "Method", ["near", "linear"]; labels = ["Nearest", "Linear"]),
-            Core.ChoiceSetting("table", "Colour table", ["rainbow", "geosoft", "grey", "clra"];
-                labels = ["Rainbow", "Geosoft", "Grey", "Clra"]),
+            Core.ChoiceSetting("table", "Colour table", ["geosoft", "viridis", "grey", "blue-red"];
+                labels = ["Geosoft (colour.tbl)", "Viridis", "Grey", "Blue-Red"]),
             Core.BoolSetting("protect", "Protect the output"; default = true),
             Core.FileSetting("file", "File"; extensions = [".xyz"], default = "/data/survey.xyz"),
             Core.ChannelSetting("channel", "Channel"),

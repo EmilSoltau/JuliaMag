@@ -13,6 +13,8 @@ include("storage/database.jl")
 include("storage/grid.jl")
 include("project/project.jl")
 include("map/map_item.jl")
+include("display/colours.jl")
+include("display/histogram.jl")
 include("jobs/job.jl")
 include("session/lock.jl")
 include("session/session.jl")
@@ -58,7 +60,7 @@ export ItemKind, ITEM_DATABASE, ITEM_GRID, ITEM_MAP, ProjectItem, Project, Proje
 export create_project, open_project, save_project, add_item!, remove_item!, item, item_missing
 export new_item_id, database, grid
 export read_channel, write_value!, write_channel!
-export GridError, GridStyle, colour_tables, GridSource, Grid, GRID_BLOCK_BYTES, create_grid, open_grid, save_grid_meta
+export GridError, GridStyle, colour_tables, colour_table, GridSource, Grid, GRID_BLOCK_BYTES, create_grid, open_grid, save_grid_meta
 export values_path, block_rows, read_rows, write_rows!, with_grid_values, cell_centre, grid_corners
 export UndoStep, HistoryEntry, Cursor, Session, ProtectedError, ItemBusyError
 export LOCK_FILE, ProjectLockedError
@@ -91,6 +93,8 @@ public crs_axis_unit, deactivate_settings, PROJECT_FILE
 export parse_channel_expr, ChannelStats, channel_stats, grid_stats
 export set_grid_crs!, set_grid_georef!, set_grid_style!
 export LayerStyle, MapLayer, MapItem, MapError, MAP_FILE, create_map, open_map, save_map, map_item
+export colour_position, effective_style, auto_zfactor, sun_vector
+export HIST_BINS, ValueHistogram, reset!, add_values!, quantile_value, equalize_table, equalize_table!, stretch_range
 export default_colour_channel, new_map!, add_layer!, remove_layer!, move_layer!, set_layer!
 
 # The one `__init__` of the package. Each part that needs setup when the
