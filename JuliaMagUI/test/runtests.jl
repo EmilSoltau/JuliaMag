@@ -31,6 +31,7 @@ include("support/state.jl")
     include("test_map_loader.jl")
     include("test_map_view.jl")
     include("test_map_frame.jl")
+    include("test_map_commands.jl")
     include("window/test_harness.jl")
     include("window/test_shell.jl")
     include("window/test_ribbon.jl")
@@ -43,6 +44,7 @@ include("support/state.jl")
     include("window/test_map_gl.jl")
     include("window/test_map_view.jl")
     include("window/test_map_fallback.jl")
+    include("window/test_map_commands.jl")
 end
 
 end

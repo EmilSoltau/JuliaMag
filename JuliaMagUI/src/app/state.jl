@@ -225,9 +225,11 @@ function snapshot(s::Core.Session)::Snapshot
                 grid_view(p, it, gone, relock)
             end
         elseif it.kind == Core.ITEM_MAP
-            maps[it.id] = cached_view(cache, p, it, gone, Core.MAP_FILE) do
+            v = cached_view(cache, p, it, gone, Core.MAP_FILE) do
                 map_view(p, it, gone, relock)
             end
+            # The name is the item's: a rename changes the project file, not map.json.
+            maps[it.id] = v.name == it.name ? v : MapView(v.id, it.name, v.crs, v.layers, v.error)
         end
     end
     ids = Set(it.id for it in items)
@@ -371,7 +373,7 @@ function map_view(p::Core.Project, it::Core.ProjectItem, gone::Bool, relock::Fun
     gone && return MapView(it.id, it.name, missing_text(it))
     m = open_item(Core.open_map, p, it, relock)
     m isa Core.MapItem || return MapView(it.id, it.name, read_error(m))
-    return MapView(it.id, m.name, m.crs, Core.MapLayer[copy(l) for l in m.layers], "")
+    return MapView(it.id, it.name, m.crs, Core.MapLayer[copy(l) for l in m.layers], "")
 end
 
 """
@@ -479,7 +481,11 @@ What the UI shows and where, apart from the project data. Changed on the render 
 - `left_tab`: `:data` or `:jobs`; `right_tabs`, `right_active`: the open right panes (such
   as `:tools`) in the order they opened, and the one shown (`:none` when none is open).
 - `current_db`: the database item the Database tab acts on, or `""`.
-- `current_map`: the map item shown in the central area, or `""`.
+- `current_map`: the map item shown in the central area, or `""`. `first_map`: the next
+  snapshot of the project shows its first map (`sync_current_map!`); set when a project opens.
+- `layer_selected`: the id of the selected layer of the shown map, or `""`. The map commands
+  act on it (map_commands.jl).
+- `colour_bars`: the shown map draws a colour bar (legend) for each coloured layer.
 - `opacity_preview`: a live opacity `(layer id, opacity)` for one layer of the shown map,
   drawn before it is set on the layer (the Layers tab sets it while its slider moves), or `nothing`.
 - `selected`: `(kind, item id, sub key)` of the selection in the Data tree, where the sub
@@ -513,6 +519,8 @@ What the UI shows and where, apart from the project data. Changed on the render 
 - `ribbon_scroll`: how far the ribbon is scrolled to the left, in device pixels, on tab
   `ribbon_scroll_tab`; another tab starts at 0.
 - `menu`: the open drop-down menu (an `OpenMenu`, see menu.jl), or `nothing`.
+- `menu_request`: the id of a ribbon command whose menu opens at its button in the next
+  frame that draws it (a menu command run from the search), or `""`.
 - `ribbon_cache`: the ribbon's layout and widths for the last key (a `RibbonModel`, see
   ribbon.jl), or `nothing`.
 - `jobs_shown`: a job started from a dialog has switched the left pane to Jobs in this
@@ -540,6 +548,9 @@ Base.@kwdef mutable struct UiState
     right_active::Symbol = :none
     current_db::String = ""
     current_map::String = ""
+    first_map::Bool = false
+    layer_selected::String = ""
+    colour_bars::Bool = true
     opacity_preview::Union{Nothing,Tuple{String,Float64}} = nothing
     selected::Union{Nothing,Tuple{Symbol,String,String}} = nothing
     expanded::Set{String} = Set{String}()
@@ -575,6 +586,7 @@ Base.@kwdef mutable struct UiState
     ribbon_scroll::Float32 = 0f0
     ribbon_scroll_tab::String = ""
     menu::Any = nothing
+    menu_request::String = ""
     ribbon_cache::Any = nothing
     jobs_shown::Bool = false
     dialog_places::Vector{Any} = Any[]
@@ -683,8 +695,10 @@ Make `s` (a session or `nothing`) the app's project. This is the only way to cha
 build of the old session that comes back later is dropped too), the count of shown
 warnings, a failed build, the Data tree's current database, selection, expanded
 nodes, filter, scroll and cached rows, the open dialogs and menu, the requests not
-handled yet (they were made for the old project), the shown map, its layer data (their
-GL objects are freed on the next frame), the map picture, the map views and a live opacity, whether a job has shown the Jobs pane,
+handled yet (they were made for the old project), the shown map (a project shows its
+first map once its first snapshot is in), the selected layer, the colour bars (on again),
+its layer data (their GL objects are freed on the next frame), the map picture, the map
+views and a live opacity, whether a job has shown the Jobs pane,
 what the Jobs tab knew of the old jobs (so the new project's finished jobs make no
 toasts), and the old project's script on the Run Script page. Call it on the render
 thread. It does not close the old session.
@@ -699,6 +713,9 @@ function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     ui = app.ui
     ui.current_db = ""
     ui.current_map = ""
+    ui.first_map = s !== nothing
+    ui.layer_selected = ""
+    ui.colour_bars = true
     ms = app.map
     ms.renderer.gl === nothing || append!(ms.freed, keys(ms.entries))
     empty!(ms.entries)
@@ -723,6 +740,7 @@ function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     empty!(ui.dialogs)   # the next frame also closes their ImGui popups
     empty!(ui.requests)
     ui.menu = nothing
+    ui.menu_request = ""
     ui.jobs_shown = false
     empty!(ui.opening)
     ui.jobs_scroll = 0f0

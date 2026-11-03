@@ -170,10 +170,26 @@ Is a gesture under way or still to settle? The view draws frames meanwhile.
 """
 pending_gesture(st::MapViewState)::Bool = st.gesture != :none || st.before !== nothing
 
-# Drop a gesture that has not settled, then record the camera: the step of a command.
+"""
+    end_gesture!(st)
+
+End a gesture that is under way or has not settled yet, now: the camera before it goes into
+the history, if the camera changed. A drag whose button is still down starts again from the
+camera in the next frame. A command runs this first, so the history walk stays exact.
+"""
+function end_gesture!(st::MapViewState)
+    before = st.before
+    before === nothing || st.camera == before || record_extent!(st.history, before)
+    st.gesture = :none
+    st.before = nothing
+    st.box = nothing
+    st.moved = false
+    return nothing
+end
+
+# End a gesture, then record the camera: the step of a command.
 function record_command!(st::MapViewState)
-    st.gesture == :wheel && (st.gesture = :none)
-    st.gesture == :none && (st.before = nothing)
+    end_gesture!(st)
     cam = st.camera
     cam === nothing || record_extent!(st.history, cam)
     return nothing
@@ -226,11 +242,13 @@ end
 """
     previous!(st), next!(st)
 
-Go back or forward in the extent history. Nothing happens at its end.
+Go back or forward in the extent history, after ending a gesture that has not settled
+(`end_gesture!`). Nothing happens at its end.
 """
 function previous!(st::MapViewState)
     cam = st.camera
     cam === nothing && return nothing
+    end_gesture!(st)
     p = previous_extent!(st.history, cam)
     p === nothing || (st.camera = p)
     return nothing
@@ -239,6 +257,7 @@ end
 function next!(st::MapViewState)
     cam = st.camera
     cam === nothing && return nothing
+    end_gesture!(st)
     p = next_extent!(st.history, cam)
     p === nothing || (st.camera = p)
     return nothing
@@ -323,8 +342,8 @@ end
 The shown map in box `b` of the central area: `canvas` fill, an invisible button over `b`
 that takes the mouse for `step_view!`, the map image, then the overlays (`draw_overlays`).
 The map image is the last full picture (`draw_map_image`); a full GL picture is drawn by
-this frame's GL pass. The camera starts at the full extent once a layer has an extent. `Home`
-fits the full extent. A map with no layers says so.
+this frame's GL pass. The camera starts at the full extent once a layer has an extent. A map
+with no layers says so. The keys (`Home` for Full Extent) are the map commands' (map_commands.jl).
 """
 function draw_map_view(app, dl, b::Box)
     w = app.window::Window
@@ -364,10 +383,6 @@ function draw_map_view(app, dl, b::Box)
         (vw, vh), time())
     step_view!(st, input)   # a pick moves the shared cursor in a later task
     pending_gesture(st) && request_frames!(w)
-    if !blocks_shortcuts(app) && !unsafe_load(io.WantTextInput) && ig.IsKeyPressed(lib.ImGuiKey_Home, false)
-        ext = map_extent(app, mv)
-        ext === nothing || full_extent!(st, ext, vw, vh; inset = px(w.scale, BAND))
-    end
     draw_map_image(ms.renderer, dl, b, st, vw, vh, mv.id)
     draw_overlays(app, dl, b, mv, st)
     return nothing

@@ -158,11 +158,14 @@ end
         next!(st); @test st.camera == c
         next!(st); @test st.camera == a
         next!(st); @test st.camera == a                                              # none left
-        # A command while a wheel gesture is open takes its place in the history.
+        # A command while a wheel gesture is open ends the gesture first: the camera before the
+        # wheel and the camera the command started from go into the history, in that order.
+        before_wheel = st.camera
         step_view!(st, MapInput((10f0, 10f0), true, false, false, false, 1f0, (800, 600), 5.0))
+        wheeled = st.camera
         n = length(st.history.past)
         zoom_by!(st, 0.5)
-        @test length(st.history.past) == n + 1 && st.gesture == :none && st.before === nothing
+        @test st.history.past[n+1:end] == [before_wheel, wheeled] && st.gesture == :none && st.before === nothing
     end
 
     @testset "build_scene!" begin

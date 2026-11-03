@@ -32,7 +32,7 @@ function settings_commands()::Vector{Command}
         map_drawing_command("cpu", "CPU", "Draw maps on the CPU, without the graphics card."),
         Command("settings.tabs", "Show Tabs", app -> nothing;
             label = "Show\nTabs", icon = "eye", help = "Hide tabs you do not use. Settings and Help always show.",
-            places = [Core.Place("Settings", "Ribbon")], searchable = false),
+            places = [Core.Place("Settings", "Ribbon")], searchable = false, items = tabs_menu_items),
     ]
 end
 
@@ -189,19 +189,6 @@ const DEFAULTS_ROW_H = 22
 defaults_width(scale::Real)::Float32 = fpx(scale, 4 + DEFAULTS_LABEL_W + 6 + DEFAULTS_COMBO_W + 4)
 
 """
-    tabs_menu_width(measure, label; scale = 1) -> Float32
-
-The width of the Show Tabs button: a big button whose last label line ends with a caret
-(4 px gap, 8 px caret).
-"""
-function tabs_menu_width(measure, label::AbstractString; scale::Real = 1)::Float32
-    lines = split(label, '\n')
-    widths = [measure(String(l), RIBBON_LABEL_SIZE) for l in lines]
-    widths[end] += fpx(scale, 4 + 8)
-    return max(maximum(widths) + fpx(scale, 14), fpx(scale, 50))
-end
-
-"""
     draw_defaults(app, dl, x, top, frame)
 
 The Defaults item: two rows 22 high, 1 px apart, each with a dim label 84 wide and a
@@ -267,44 +254,6 @@ function small_combo!(app, dl, b::Box, id::String, owner::String, value::Abstrac
     hovered && item_tip!(app, id; help)
     return nothing
 end
-
-"""
-    draw_tabs_menu(app, dl, x, top, iw, frame)
-
-The Show Tabs button: a big button (70 high, the 32 px eye, the label under it) whose
-last label line ends with a caret. A click opens the Show Tabs menu, which stays open
-while tabs are ticked on and off.
-"""
-function draw_tabs_menu(app, dl, x::Real, top::Real, iw::Real, frame)
-    s = app.window.scale
-    t = app.tokens
-    f(v) = fpx(s, v)
-    cmd = frame.model.byid[TABS_MENU_ID]
-    b = Box(Float32(x), Float32(top), Float32(x) + Float32(iw), Float32(top) + f(70))
-    sb = snap(b)
-    owner = TABS_MENU_ID
-    open = menu_open(app, owner)
-    clicked, hovered, held = hit(unique_id!(frame, button_name(cmd)), sb)
-    open && keep_menu!(app, owner, sb; items = tabs_menu_items(app))
-    draw_rb_fill(app, dl, sb; enabled = true, hovered, held, on = open)
-    draw_icon(dl, cmd.icon, (rnd(b.x0 + (width(b) - px(s, 32)) / 2), rnd(b.y0 + f(5))), 32)
-    pitch = f(13.5)
-    lines = String.(split(cmd.label, '\n'))
-    for (k, line) in enumerate(lines)
-        last_line = k == length(lines)
-        lw = text_width(FONT_REGULAR, RIBBON_LABEL_SIZE, line)
-        full = last_line ? lw + f(4 + 8) : lw
-        lx = b.x0 + (width(b) - full) / 2
-        mid = b.y0 + f(42) + (k - 1) * pitch + pitch / 2
-        draw_text_mid(dl, FONT_REGULAR, RIBBON_LABEL_SIZE, lx, mid, u32(t.text), line; line = 13.5 / 11.5)
-        last_line && draw_caret(dl, lx + lw + f(4), mid - f(5) / 2, s, u32(t.text))
-    end
-    clicked && toggle_menu!(app, owner, sb, () -> tabs_menu_items(app))
-    hovered && command_tip!(app, cmd)
-    return nothing
-end
-
-const TABS_MENU_ID = "settings.tabs"
 
 # --- Getting Started ---
 

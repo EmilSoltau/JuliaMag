@@ -514,7 +514,7 @@ toast_texts(app) = [t.text for t in app.toasts]
             @test first(all_items).head && first(all_items).label == "Tabs"
             items = filter(it -> !it.head, all_items)
             labels = [it.label for it in items]
-            @test labels == ["Database", "Database Tools", "Coordinates", "Grid and Image",
+            @test labels == ["Database", "Database Tools", "Coordinates", "Grid and Image", "Map",
                 "Settings", "Help"]
             @test all(it -> it.checked === true && it.stay, items)
             @test items[end].reason !== nothing && items[end-1].reason !== nothing
@@ -546,7 +546,7 @@ toast_texts(app) = [t.text for t in app.toasts]
             @test [byid[id].label for id in groups[4].items[2].cmd_ids] ==
                   ["Map: Auto", "Map: Graphics Card", "Map: CPU"]
             @test byid["settings.software"].label == "Software\nRendering"
-            @test groups[5].items == [Custom(:tabs_menu)]
+            @test groups[5].items == [UI.MenuButton("settings.tabs")]
             help = ribbon_layout(cmds, "Help")
             @test [g.name for g in help] == ["Help", "About"]
             @test [byid[b.cmd_id].label for b in help[1].items] ==

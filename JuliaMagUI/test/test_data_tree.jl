@@ -51,6 +51,66 @@ row(rows, key) = rows[findfirst(r -> r.key == key, rows)]
         end
     end
 
+    @testset "the Maps folder, map rows and their menus" begin
+        s = fresh_session()
+        db = survey_database!(s)
+        g = add_test_grid!(s, Float32[i + j for i in 1:20, j in 1:10]; name = "TMI")
+        m = Core.new_map!(s)
+        Core.add_layer!(s, m, db); Core.add_layer!(s, m, g)
+        empty_map = Core.new_map!(s; name = "Empty")
+        with_app(test_app_state(s)) do app
+            refresh_now!(app)
+            rows = tree_rows(app.snap, Set(["databases", "grids", "maps"]), "")
+            @test labels(rows) == ["Databases", UI.item_name(app.snap, db), "Grids", "TMI", "Maps", "Map 1", "Empty"]
+            folder = row(rows, "maps")
+            @test folder.kind == :maps && folder.right == "2" && folder.bold && has_children(folder)
+            r = row(rows, m)
+            @test r.kind == :map && r.depth == 1 && r.icon == "map" && r.right == "2 layers" && !has_children(r)
+            @test row(rows, empty_map).right == "0 layers"
+            @test row_target(r) == (:map, m, "") && row_key(:map, m, "") == m && row_target(folder) == (:maps, "", "")
+            @test labels(tree_rows(app.snap, Set{String}(), "empt")) == ["Maps", "Empty"]
+            # Properties of a map.
+            p = properties(app.snap, (:map, m, ""))
+            @test p.title == "Map 1" && p.rows == ["Type" => "Map", "Layers" => "2", "System" => UI.crs_text(app.snap, "EPSG:32755")]
+
+            menu(key) = [it.separator ? "-" : it.label for it in tree_menu(app, row(rows, key))]
+            @test menu(m) == ["Open", "Rename...", "Remove from Project"]
+            @test menu("maps") == ["New Map"]
+            # No map shown: no Add to Current Map.
+            @test menu(db)[1:2] == ["Show on Map", "-"] && menu(g)[1:2] == ["Show on Map", "-"]
+            @test only(it for it in tree_menu(app, row(rows, db)) if it.label == "Show on Map").icon == "map"
+            # Open shows the map; then the rows of a database and a grid can add to it.
+            tree_menu(app, row(rows, m))[1].action(app)
+            @test app.ui.current_map == m
+            @test menu(db)[1:3] == ["Show on Map", "Add to Current Map", "-"] &&
+                  menu(g)[1:3] == ["Show on Map", "Add to Current Map", "-"]
+            add = only(it for it in tree_menu(app, row(rows, db)) if it.label == "Add to Current Map")
+            @test add.icon == "addItem"
+            add.action(app); wait_drained(app); refresh_now!(app)
+            @test [l.item for l in app.snap.maps[m].layers] == [g, db, db]   # one more, on top
+            # Enter or a double click on a map row shows the map.
+            app.ui.current_map = ""
+            UI.default_action!(app, row(rows, empty_map))
+            @test app.ui.current_map == empty_map
+            # Rename opens the dialog; Remove from Project takes the map out at once, undoably.
+            tree_menu(app, row(rows, m))[2].action(app)
+            d = only(app.ui.dialogs)
+            @test d isa RenameDialog && d.target == (:map, m, "") && UI.field_text(d.name) == "Map 1"
+            empty!(app.ui.dialogs)
+            tree_menu(app, row(rows, m))[3].action(app)
+            @test isempty(app.ui.dialogs)
+            wait_drained(app); refresh_now!(app)
+            @test !haskey(app.snap.maps, m)
+            UI.run_undo(app, false); wait_drained(app); refresh_now!(app)
+            @test haskey(app.snap.maps, m)
+            # A renamed map shows its new name (the map view cache keys on map.json only).
+            Core.rename_item!(s, m, "Survey map")
+            refresh_now!(app)
+            @test app.snap.maps[m].name == "Survey map" &&
+                  row(tree_rows(app.snap, Set(["maps"]), ""), m).label == "Survey map"
+        end
+    end
+
     s = kangaroo_data()
     try
     snap = snapshot(s)
@@ -59,10 +119,10 @@ row(rows, key) = rows[findfirst(r -> r.key == key, rows)]
 
     @testset "structure, collapsed" begin
         rows = tree_rows(snap, Set{String}(), "")
-        @test labels(rows) == ["Databases", "Grids"]
-        @test [r.kind for r in rows] == [:databases, :grids]
+        @test labels(rows) == ["Databases", "Grids", "Maps"]
+        @test [r.kind for r in rows] == [:databases, :grids, :maps]
         @test rows[1].bold && rows[1].icon == "folder" && rows[1].depth == 0 && rows[1].right == "1"
-        @test rows[2].right == "2"
+        @test rows[2].right == "2" && rows[3].right == "0" && rows[3].bold && rows[3].icon == "folder"
         @test all(r -> r.checkbox === nothing && r.tag == "", rows)
     end
 
@@ -130,7 +190,7 @@ row(rows, key) = rows[findfirst(r -> r.key == key, rows)]
         @test UI.tree_empty_text("", TreeRow[]) === nothing
         @test UI.tree_empty_text("mag", tree_rows(snap, Set{String}(), "mag")) === nothing
         f = tree_rows(snap, Set{String}(), "  ")   # blank is no filter
-        @test labels(f) == ["Databases", "Grids"]
+        @test labels(f) == ["Databases", "Grids", "Maps"]
     end
 
     @testset "role tags and numbers" begin
@@ -234,7 +294,7 @@ row(rows, key) = rows[findfirst(r -> r.key == key, rows)]
             rows = tree_rows(app.snap, Set(["databases", db, "$db/lines", "$db/channels", "grids"]), "")
             menu(key) = [it.separator ? "-" : it.label for it in tree_menu(app, row(rows, key))]
             @test menu("databases") == ["Import Geosoft XYZ...", "Import CSV and Text..."]
-            @test menu(db) == ["Statistics...", "Channel Math...", "Export Geosoft XYZ...",
+            @test menu(db) == ["Show on Map", "-", "Statistics...", "Channel Math...", "Export Geosoft XYZ...",
                 "Export CSV...", "Export Parquet...", "-", "Rename...", "Remove from Project"]
             @test menu("$db/lines") == ["Select All Lines", "Select No Lines"]
             @test menu("$db/channels/MAG") == ["Statistics...", "Channel Properties...", "Unprotect", "-",
@@ -242,7 +302,7 @@ row(rows, key) = rows[findfirst(r -> r.key == key, rows)]
             @test menu("$db/channels/IGRF")[3] == "Protect"
             @test menu("$db/pairs/X,Y") == ["Set as Current", "Remove Pair"]
             @test menu("grids") == ["Import GeoTIFF...", "Import ER Mapper...", "Import Geosoft or Surfer Grid..."]
-            @test menu(grid) == ["Grid Statistics...", "Set Coordinate System...", "-", "Export GeoTIFF...",
+            @test menu(grid) == ["Show on Map", "-", "Grid Statistics...", "Set Coordinate System...", "-", "Export GeoTIFF...",
                 "Export ER Mapper...", "Export Geosoft Grid...", "-", "Rename...", "Remove from Project"]
             @test menu(gone) == ["Rename...", "Remove from Project"]
             @test isempty(tree_menu(app, row(rows, "$db/lines/L1001")))
@@ -251,7 +311,7 @@ row(rows, key) = rows[findfirst(r -> r.key == key, rows)]
 
             # A tool entry pushes the tool request with the item (T11-C1).
             empty!(app.ui.requests)
-            items[1].action(app)
+            items[3].action(app)
             r = only(app.ui.requests)
             @test r isa UI.OpenToolDialog && r.id == "database.statistics" && r.item == db &&
                   isempty(r.values)
@@ -262,11 +322,11 @@ row(rows, key) = rows[findfirst(r -> r.key == key, rows)]
             @test r.id == "database.statistics" && r.item == db && r.values == Dict{String,Any}("channel" => "MAG")
             empty!(app.ui.requests)
             gi = tree_menu(app, row(rows, grid))
-            gi[2].action(app)
+            gi[4].action(app)
             r = only(app.ui.requests)
             @test r.id == "grid.set_crs" && r.item == grid
             empty!(app.ui.requests)
-            gi[4].action(app)
+            gi[6].action(app)
             r = only(app.ui.requests)
             @test r isa UI.OpenExport && r.exporter_id == "export.geotiff" && r.item == grid
             empty!(app.ui.requests)

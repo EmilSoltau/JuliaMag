@@ -26,8 +26,8 @@ UI.handle_request!(app, ::SwitchProjectRequest) = (UI.set_session!(app, nothing)
             @test length(ids) == length(cmds)
             cm = only(filter(c -> c.id == "database.channel_math", cmds))
             @test cm.enabled(app) == "Import line data first."
-            @test UI.tab_order(cmds, String[]) == ["Database", "Database Tools", "Coordinates", "Grid and Image"]
-            @test UI.tab_order(cmds, ["Coordinates"]) == ["Database", "Database Tools", "Grid and Image"]
+            @test UI.tab_order(cmds, String[]) == ["Database", "Database Tools", "Coordinates", "Grid and Image", "Map"]
+            @test UI.tab_order(cmds, ["Coordinates"]) == ["Database", "Database Tools", "Grid and Image", "Map"]
             @test UI.location(cm) == "Database Tools > Channels"
             @test UI.location(only(filter(c -> c.id == "session.undo", cmds))) == "Quick Access"   # its `where`
             @test UI.commands(app) === cmds   # cached
@@ -86,7 +86,7 @@ UI.handle_request!(app, ::SwitchProjectRequest) = (UI.set_session!(app, nothing)
                 cmds2 = UI.commands(app)
                 @test cmds2 !== cmds && any(c -> c.id == "magnetics.test", cmds2)
                 @test UI.tab_order(cmds2, String[]) ==
-                      ["Database", "Database Tools", "Coordinates", "Grid and Image", "Magnetics"]
+                      ["Database", "Database Tools", "Coordinates", "Grid and Image", "Map", "Magnetics"]
                 t = only(filter(c -> c.id == "magnetics.test", cmds2))
                 @test t.name == "Lag Correction..."
                 t.run(app)

@@ -20,6 +20,14 @@ struct SplitButton <: RibbonItem
     cmd_id::String
 end
 
+"""
+A big button whose last label line ends with a caret. A click opens the drop-down menu of
+command `cmd_id` (its `items`), such as Add Item to Map or Show Tabs.
+"""
+struct MenuButton <: RibbonItem
+    cmd_id::String
+end
+
 "A column of one to three small buttons (22 high, 18 px icon, label on the right)."
 struct SmallColumn <: RibbonItem
     cmd_ids::Vector{String}
@@ -30,7 +38,7 @@ struct SmallColumn <: RibbonItem
     end
 end
 
-"An item the ribbon draws by hand, such as `:db_chooser` (the \"Acts on\" chooser)."
+"An item the ribbon draws by hand: `:db_chooser` (the \"Acts on\" chooser) or `:defaults`."
 struct Custom <: RibbonItem
     kind::Symbol
 end
@@ -45,19 +53,20 @@ RibbonGroup(name::AbstractString, items::AbstractVector{<:RibbonItem}) =
 
 Base.:(==)(a::BigButton, b::BigButton) = a.cmd_id == b.cmd_id
 Base.:(==)(a::SplitButton, b::SplitButton) = a.cmd_id == b.cmd_id
+Base.:(==)(a::MenuButton, b::MenuButton) = a.cmd_id == b.cmd_id
 Base.:(==)(a::SmallColumn, b::SmallColumn) = a.cmd_ids == b.cmd_ids
 Base.:(==)(a::Custom, b::Custom) = a.kind == b.kind
 Base.:(==)(a::RibbonGroup, b::RibbonGroup) = a.name == b.name && a.items == b.items
 Base.hash(a::BigButton, h::UInt) = hash(a.cmd_id, hash(:BigButton, h))
 Base.hash(a::SplitButton, h::UInt) = hash(a.cmd_id, hash(:SplitButton, h))
+Base.hash(a::MenuButton, h::UInt) = hash(a.cmd_id, hash(:MenuButton, h))
 Base.hash(a::SmallColumn, h::UInt) = hash(a.cmd_ids, hash(:SmallColumn, h))
 Base.hash(a::Custom, h::UInt) = hash(a.kind, hash(:Custom, h))
 Base.hash(a::RibbonGroup, h::UInt) = hash(a.items, hash(a.name, hash(:RibbonGroup, h)))
 
-# Commands that the ribbon draws as a custom item: the "Acts on" chooser, the Defaults
-# combos and the Show Tabs menu button of the Settings tab (settings_tab.jl).
-const RIBBON_CUSTOM = Dict("database.choose" => :db_chooser, "settings.defaults" => :defaults,
-    "settings.tabs" => :tabs_menu)
+# Commands that the ribbon draws as a custom item: the "Acts on" chooser and the Defaults
+# combos of the Settings tab (settings_tab.jl).
+const RIBBON_CUSTOM = Dict("database.choose" => :db_chooser, "settings.defaults" => :defaults)
 
 # The shell's own groups come first on these tabs, in this order. Other groups follow in
 # the order their first command was placed.
@@ -78,7 +87,7 @@ is_split(c::Command, p::Core.Place) =
 The groups of ribbon tab `tab`. Groups come in the order their first command was placed,
 after the fixed shell groups of `RIBBON_FIRST_GROUPS`. In a group, commands go by their
 place's `order`, then by their position in `cmds`. A `:big` place is a `BigButton` (a
-`SplitButton` when the command has a `menu`); runs of `:small` places make `SmallColumn`s
+`SplitButton` when the command has a `menu`, a `MenuButton` when it has `items`); runs of `:small` places make `SmallColumn`s
 of up to three. A command in the menu of a split button of the same group is left out:
 it shows through that menu.
 """
@@ -113,7 +122,8 @@ function ribbon_layout(cmds::AbstractVector{Command}, tab::AbstractString)::Vect
                 push!(column, c.id)
             else
                 flush()
-                push!(items, is_split(c, p) ? SplitButton(c.id) : BigButton(c.id))
+                push!(items, is_split(c, p) ? SplitButton(c.id) :
+                             c.items !== nothing ? MenuButton(c.id) : BigButton(c.id))
             end
         end
         flush()
@@ -146,7 +156,8 @@ The width of a ribbon item in device pixels. `measure(text, size)` is the width 
 text at `size` logical pixels, in device pixels. `label(cmd_id)` is the command's ribbon
 label. `note` is the text under the "Acts on" chooser.
 
-- big: max(widest label line + 14, 50); split: big + 20;
+- big: max(widest label line + 14, 50); split: big + 20; menu: big with the last line
+  4 + 8 px longer (the caret);
 - small: 26 + label + 8, and a column is as wide as its widest button;
 - chooser: 4 + max(170, "Acts on" + 1, note up to 180) + 4.
 """
@@ -157,6 +168,13 @@ end
 item_width(item::SplitButton, measure; label = identity, scale::Real = 1, note = "")::Float32 =
     item_width(BigButton(item.cmd_id), measure; label, scale) + fpx(scale, 20)
 
+function item_width(item::MenuButton, measure; label = identity, scale::Real = 1, note = "")::Float32
+    lines = split(label(item.cmd_id), '\n')
+    widths = [measure(String(l), RIBBON_LABEL_SIZE) for l in lines]
+    widths[end] += fpx(scale, 4 + 8)
+    return max(maximum(widths) + fpx(scale, 14), fpx(scale, 50))
+end
+
 item_width(item::SmallColumn, measure; label = identity, scale::Real = 1, note = "")::Float32 =
     maximum(fpx(scale, 26) + measure(small_label(label(id)), RIBBON_LABEL_SIZE) + fpx(scale, 8)
             for id in item.cmd_ids)
@@ -164,7 +182,6 @@ item_width(item::SmallColumn, measure; label = identity, scale::Real = 1, note =
 function item_width(item::Custom, measure; label = identity, scale::Real = 1, note = "")::Float32
     check_custom(item)
     item.kind === :defaults && return defaults_width(scale)
-    item.kind === :tabs_menu && return tabs_menu_width(measure, label(TABS_MENU_ID); scale)
     note_w = isempty(note) ? 0f0 : min(Float32(measure(note, GROUP_LABEL_SIZE)), fpx(scale, 180))
     inner = max(fpx(scale, 170), measure(CHOOSER_LABEL, GROUP_LABEL_SIZE) + fpx(scale, 1), note_w)
     return inner + fpx(scale, 8)
@@ -172,7 +189,7 @@ end
 
 # The custom items the ribbon knows. Another kind is an error, when sized and when drawn.
 check_custom(item::Custom) =
-    item.kind in (:db_chooser, :defaults, :tabs_menu) || throw(ArgumentError("no ribbon item :$(item.kind)"))
+    item.kind in (:db_chooser, :defaults) || throw(ArgumentError("no ribbon item :$(item.kind)"))
 
 """
     group_content_width(g, measure; label = identity, scale = 1, note = "") -> Float32
@@ -297,10 +314,12 @@ end
 const RIBBON_WHEEL_STEP = 100   # logical px per wheel step, as a browser scrolls
 
 # What the items of one frame share: the model, and the ids given out so far, so a command
-# placed twice on a tab gets "Name" and then "Name##2".
+# placed twice on a tab gets "Name" and then "Name##2"; and the command whose menu opens at
+# its button in this frame (`app.ui.menu_request`), or `""`.
 struct RibbonFrame
     model::RibbonModel
     ids::Dict{String,Int}
+    menu_request::String
 end
 
 function unique_id!(frame::RibbonFrame, name::String)::String
@@ -327,7 +346,8 @@ function draw_ribbon(app, dl, b::Box)
     fonts = get(LOADED_FONTS, ig.GetCurrentContext(), nothing)
     model = ribbon_model!(app, commands(app), ui.tab, s, fonts, chooser_note(app),
         (text, size) -> text_width(FONT_REGULAR, size, text))
-    frame = RibbonFrame(model, Dict{String,Int}())
+    frame = RibbonFrame(model, Dict{String,Int}(), ui.menu_request)
+    ui.menu_request = ""   # asked once: a menu button out of view does not open later
     view = Box(b.x0 + f(8), b.y0, b.x1 - f(8), b.y1 - hl)
     smax = ribbon_scroll_max(sum(model.group_widths; init = 0f0), width(view))
 
@@ -469,6 +489,50 @@ function split_menu_items(app, cmd::Command, byid::Dict{String,Command})::Vector
     return items
 end
 
+"""
+    draw_item(app, dl, item::MenuButton, x, top, iw, frame)
+
+A big button (70 high, the 32 px icon, the label under it) whose last label line ends with a
+caret, 4 px after the text. A click opens the command's menu (`items`), and the button
+shows checked while it is open. A row can keep the menu open (`stay`), as Show Tabs does.
+"""
+function draw_item(app, dl, item::MenuButton, x, top, iw, frame::RibbonFrame)
+    s = app.window.scale
+    t = app.tokens
+    f(v) = fpx(s, v)
+    cmd = frame.model.byid[item.cmd_id]
+    items = cmd.items::Function
+    reason = cmd.enabled(app)
+    enabled = reason === nothing
+    b = Box(Float32(x), Float32(top), Float32(x) + Float32(iw), Float32(top) + f(70))
+    sb = snap(b)
+    name = button_name(cmd)
+    id = unique_id!(frame, name)
+    owner = id == name ? cmd.id : cmd.id * "/" * id   # the menu's owner, unique on the tab
+    open = menu_open(app, owner)
+    clicked, hovered, held = hit(id, sb)
+    open && keep_menu!(app, owner, sb; items = items(app))
+    draw_rb_fill(app, dl, sb; enabled, hovered, held, on = open)
+    draw_icon(dl, cmd.icon, (rnd(b.x0 + (width(b) - px(s, 32)) / 2), rnd(b.y0 + f(5))), 32;
+        style = enabled ? :normal : :disabled)
+    col = u32(enabled ? t.text : t.text_disabled)
+    pitch = f(13.5)
+    lines = String.(split(cmd.label, '\n'))
+    for (k, line) in enumerate(lines)
+        last_line = k == length(lines)
+        lw = text_width(FONT_REGULAR, RIBBON_LABEL_SIZE, line)
+        full = last_line ? lw + f(4 + 8) : lw
+        lx = b.x0 + (width(b) - full) / 2
+        mid = b.y0 + f(42) + (k - 1) * pitch + pitch / 2
+        draw_text_mid(dl, FONT_REGULAR, RIBBON_LABEL_SIZE, lx, mid, col, line; line = 13.5 / 11.5)
+        last_line && draw_caret(dl, lx + lw + f(4), mid - f(5) / 2, s, col)
+    end
+    clicked && enabled && toggle_menu!(app, owner, sb, () -> items(app))
+    enabled && !open && frame.menu_request == cmd.id && open_menu!(app, owner, sb, items(app))
+    hovered && command_tip!(app, cmd)
+    return nothing
+end
+
 function draw_item(app, dl, item::SmallColumn, x, top, iw, frame::RibbonFrame)
     s = app.window.scale
     y = top + fpx(s, 1)
@@ -485,8 +549,6 @@ function draw_item(app, dl, item::Custom, x, top, iw, frame)
     check_custom(item)
     if item.kind === :defaults
         draw_defaults(app, dl, x, top, frame::RibbonFrame)
-    elseif item.kind === :tabs_menu
-        draw_tabs_menu(app, dl, x, top, iw, frame::RibbonFrame)
     else
         draw_db_chooser(app, dl, x, top, frame::RibbonFrame)
     end

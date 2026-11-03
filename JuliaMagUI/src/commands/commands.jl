@@ -124,6 +124,8 @@ read this list.
   such as `"Project"` or `"Quick Access"`, as the prototype's `where`.
 - `checked_name`: the name to show while `checked(app)` is true, such as "Expand Ribbon"
   for "Collapse Ribbon"; `""` keeps `name`.
+- `items`: for a command whose button opens a drop-down menu (`MenuButton`, such as Add
+  Item to Map), its rows as `items(app) -> Vector{MenuItem}`; else `nothing`.
 """
 struct Command
     id::String
@@ -142,6 +144,7 @@ struct Command
     changes_project::Bool
     where::String
     checked_name::String
+    items::Union{Nothing,Function}
 end
 
 function Command(id::AbstractString, name::AbstractString, run::Function;
@@ -150,10 +153,11 @@ function Command(id::AbstractString, name::AbstractString, run::Function;
         shortcut::AbstractString = "", enabled::Function = app -> nothing,
         checked::Function = app -> false, searchable::Bool = true,
         menu::AbstractVector{<:AbstractString} = String[], menu_label::AbstractString = name,
-        changes_project::Bool = false, where::AbstractString = "", checked_name::AbstractString = "")
+        changes_project::Bool = false, where::AbstractString = "", checked_name::AbstractString = "",
+        items::Union{Nothing,Function} = nothing)
     return Command(String(id), String(name), String(label), String(icon), String(help),
         Vector{Core.Place}(places), String(shortcut), enabled, run, checked, searchable,
-        Vector{String}(menu), String(menu_label), changes_project, String(where), String(checked_name))
+        Vector{String}(menu), String(menu_label), changes_project, String(where), String(checked_name), items)
 end
 
 const SMALL_WORDS = ("and", "of", "to", "the", "a", "in", "on", "or", "for")
@@ -488,7 +492,7 @@ end
     commands(app) -> Vector{Command}
 
 Every command: the core's tools, importers and exporters, the four split buttons, the
-shell's own and the Settings tab's (settings_tab.jl). The list is cached. It is built
+shell's own, the Map tab's (map_commands.jl) and the Settings tab's (settings_tab.jl). The list is cached. It is built
 again when a project opens (`set_session!` clears the cache) and when a tool, importer or
 exporter is registered, replaced or taken out (`Core.registry_generation`). A call with
 nothing changed is one atomic read, so the many calls in a frame cost next to nothing.
@@ -507,6 +511,7 @@ function commands(app)::Vector{Command}
         push!(list, import_split(kind, importers), export_split(kind, exporters))
     end
     append!(list, shell_commands())
+    append!(list, map_commands())
     append!(list, settings_commands())
     app.command_cache = CommandCache(generation, list, chord_table(list))
     return list

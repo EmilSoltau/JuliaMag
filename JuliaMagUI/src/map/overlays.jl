@@ -21,7 +21,8 @@ const EMPTY_MAP_LINES = ["This map has no layers.", "Show a database or grid on 
     draw_overlays(app, dl, b, mv, st)
 
 Draw the overlays of map view `mv` in box `b`: with a camera, the line labels, the box of a box
-zoom, the coordinate bands, the scale bar, the legends and the nav buttons; and always the hint.
+zoom, the coordinate bands, the scale bar, the legends (while Colour Bars is on) and the nav
+buttons; and always the hint.
 """
 function draw_overlays(app, dl, b::Box, mv, st::MapViewState)
     cam = st.camera
@@ -30,7 +31,7 @@ function draw_overlays(app, dl, b::Box, mv, st::MapViewState)
         draw_zoom_box(app, dl, b, st)
         draw_coordinate_bands(app, dl, b, cam)
         draw_scale_bar(app, dl, b, mv, cam)
-        draw_legends(app, dl, b, mv)
+        app.ui.colour_bars && draw_legends(app, dl, b, mv)
         draw_nav_buttons(app, b, mv, st)
     end
     draw_map_hint(app, dl, b, mv, st)

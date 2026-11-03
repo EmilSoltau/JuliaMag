@@ -125,10 +125,11 @@ struct ShortcutRow
     text::String
 end
 
-# What the shortcuts of the shell do, in the prototype's words and order (section 9).
+# What the shortcuts of the shell and the map do, in the prototype's words and order (section 9).
 const SHORTCUT_TEXTS = ["ui.command_search" => "Command search", "session.undo" => "Undo",
     "session.redo" => "Redo", "project.new" => "New project", "project.open" => "Open project",
-    "ui.ribbon" => "Collapse or expand the ribbon", "ui.theme.toggle" => "Switch light and dark"]
+    "ui.ribbon" => "Collapse or expand the ribbon", "ui.theme.toggle" => "Switch light and dark",
+    "map.full_extent" => "Map: full extent"]
 
 const ESC_ROW = ShortcutRow(["Esc"], "Close a dialog, menu or the command search")
 
