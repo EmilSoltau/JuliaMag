@@ -191,11 +191,7 @@ function tree_rows(snap::Snapshot, expanded::AbstractSet{String}, filter::Abstra
     if filtering || FOLDER_KEYS.grids in expanded
         for it in grids
             filtering && !hit(it.name) && continue
-            v = get(snap.grids, it.id, nothing)
-            broken = !it.missing && (v === nothing || !isempty(v.error))
-            right = it.missing ? MISSING_TEXT : broken ? BROKEN_TEXT : string(v.nx, " x ", v.ny)
-            push!(rows, TreeRow(it.id, 1, :grid, it.name; right, icon = it.missing ? "missing" : "grid",
-                dim = it.missing || broken, italic = it.missing || broken))
+            push!(rows, item_row(it, :grid, "grid", get(snap.grids, it.id, nothing), v -> string(v.nx, " x ", v.ny)))
         end
     end
     filtering && last(rows) === folder && pop!(rows)
@@ -206,15 +202,20 @@ function tree_rows(snap::Snapshot, expanded::AbstractSet{String}, filter::Abstra
     if filtering || FOLDER_KEYS.maps in expanded
         for it in maps
             filtering && !hit(it.name) && continue
-            v = get(snap.maps, it.id, nothing)
-            broken = !it.missing && (v === nothing || !isempty(v.error))
-            right = it.missing ? MISSING_TEXT : broken ? BROKEN_TEXT : plural(length(v.layers), "layer")
-            push!(rows, TreeRow(it.id, 1, :map, it.name; right, icon = it.missing ? "missing" : "map",
-                dim = it.missing || broken, italic = it.missing || broken))
+            push!(rows, item_row(it, :map, "map", get(snap.maps, it.id, nothing), v -> plural(length(v.layers), "layer")))
         end
     end
     filtering && last(rows) === folder && pop!(rows)
     return rows
+end
+
+# The row of a grid or a map item: its `icon` and `right(v)` of its view `v` at the right; a
+# missing item (or one that cannot be read) is dim and italic and says why at the right.
+function item_row(it::ItemRow, kind::Symbol, icon::String, v, right::Function)::TreeRow
+    broken = !it.missing && (v === nothing || !isempty(v.error))
+    text = it.missing ? MISSING_TEXT : broken ? BROKEN_TEXT : right(v)
+    return TreeRow(it.id, 1, kind, it.name; right = text, icon = it.missing ? "missing" : icon,
+        dim = it.missing || broken, italic = it.missing || broken)
 end
 
 function add_database_rows!(rows::Vector{TreeRow}, snap::Snapshot, it::ItemRow,

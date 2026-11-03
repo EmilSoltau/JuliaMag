@@ -259,6 +259,22 @@ UI.handle_request!(app, ::SwitchProjectRequest) = (UI.set_session!(app, nothing)
             @test UI.shortcut_command(mine, UI.parse_chord("Escape"), true, false) === esc
             @test UI.shortcut_command(mine, UI.parse_chord("Ctrl+N"), true, false) === nothing
             @test UI.shortcut_command(mine, UI.parse_chord("Ctrl+N"), false, false) === ctrl_n
+            # An open drop-down menu takes the plain keys: Home moves its highlight and never
+            # also runs Full Extent (T12 review). Chords with Ctrl or Alt still pass.
+            in_menu(text) = (c = UI.shortcut_command(cmds, UI.parse_chord(text), false, false; menu_open = true);
+                c === nothing ? nothing : c.id)
+            @test route("Home") == "map.full_extent" && in_menu("Home") === nothing
+            @test in_menu("Ctrl+Z") == "session.undo"
+            plain = [UI.Command("test.k$k", "Key $k", a -> nothing; shortcut = k)
+                     for k in ("End", "Up", "Down", "PageUp", "PageDown", "Enter", "Escape")]
+            alt = UI.Command("test.alt", "Alt Test", a -> nothing; shortcut = "Alt+Left")
+            for c in plain
+                @test UI.shortcut_command([plain; alt], UI.parse_chord(c.shortcut), false, false) === c
+                @test UI.shortcut_command([plain; alt], UI.parse_chord(c.shortcut), false, false; menu_open = true) === nothing
+            end
+            @test UI.shortcut_command([plain; alt], UI.parse_chord("Alt+Left"), false, false; menu_open = true) === alt
+            # Today Home is the only command key without Ctrl or Alt.
+            @test [c.shortcut for c in cmds if !isempty(c.shortcut) && !occursin(r"Ctrl|Alt", c.shortcut)] == ["Home"]
             # The chords are parsed once with the command list.
             @test UI.command_chords(app) === UI.command_chords(app)
             @test (UI.parse_chord("Ctrl+K") => "ui.command_search") in UI.command_chords(app)

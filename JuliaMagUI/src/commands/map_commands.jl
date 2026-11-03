@@ -12,6 +12,8 @@ const NEED_LINE_LAYER = "The map has no line layer."
 const NO_EARLIER_EXTENT = "There is no earlier extent."
 const NO_LATER_EXTENT = "There is no later extent."
 const NEED_MAP_ITEM = "Import line data or a grid first."
+const NEED_MAP_LAYERS = "The map has no layers."
+const MAP_LOADING = "The map is still loading."
 # "The current point is not on this map." is `NOT_ON_MAP_TEXT` (overlays.jl), as the nav button says.
 
 # --- What the commands act on ---
@@ -79,11 +81,22 @@ end
 
 map_reason(app) = last(map_target(app))
 
+# A view move needs a camera: the map has layers and its first data is in.
+function view_reason(app)
+    mv, why = map_target(app)
+    why === nothing || return why
+    isempty(mv.layers) && return NEED_MAP_LAYERS
+    return last(shown_view(app)) === nothing ? MAP_LOADING : nothing
+end
+
 function layer_reason(app)
     mv, why = map_target(app)
     why === nothing || return why
     return selected_layer(app, mv) === nothing ? NEED_LAYER : nothing
 end
+
+# Zoom to Layer: a selected layer, and a camera to move.
+zoom_layer_reason(app) = something(layer_reason(app), view_reason(app), Some(nothing))
 
 function kind_reason(app, kind::Symbol)
     mv, why = map_target(app)
@@ -105,10 +118,12 @@ function history_reason(app, back::Bool)
     return nothing
 end
 
+# Reads the plan the map view built in this frame or the last one, and never builds it: an
+# enabled check runs every frame. Before the view has planned this map, the point is not on it.
 function cursor_reason(app)
     mv, why = map_target(app)
     why === nothing || return why
-    refresh_plan!(app.map, app, mv)
+    app.map.plan_map == mv.id || return NOT_ON_MAP_TEXT
     return cursor_target(app, mv) === nothing ? NOT_ON_MAP_TEXT : nothing
 end
 
@@ -149,8 +164,23 @@ function add_to_map!(app, item::AbstractString)
     src = String(item)
     mv = shown_map(app)
     if mv === nothing
-        submit!(app, "Show on map", s -> (m = Core.new_map!(s); (m, Core.add_layer!(s, m, src)));
-            done = (a, r) -> (open_map!(a, r[1]); a.ui.layer_selected = r[2]; nothing))
+        # The new map shows even when the add fails (a database with no current X, Y pair):
+        # the error is a toast, and the map is one undo step, as New Map.
+        submit!(app, "Show on map", s -> begin
+                m = Core.new_map!(s)
+                try
+                    (m, Core.add_layer!(s, m, src), nothing)
+                catch e
+                    e isa InterruptException && rethrow()
+                    (m, "", (e, catch_backtrace()))
+                end
+            end;
+            done = (a, r) -> begin
+                open_map!(a, r[1])
+                a.ui.layer_selected = r[2]
+                r[3] === nothing || report_error!(a, r[3]...)
+                nothing
+            end)
         return nothing
     end
     m = mv.id
@@ -315,16 +345,16 @@ function map_commands()::Vector{Command}
             places = map_place("Map"), enabled = layer_reason),
         Command("map.full_extent", "Full Extent", full_extent_now!;
             label = "Full\nExtent", icon = "fullExtent", help = "Zoom to all layers of the map.", shortcut = "Home",
-            places = map_place("Navigate", :big), enabled = map_reason),
+            places = map_place("Navigate", :big), enabled = view_reason),
         Command("map.zoom_in", "Zoom In", app -> zoom_now!(app, ZOOM_STEP);
             icon = "zoomIn", help = "Zoom in about the centre of the map.",
-            places = map_place("Navigate"), enabled = map_reason),
+            places = map_place("Navigate"), enabled = view_reason),
         Command("map.zoom_out", "Zoom Out", app -> zoom_now!(app, 1 / ZOOM_STEP);
             icon = "zoomOut", help = "Zoom out about the centre of the map.",
-            places = map_place("Navigate"), enabled = map_reason),
+            places = map_place("Navigate"), enabled = view_reason),
         Command("map.zoom_layer", "Zoom to Layer", zoom_to_layer!;
             icon = "zoomLayer", help = "Zoom to the selected layer.",
-            places = map_place("Navigate"), enabled = layer_reason),
+            places = map_place("Navigate"), enabled = zoom_layer_reason),
         Command("map.prev_extent", "Previous Extent", app -> walk_extent!(app, true);
             icon = "prevExtent", help = "Go back to the extent before.",
             places = map_place("Navigate"), enabled = app -> history_reason(app, true)),

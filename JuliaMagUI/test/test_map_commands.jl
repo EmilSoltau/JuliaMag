@@ -104,10 +104,21 @@ end
             @test reason(app, "map.prev_extent") == "There is no earlier extent."
             @test reason(app, "map.next_extent") == "There is no later extent."
             @test reason(app, "map.go_cursor") == "The current point is not on this map."
+            # An empty map has nothing to move to (T12 review).
+            for id in ("map.full_extent", "map.zoom_in", "map.zoom_out")
+                @test reason(app, id) == "The map has no layers."
+            end
             app.ui.current_map = lines_map
+            # Layers, but no camera yet: the view has not drawn its first data.
+            for id in ("map.full_extent", "map.zoom_in", "map.zoom_out")
+                @test reason(app, id) == "The map is still loading."
+            end
             @test reason(app, "map.line_labels") === nothing && reason(app, "map.hillshade") == "The map has no grid layer."
             app.ui.layer_selected = only(app.snap.maps[lines_map].layers).id
-            @test reason(app, "map.remove_layer") === nothing && reason(app, "map.zoom_layer") === nothing
+            @test reason(app, "map.remove_layer") === nothing
+            @test reason(app, "map.zoom_layer") == "The map is still loading."
+            give_view!(app, lines_map, Camera(500_000.0, 7_000_000.0, 1.0))
+            @test reason(app, "map.zoom_layer") === nothing && reason(app, "map.full_extent") === nothing
             @test reason(app, "map.layer_style") === nothing
             # A layer of another map is not selected on this one.
             app.ui.current_map = m
@@ -165,6 +176,43 @@ end
             UI.add_item_menu(app)[2].action(app); settled!(app)
             m2 = app.ui.current_map
             @test m2 != m && [l.item for l in app.snap.maps[m2].layers] == [db]
+        end
+    end
+
+    @testset "a failed add on the no-map path still shows the new map (T12 review)" begin
+        s = session_with()   # its database has no current X, Y pair
+        db = only(it.id for it in s.project.items)
+        with_app(test_app_state(s)) do app
+            refresh_now!(app)
+            show_on_map!(app, db); settled!(app)
+            m = app.ui.current_map
+            @test haskey(app.snap.maps, m) && isempty(app.snap.maps[m].layers) && app.ui.layer_selected == ""
+            @test any(t -> occursin("no current X, Y pair", t.text * " " * t.sub), app.toasts)
+            @test app.snap.undo_label == "new map Map 1"   # one step: the map
+            UI.run_undo(app, false); settled!(app)
+            @test isempty(app.snap.maps) && app.snap.undo_label === nothing
+        end
+    end
+
+    @testset "Remove from Project of the shown map, then undo and redo (T12 review)" begin
+        s = fresh_session(); db = survey_database!(s)
+        with_app(test_app_state(s)) do app
+            refresh_now!(app)
+            show_on_map!(app, db); settled!(app)
+            m, l = app.ui.current_map, app.ui.layer_selected
+            rows = tree_rows(app.snap, Set(["maps"]), "")
+            remove = last(UI.tree_menu(app, only(r for r in rows if r.key == m)))
+            remove.action(app); settled!(app)
+            # The map is out: nothing is shown and the map commands say why.
+            @test !haskey(app.snap.maps, m) && UI.shown_map(app) === nothing
+            @test UI.central_state(app).lines[1] == "No view is open."
+            @test reason(app, "map.remove_layer") == "Open a map first."
+            # Undo brings it back as it was shown, with its layer selected.
+            UI.run_undo(app, false); settled!(app)
+            @test app.ui.current_map == m && UI.shown_map(app) === app.snap.maps[m] && app.ui.layer_selected == l
+            @test reason(app, "map.remove_layer") === nothing
+            UI.run_undo(app, true); settled!(app)
+            @test UI.shown_map(app) === nothing && !haskey(app.snap.maps, m)
         end
     end
 

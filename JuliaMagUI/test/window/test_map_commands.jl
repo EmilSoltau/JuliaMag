@@ -87,6 +87,13 @@ window_testset("map commands") do
             te.MouseMove("//###menu/" * ref_part(UI.item_name(app.snap, db)))
             ctx.frames(1)
             ctx.shot(joinpath(MAP_TAB_SHOTS, "ribbon-map-menu-light.png"))
+            # Home moves the menu's highlight only: no fit and no history entry (T12 review).
+            st = app.map.views[m]
+            st.camera = Camera(st.camera.cx, st.camera.cy, st.camera.res / 4)
+            cam, n = st.camera, length(st.history.past)
+            ctx.key("Home")
+            ctx.frames(1)
+            @test app.ui.menu isa UI.OpenMenu && st.camera == cam && length(st.history.past) == n
             ctx.key("Escape")
             ctx.frames(1)
             @test app.ui.menu === nothing
