@@ -165,7 +165,7 @@ entry_of(app, id) = only(e for e in values(app.map.entries) if e.key.item == id)
             wait_layers(app)
             @test only(values(app.map.entries)).key.item == db
             gl = GlMap()                       # no GL calls: nothing is uploaded here
-            app.map.gl = gl
+            app.map.renderer.gl = gl
             queue_all_uploads!(app.map)
             key = only(keys(app.map.entries))
             @test gl_layer(gl, key) !== nothing
@@ -179,7 +179,7 @@ entry_of(app, id) = only(e for e in values(app.map.entries) if e.key.item == id)
         s = fresh_session(); db = survey_database!(s); m = Core.new_map!(s); Core.add_layer!(s, m, db)
         with_app(test_app_state(s)) do app
             gl = GlMap()                       # no GL calls: uploads are only queued
-            app.map.gl = gl
+            app.map.renderer.gl = gl
             refresh_now!(app); app.ui.current_map = m
             wait_layers(app)
             e = only(values(app.map.entries))

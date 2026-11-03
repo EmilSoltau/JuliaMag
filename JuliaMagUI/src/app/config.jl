@@ -3,6 +3,7 @@
 const MAX_RECENT = 10
 const DISTANCE_UNITS = ("m", "km", "ft")
 const THEME_NAMES = ("light" => THEME_LIGHT, "dark" => THEME_DARK, "system" => THEME_SYSTEM)
+const MAP_DRAWINGS = ("auto", "gpu", "cpu")
 
 """
     AppConfig
@@ -12,6 +13,7 @@ The settings the app remembers between runs.
 A `window` of `(0, 0, w, h)` means centred.
 `advanced_open` lists the tools whose dialog shows its Advanced settings.
 `last_folder` is the folder of the last file picked for an import or an export.
+`map_drawing` says what draws the maps: `"auto"` (the graphics card when it can), `"gpu"` or `"cpu"`.
 """
 Base.@kwdef mutable struct AppConfig
     theme::ThemeMode = THEME_SYSTEM
@@ -28,6 +30,7 @@ Base.@kwdef mutable struct AppConfig
     ribbon_collapsed::Bool = false
     advanced_open::Vector{String} = String[]
     last_folder::String = ""
+    map_drawing::String = "auto"
 end
 
 """
@@ -112,6 +115,9 @@ function config_from_json(obj)::AppConfig
     c.ribbon_collapsed = field_or(obj, :ribbon_collapsed, Bool, c.ribbon_collapsed)
     c.advanced_open = string_list(obj, :advanced_open)
     c.last_folder = field_or(obj, :last_folder, String, c.last_folder)
+    # Another value, such as one a later version wrote, loads as the default.
+    md = get(obj, :map_drawing, c.map_drawing)
+    c.map_drawing = md isa AbstractString && md in MAP_DRAWINGS ? String(md) : "auto"
     return c
 end
 
@@ -140,7 +146,7 @@ function config_to_dict(c::AppConfig)
         software_rendering = c.software_rendering, window = collect(c.window),
         left_width = c.left_width, right_width = c.right_width,
         ribbon_collapsed = c.ribbon_collapsed, advanced_open = c.advanced_open,
-        last_folder = c.last_folder)
+        last_folder = c.last_folder, map_drawing = c.map_drawing)
 end
 
 """

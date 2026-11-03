@@ -140,7 +140,7 @@ end
         with_app(test_app_state(nothing)) do app
             st = status_texts(app)
             @test st.database == "No database" && st.selected == "" && st.running == 0
-            @test st.busy === nothing && !st.software
+            @test st.busy === nothing && st.render == "GPU"
         end
         with_app(app_with_database()) do app
             st = status_texts(app)
@@ -162,11 +162,11 @@ end
         @test UI.elide(fake_measure, "abcdefghij", 69) == "abcdef..."
         @test UI.elide(fake_measure, "abcdefghij", 10) == ""
         long = UI.StatusTexts("A very long database name from a contractor survey 2024 final: 60 lines, 24 channels",
-            "Selected lines: 60 of 60", 2, "Import Geosoft XYZ", true)
+            "Selected lines: 60 of 60", 2, "Import Geosoft XYZ", "CPU map", "")
         b = Box(0, 534, 900, 560)
         l = UI.status_layout(b, 1, fake_measure, long)
         @test endswith(l.left, "...") && 10 + fake_measure(FONT_REGULAR, 11.5, l.left) <= l.right_x - 10
-        short = UI.StatusTexts("Survey: 2 lines, 2 channels", "Selected lines: 2 of 2", 0, nothing, false)
+        short = UI.StatusTexts("Survey: 2 lines, 2 channels", "Selected lines: 2 of 2", 0, nothing, "GPU", "")
         @test UI.status_layout(Box(0, 894, 1480, 920), 1, fake_measure, short).left ==
               "Survey: 2 lines, 2 channels"
     end

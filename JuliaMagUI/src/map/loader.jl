@@ -59,8 +59,8 @@ end
 The map's layer data. Changed on the render thread only.
 
 - `entries`: the data of each layer key that a map of the snapshot uses.
-- `gl`: the GL objects of the map pass, or `nothing` before the first map pass (made on the
-  render thread). Uploads are queued only when it exists (see `queue_all_uploads!`).
+- `renderer`: what draws the map (a `MapRenderer`, frame.jl). Uploads are queued only while
+  its GL objects exist (see `queue_all_uploads!`).
 - `session`: the session the entries belong to; a load of another session is dropped.
 - `freed`: keys whose GL objects the next `update_layers!` frees (set by `set_session!`).
 - `seen`: the snapshot whose maps `update_layers!` last checked for unused entries.
@@ -71,13 +71,10 @@ The map's layer data. Changed on the render thread only.
 - `scene`: the scene of the shown map, filled again each frame (`build_scene!`); `plan`,
   `plan_snap`, `plan_map`, `plan_colours`, `plan_complete`, `looks`: what it is built from (see
   `refresh_plan!`).
-- `gl_problem`: why the GL map pass cannot run here (`probe_gl!`), or `""`.
-- `drawn`: the key of the scene in the map texture (0 for none); `drawn_pending`: the uploads
-  that were waiting when it was drawn.
 """
 mutable struct MapState
     entries::Dict{LayerKey,LayerEntry}
-    gl::Union{Nothing,GlMap}
+    renderer::MapRenderer
     session::Union{Nothing,Core.Session}
     freed::Vector{LayerKey}
     seen::Any
@@ -92,15 +89,12 @@ mutable struct MapState
     plan_colours::String
     plan_complete::Bool
     looks::Dict{String,LayerLook}
-    gl_problem::String
-    drawn::UInt64
-    drawn_pending::Int
 end
 
 MapState(session::Union{Nothing,Core.Session}) =
-    MapState(Dict{LayerKey,LayerEntry}(), nothing, session, LayerKey[], nothing, 0, nothing,
+    MapState(Dict{LayerKey,LayerEntry}(), MapRenderer(), session, LayerKey[], nothing, 0, nothing,
              Dict{String,MapViewState}(), Box(0, 0, 0, 0), Scene(Camera(0, 0, 1), 1, 1, (0x00, 0x00, 0x00, 0xff), LineDraw[], 0),
-             LayerPlan[], nothing, "", "", false, Dict{String,LayerLook}(), "", 0, 0)
+             LayerPlan[], nothing, "", "", false, Dict{String,LayerLook}())
 
 # A load for the loader task. `folder` is the item's absolute folder; `name` its name.
 struct LayerLoad
@@ -254,14 +248,17 @@ end
 """
     spare_free(ms, e) -> Bool
 
-May entry `e`'s spare be built into? Only when nothing draws from it: today the GPU
-(`gpu_uses`). An entry with no spare is free: the load makes a new one.
+May entry `e`'s spare be built into? Only when nothing draws from it: neither the GPU
+(`gpu_uses`) nor a CPU frame in flight (`cpu_uses`). An entry with no spare is free: the
+load makes a new one.
 """
 function spare_free(ms::MapState, e::LayerEntry)::Bool
     sp = e.spare
-    gl = ms.gl
-    (sp === nothing || gl === nothing) && return true
-    return !gpu_uses(gl, sp)
+    sp === nothing && return true
+    r = ms.renderer
+    gl = r.gl
+    (gl !== nothing && gpu_uses(gl, sp)) && return false
+    return !cpu_uses(r, sp)
 end
 
 """
@@ -279,7 +276,7 @@ GL objects freed.
 function update_layers!(app)
     ms = app.map
     if !isempty(ms.freed)
-        gl = ms.gl
+        gl = ms.renderer.gl
         gl === nothing || foreach(k -> free_layer!(gl, k), ms.freed)
         empty!(ms.freed)
     end
@@ -312,7 +309,7 @@ function drop_unused!(ms::MapState, snap)
         push!(used, layer_key(snap, mv, l))
     end
     filter!(kv -> haskey(snap.maps, first(kv)), ms.views)   # the views of maps that went
-    gl = ms.gl
+    gl = ms.renderer.gl
     for k in collect(keys(ms.entries))
         k in used && continue
         delete!(ms.entries, k)
@@ -347,7 +344,7 @@ function set_data!(ms::MapState, e::LayerEntry, d::Union{Nothing,LineLayerData,G
     old = e.data
     e.data = d
     old === nothing || (e.spare = old)
-    gl = ms.gl
+    gl = ms.renderer.gl
     if d === nothing
         gl === nothing || free_layer!(gl, e.key)
     else
@@ -360,10 +357,10 @@ end
 """
     queue_all_uploads!(ms)
 
-Queue the uploads of every entry that has data. Call it when `ms.gl` is made, or made again.
+Queue the uploads of every entry that has data. Call it when the GL objects are made, or made again.
 """
 function queue_all_uploads!(ms::MapState)
-    gl = ms.gl::GlMap
+    gl = ms.renderer.gl::GlMap
     for e in values(ms.entries)
         d = e.data
         d === nothing || queue_uploads!(gl, e.key, d)

@@ -8,39 +8,43 @@ plural(n::Integer, word::AbstractString) = string(n, " ", word, n == 1 ? "" : "s
 
 What the status bar shows: `database` ("Survey: 60 lines, 24 channels" or "No database"),
 `selected` ("Selected lines: 12 of 60", or `""` without a database), the number of
-`running` jobs, the worker's `busy` text (or `nothing`) and whether the renderer is
-`software`.
+`running` jobs, the worker's `busy` text (or `nothing`), and the `render` item ("GPU",
+"Software" or "CPU map", see `render_item`) with its tooltip `render_help`.
 """
 struct StatusTexts
     database::String
     selected::String
     running::Int
     busy::Union{Nothing,String}
-    software::Bool
+    render::String
+    render_help::String
 end
 
 """
     status_texts(app) -> StatusTexts
 
-The status bar texts, from the snapshot, the live job status and the window.
+The status bar texts, from the snapshot, the live job status, the window and the map
+renderer: the mode the next map frame draws in (`choose_mode`).
 """
 function status_texts(app)::StatusTexts
     snap = app.snap
     w = app.window
     software = w !== nothing && software_renderer(w.renderer)
+    r = app.map.renderer
+    render, help = render_item(software, choose_mode(app.config.map_drawing, r.gl_problem), r.gl_problem)
     v = snap === nothing ? nothing : get(snap.databases, app.ui.current_db, nothing)
     running = running_jobs(snap)
     if v === nothing
-        return StatusTexts("No database", "", running, app.busy, software)
+        return StatusTexts("No database", "", running, app.busy, render, help)
     end
     i = findfirst(it -> it.id == v.id, snap.items)
     name = i === nothing ? v.id : snap.items[i].name
     isempty(v.error) ||
-        return StatusTexts(name * ": it cannot be read", "", running, app.busy, software)
+        return StatusTexts(name * ": it cannot be read", "", running, app.busy, render, help)
     n = length(v.lines)
     database = string(name, ": ", plural(n, "line"), ", ", plural(length(v.channels), "channel"))
     selected = string("Selected lines: ", count(l -> l.selected, v.lines), " of ", n)
-    return StatusTexts(database, selected, running, app.busy, software)
+    return StatusTexts(database, selected, running, app.busy, render, help)
 end
 
 jobs_text(running::Integer) = running == 0 ? "No jobs running" :
@@ -79,8 +83,7 @@ function status_layout(b::Box, scale::Real, measure, texts::StatusTexts)::Status
     hl = hairline(scale)
     seps = Float32[]
     x = b.x1 - p(10)
-    mode = texts.software ? "Software" : "GPU"
-    x -= measure(FONT_MONO, 11, mode)
+    x -= measure(FONT_MONO, 11, texts.render)
     mode_x = x
     busy_x = nothing
     if texts.busy !== nothing
@@ -133,13 +136,11 @@ function draw_status_bar(app, dl, b::Box)
     ig.PushID("status")
     draw_text_mid(dl, FONT_REGULAR, 11.5, b.x0 + p(10), mid, dim, l.left)
 
-    mode = texts.software ? "Software" : "GPU"
+    # "GPU" in `accent_text`; "Software" and "CPU map" in `amber`.
     mw = draw_text_mid(dl, FONT_MONO, 11, l.mode_x, mid,
-        u32(texts.software ? t.amber : t.accent_text), mode)
+        u32(texts.render == "GPU" ? t.accent_text : t.amber), texts.render)
     hit("Render Mode", Box(l.mode_x, b.y0, l.mode_x + mw, b.y1))
-    ig.IsItemHovered() && item_tip!(app, "Map rendering";
-        help = texts.software ? "Software rendering: the graphics card is not used." :
-               "The graphics card draws the maps.")
+    ig.IsItemHovered() && item_tip!(app, "Map rendering"; help = texts.render_help)
     busy = texts.busy
     (l.busy_x === nothing || busy === nothing) ||
         draw_text_mid(dl, FONT_REGULAR, 11.5, l.busy_x, mid, dim, busy)

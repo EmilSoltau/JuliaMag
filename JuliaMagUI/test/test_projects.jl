@@ -541,7 +541,10 @@ toast_texts(app) = [t.text for t in app.toasts]
             @test groups[2].items == [Custom(:defaults), SmallColumn(["settings.temp_folder"])]
             @test groups[3].items == [SmallColumn(["settings.open_last"])]
             @test byid["settings.open_last"].label == "Open Last Project"
-            @test groups[4].items == [BigButton("settings.software")]
+            @test groups[4].items == [BigButton("settings.software"),
+                SmallColumn(["settings.map_auto", "settings.map_gpu", "settings.map_cpu"])]
+            @test [byid[id].label for id in groups[4].items[2].cmd_ids] ==
+                  ["Map: Auto", "Map: Graphics Card", "Map: CPU"]
             @test byid["settings.software"].label == "Software\nRendering"
             @test groups[5].items == [Custom(:tabs_menu)]
             help = ribbon_layout(cmds, "Help")

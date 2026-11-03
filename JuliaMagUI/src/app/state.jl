@@ -684,7 +684,7 @@ build of the old session that comes back later is dropped too), the count of sho
 warnings, a failed build, the Data tree's current database, selection, expanded
 nodes, filter, scroll and cached rows, the open dialogs and menu, the requests not
 handled yet (they were made for the old project), the shown map, its layer data (their
-GL objects are freed on the next frame), the map views and a live opacity, whether a job has shown the Jobs pane,
+GL objects are freed on the next frame), the map picture, the map views and a live opacity, whether a job has shown the Jobs pane,
 what the Jobs tab knew of the old jobs (so the new project's finished jobs make no
 toasts), and the old project's script on the Run Script page. Call it on the render
 thread. It does not close the old session.
@@ -700,7 +700,7 @@ function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     ui.current_db = ""
     ui.current_map = ""
     ms = app.map
-    ms.gl === nothing || append!(ms.freed, keys(ms.entries))
+    ms.renderer.gl === nothing || append!(ms.freed, keys(ms.entries))
     empty!(ms.entries)
     ms.session = s
     ms.seen = nothing
@@ -709,7 +709,7 @@ function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     empty!(ms.looks)
     ms.plan_snap = nothing
     ms.plan_complete = false
-    ms.drawn = 0
+    clear_image!(ms.renderer)
     ui.opacity_preview = nothing
     ui.selected = nothing
     empty!(ui.expanded)

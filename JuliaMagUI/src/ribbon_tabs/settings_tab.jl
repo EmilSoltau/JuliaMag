@@ -26,11 +26,22 @@ function settings_commands()::Vector{Command}
             label = "Software\nRendering", icon = "chip",
             help = "Draw without the graphics card, for laptops with weak graphics drivers. Takes effect at the next start.",
             places = [Core.Place("Settings", "Rendering")], checked = app -> app.config.software_rendering),
+        map_drawing_command("auto", "Auto", "Draw maps with the graphics card when it can, else on the CPU."),
+        map_drawing_command("gpu", "Graphics Card",
+            "Draw maps with the graphics card. If it cannot draw them here, the CPU does."),
+        map_drawing_command("cpu", "CPU", "Draw maps on the CPU, without the graphics card."),
         Command("settings.tabs", "Show Tabs", app -> nothing;
             label = "Show\nTabs", icon = "eye", help = "Hide tabs you do not use. Settings and Help always show.",
             places = [Core.Place("Settings", "Ribbon")], searchable = false),
     ]
 end
+
+# A small toggle of the Rendering group for the Map Drawing setting `value`.
+map_drawing_command(value::String, label::String, help::String)::Command =
+    Command("settings.map_" * value, "Map Drawing: " * label, app -> set_map_drawing!(app, value);
+        label = "Map: " * label, icon = "map", help,
+        places = [Core.Place("Settings", "Rendering"; size = :small)],
+        checked = app -> app.config.map_drawing == value)
 
 # --- The settings ---
 
@@ -58,6 +69,20 @@ OpenGL driver, so it is empty there.
 function rendering_env(c::AppConfig)::Vector{Pair{String,String}}
     (c.software_rendering && !Sys.iswindows()) || return Pair{String,String}[]
     return ["LIBGL_ALWAYS_SOFTWARE" => "1"]
+end
+
+"""
+    set_map_drawing!(app, value)
+
+Draw the maps as `value` says (`"auto"`, `"gpu"` or `"cpu"`, see `choose_mode`) and save the
+settings. It takes effect on the next frame (`sync_mode!`).
+"""
+function set_map_drawing!(app, value::AbstractString)
+    value in MAP_DRAWINGS ||
+        throw(ArgumentError("map drawing must be \"auto\", \"gpu\" or \"cpu\", not $(repr(value))"))
+    app.config.map_drawing = String(value)
+    save_settings!(app)
+    return nothing
 end
 
 "Use distance units `u` (`\"m\"`, `\"km\"` or `\"ft\"`) and save the settings."

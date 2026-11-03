@@ -30,9 +30,11 @@ function show_map!(ctx, app, m; timeout = 5)
     ctx.on_render(w -> (app.ui.current_map = m))
     ms = app.map
     ctx.wait_until(; timeout) do
-        gl = ms.gl
+        r = ms.renderer
+        gl = r.gl
         # The plan and the drawn picture of this map, not of the map shown before.
-        gl !== nothing && isempty(gl.pending) && ms.plan_map == m && ms.drawn == ms.scene.key && !isempty(ms.plan) &&
+        gl !== nothing && isempty(gl.pending) && ms.plan_map == m && r.image.map == m && r.image.key == ms.scene.key &&
+            !isempty(ms.plan) &&
             all(p -> p.entry !== nothing && p.entry.data !== nothing && !p.entry.loading, ms.plan)
     end
     ctx.frames(2)

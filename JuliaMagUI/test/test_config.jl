@@ -2,6 +2,9 @@ using Test
 using JuliaMagUI: AppConfig, load_config, save_config, add_recent!, config_dir,
     system_dark, THEME_LIGHT, THEME_DARK, THEME_SYSTEM, command_says_dark
 
+# A new folder with a `settings.json` that holds `json`.
+dir_with(json::AbstractString) = (d = mktempdir(); write(joinpath(d, "settings.json"), json); d)
+
 @testset "config" begin
     @testset "save and load" begin
         withenv("JULIAMAG_CONFIG_DIR" => mktempdir()) do
@@ -9,7 +12,7 @@ using JuliaMagUI: AppConfig, load_config, save_config, add_recent!, config_dir,
             @test err === nothing && c.theme == THEME_SYSTEM
             @test c.window == (0, 0, 1480, 920) && c.left_width == 272f0 && c.right_width == 300f0
             @test c.distance_units == "m" && c.grid_colours == "geosoft" && c.temp_folder == ""
-            @test !c.open_last && !c.software_rendering && !c.ribbon_collapsed
+            @test !c.open_last && !c.software_rendering && !c.ribbon_collapsed && c.map_drawing == "auto"
             c.theme = THEME_DARK
             add_recent!(c, pwd())
             c.hidden_tabs = ["Jobs"]
@@ -17,6 +20,7 @@ using JuliaMagUI: AppConfig, load_config, save_config, add_recent!, config_dir,
             c.window = (10, 20, 1200, 700)
             c.left_width = 300f0
             c.distance_units = "ft"
+            c.map_drawing = "cpu"
             @test c.last_folder == ""
             c.last_folder = "/data/surveys"
             save_config(c)
@@ -25,7 +29,7 @@ using JuliaMagUI: AppConfig, load_config, save_config, add_recent!, config_dir,
             @test c2.theme == THEME_DARK && c2.recent == [realpath(pwd())]
             @test c2.hidden_tabs == ["Jobs"] && c2.advanced_open == ["coordinates.reproject"]
             @test c2.window == (10, 20, 1200, 700) && c2.left_width == 300f0
-            @test c2.distance_units == "ft" && c2.last_folder == "/data/surveys"
+            @test c2.distance_units == "ft" && c2.last_folder == "/data/surveys" && c2.map_drawing == "cpu"
             # No temp file is left behind.
             @test readdir(config_dir()) == ["settings.json"]
         end
@@ -53,6 +57,15 @@ using JuliaMagUI: AppConfig, load_config, save_config, add_recent!, config_dir,
             write(joinpath(config_dir(), "settings.json"), """{"theme": "light"}""")
             c, err = load_config()
             @test err === nothing && c.theme == THEME_LIGHT && c.window == (0, 0, 1480, 920)
+        end
+    end
+
+    @testset "map drawing: another value loads as auto" begin
+        c, _ = load_config(dir_with("""{"map_drawing": "bogus"}""")); @test c.map_drawing == "auto"
+        for (json, want) in ("""{"map_drawing": "gpu"}""" => "gpu", """{"map_drawing": "cpu"}""" => "cpu",
+                             """{"map_drawing": 3}""" => "auto", """{"map_drawing": null}""" => "auto")
+            c, err = load_config(dir_with(json))
+            @test err === nothing && c.map_drawing == want
         end
     end
 

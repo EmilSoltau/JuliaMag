@@ -458,7 +458,8 @@ end
     map_hint(app, mv) -> String
 
 What the hint at the top left says: the map's own error, "Loading <name>..." while a visible
-layer loads, the first layer error (or note), why the map cannot draw here; else `""`.
+layer loads, the first layer error (or note); else `""`. Why the map draws on the CPU is in
+the status bar.
 """
 function map_hint(app, mv)::String
     isempty(mv.error) || return mv.error
@@ -472,7 +473,7 @@ function map_hint(app, mv)::String
             return string("Loading ", k === nothing ? p.layer.item : snap.items[k].name, "...")
         end
     end
-    gl = ms.gl
+    gl = ms.renderer.gl
     for p in ms.plan
         e = p.entry::LayerEntry
         isempty(e.error) || return e.error
@@ -481,7 +482,6 @@ function map_hint(app, mv)::String
             isempty(err) || return err
         end
     end
-    isempty(ms.gl_problem) || return "The map cannot draw here: " * ms.gl_problem
     return ""
 end
 
