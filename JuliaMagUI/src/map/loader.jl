@@ -100,19 +100,18 @@ end
 # --- The loader task ---
 
 # Run the loads one at a time until the inbox closes. Never throws.
-function run_loader(inbox::Channel{Any}, results::Channel{Any})
-    bands = Matrix{Float64}[]   # read buffers of Float64 grids, kept between loads
+function run_loader(inbox::Channel{Any}, results::Channel{Any}, cb::ConvertBuffer)
     for req in inbox
-        req isa LayerLoad && run_load(req, results, bands)
+        req isa LayerLoad && run_load(req, results, cb)
     end
     return nothing
 end
 
-function run_load(req::LayerLoad, results::Channel{Any}, bands::Vector{Matrix{Float64}})
+function run_load(req::LayerLoad, results::Channel{Any}, cb::ConvertBuffer)
     try
         req.hold === nothing || take!(req.hold)
         msg = with_bug_reports(results) do
-            load_layer(req, bands)
+            load_layer(req, cb)
         end
         put!(results, msg)
     catch e
@@ -123,10 +122,10 @@ function run_load(req::LayerLoad, results::Channel{Any}, bands::Vector{Matrix{Fl
 end
 
 # Build the layer. An error becomes the message's text, as `user_message` gives it.
-function load_layer(req::LayerLoad, bands::Vector{Matrix{Float64}})::LayerLoaded
+function load_layer(req::LayerLoad, cb::ConvertBuffer)::LayerLoaded
     t = time()
     data, note = try
-        build_layer(req, bands)
+        build_layer(req, cb)
     catch e
         e isa InterruptException && rethrow()
         nothing, safe_user_message(e, catch_backtrace())
@@ -134,7 +133,7 @@ function load_layer(req::LayerLoad, bands::Vector{Matrix{Float64}})::LayerLoaded
     return LayerLoaded(req.session, req.key, req.revision, data, note, time() - t)
 end
 
-function build_layer(req::LayerLoad, bands::Vector{Matrix{Float64}})
+function build_layer(req::LayerLoad, cb::ConvertBuffer)
     isdir(req.folder) || throw(ArgumentError("The folder of $(req.name) is missing."))
     k = req.key
     if k.kind == :lines
@@ -143,7 +142,7 @@ function build_layer(req::LayerLoad, bands::Vector{Matrix{Float64}})
     end
     d = req.spare isa GridLayerData ? req.spare : GridLayerData()
     g = Core.open_grid(req.folder)
-    build_grid!(d, g, bands)
+    build_grid!(d, g, cb)
     note = (isempty(g.crs) || isempty(k.crs) || g.crs == k.crs) ? "" :
         "This grid is in $(g.crs), not in the map's $(k.crs). It is drawn without reprojection."
     return d, note
@@ -166,28 +165,40 @@ function build_lines!(d::LineLayerData, db::Core.LineDatabase, k::LayerKey, name
     end
 end
 
-function build_grid!(d::GridLayerData, g::Core.Grid, bands::Vector{Matrix{Float64}})
+function build_grid!(d::GridLayerData, g::Core.Grid, cb::ConvertBuffer)
     geo = GridGeo(g)
     if g.eltype === Float32
         build_grid_layer!(d, (buf, j1) -> Core.read_rows!(buf, g, j1), geo)
     else
-        build_grid_layer!(d, (buf, j1) -> read_converted!(buf, g, j1, bands), geo)
+        build_grid_layer!(d, (buf, j1) -> read_converted!(buf, g, j1, cb), geo)
     end
     return d
 end
 
-# Read rows `j1` on of a Float64 grid into the Float32 band `buf`, through a kept buffer.
-function read_converted!(buf::Matrix{Float32}, g::Core.Grid, j1::Int, bands::Vector{Matrix{Float64}})
-    k = findfirst(b -> size(b) == size(buf), bands)
-    k === nothing && (push!(bands, Matrix{Float64}(undef, size(buf))); k = length(bands))
-    src = Core.read_rows!(bands[k], g, j1)
-    copy_values!(buf, src)
+# Read rows `j1` on of a Float64 grid into the Float32 band `buf`, a chunk of rows at a
+# time through the loader's one buffer. A short chunk reads into the front of that buffer.
+function read_converted!(buf::Matrix{Float32}, g::Core.Grid, j1::Int, cb::ConvertBuffer)
+    nx, n = size(buf)
+    rows = clamp(cb.limit ÷ nx, 1, TILE + 2)
+    size(cb.block) == (nx, rows) || (cb.block = Matrix{Float64}(undef, nx, rows))
+    block = cb.block
+    r = 0
+    while r < n
+        m = min(rows, n - r)
+        GC.@preserve block begin
+            src = m == rows ? block : unsafe_wrap(Matrix{Float64}, pointer(block), (nx, m))
+            Core.read_rows!(src, g, j1 + r)
+            copy_rows!(buf, r, src)
+        end
+        r += m
+    end
     return buf
 end
 
-function copy_values!(dst::Matrix{Float32}, src::Matrix{Float64})
-    @inbounds for i in eachindex(dst, src)
-        dst[i] = Float32(src[i])
+# Put the rows of `src` into `dst` from row `r + 1` on, as Float32.
+function copy_rows!(dst::Matrix{Float32}, r::Int, src::Matrix{Float64})
+    @inbounds for j in axes(src, 2), i in axes(src, 1)
+        dst[i, r+j] = Float32(src[i, j])
     end
     return dst
 end
@@ -335,7 +346,8 @@ function handle_result!(app, m::LayerLoaded)
         return nothing
     end
     e = get(ms.entries, m.key, nothing)
-    e === nothing && return nothing   # no map uses it any more
+    # No map uses it any more, or it is a load of an entry that was dropped and made again.
+    (e === nothing || !e.loading || m.revision != e.wanted) && return nothing
     e.loading = false
     e.revision = m.revision
     e.error = m.error

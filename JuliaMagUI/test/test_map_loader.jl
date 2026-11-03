@@ -11,6 +11,20 @@ function edit_now!(app, f)
     return nothing
 end
 
+# Add a Float64 grid item that holds `A` (`A[i, j]` is column `i`, row `j`).
+function add_f64_grid!(s, A::Matrix{Float64}; name = "F64")
+    p = s.project
+    id = Core.new_item_id(p, Core.ITEM_GRID)
+    g = Core.create_grid(joinpath(p.folder, "grids", id), name, Float64, size(A)...; dx = 10.0, dy = 10.0,
+        x0 = 500_000.0, y0 = 7_000_000.0, crs = "EPSG:32755")
+    Core.write_rows!(g, 1, A)
+    g.count, g.vmin, g.vmax = length(A), minimum(A), maximum(A)
+    Core.save_grid_meta(g)
+    Core.add_item!(p, Core.ProjectItem(id, Core.ITEM_GRID, name, "grids/$id", "", ""))
+    Core.save_project(p)
+    return id
+end
+
 # The entry of the layer of item `id`.
 entry_of(app, id) = only(e for e in values(app.map.entries) if e.key.item == id)
 
@@ -60,6 +74,7 @@ entry_of(app, id) = only(e for e in values(app.map.entries) if e.key.item == id)
     @testset "a missing folder and a deleted channel give errors; other layers load" begin
         s = fresh_session()
         db1 = survey_database!(s); db2 = survey_database!(s); db3 = survey_database!(s)
+        Core.rename_item!(s, db3, "North block")
         m = Core.new_map!(s)
         foreach(d -> Core.add_layer!(s, m, d), (db1, db2, db3))
         rm(joinpath(s.project.folder, "databases", db2); recursive = true)
@@ -74,7 +89,7 @@ entry_of(app, id) = only(e for e in values(app.map.entries) if e.key.item == id)
             edit_now!(app, s -> Core.delete_channel!(s, db3, "MAG"))
             wait_layers(app)
             e3 = entry_of(app, db3)
-            @test e3.error == "Channel MAG is not in $db3." && e3.data === nothing
+            @test e3.error == "Channel MAG is not in North block." && e3.data === nothing
             @test e3.revision == app.snap.item_revisions[db3]
             @test entry_of(app, db1).data isa LineLayerData
             @test isempty(app.draw_errors)
@@ -98,6 +113,27 @@ entry_of(app, id) = only(e for e in values(app.map.entries) if e.key.item == id)
             @test e2.data isa GridLayerData && e2.data.count == 6
             @test e2.error == "This grid is in EPSG:28355, not in the map's EPSG:32755. " *
                               "It is drawn without reprojection."
+            @test isempty(app.draw_errors)
+        end
+    end
+
+    @testset "Float64 grids load through one bounded buffer" begin
+        s = fresh_session()
+        A = [Float64(i + 10j) for i in 1:3, j in 1:5]
+        B = [Float64(-i - 10j) for i in 1:5, j in 1:7]
+        g1 = add_f64_grid!(s, A; name = "Narrow"); g2 = add_f64_grid!(s, B; name = "Wide")
+        m = Core.new_map!(s)
+        foreach(d -> Core.add_layer!(s, m, d), (g1, g2))
+        with_app(test_app_state(s)) do app
+            cb = app.queue.map_scratch
+            cb.limit = 7                       # 2 rows of the narrow grid, 1 of the wide one, per read
+            refresh_now!(app); app.ui.current_map = m
+            wait_layers(app)
+            e1, e2 = entry_of(app, g1), entry_of(app, g2)
+            @test e1.error == "" && e1.data.count == 15 && UI.level_matrix(e1.data, 0) == Float32.(A)
+            @test e2.error == "" && e2.data.count == 35 && UI.level_matrix(e2.data, 0) == Float32.(B)
+            @test e1.data.hist.lo == 11 && e2.data.hist.hi == -11
+            @test app.queue.map_scratch === cb && size(cb.block) in ((3, 2), (5, 1))   # one buffer, of the last width
             @test isempty(app.draw_errors)
         end
     end
@@ -171,12 +207,12 @@ entry_of(app, id) = only(e for e in values(app.map.entries) if e.key.item == id)
         s2 = fresh_session(); db2 = survey_database!(s2; lines = 2000, rows = 50)
         m2 = Core.new_map!(s2); Core.add_layer!(s2, m2, db2)
         app = test_app_state(s1)
+        hold = nothing
         try
             refresh_now!(app); app.ui.current_map = m1
             wait_layers(app)
             old_key = only(keys(app.map.entries))
-            hold = Channel{Nothing}(Inf)
-            app.map.hold = hold
+            hold = app.map.hold = Channel{Nothing}(Inf)
             edit_now!(app, s -> Core.set_cell!(s, db1, Core.LineId(Core.LINE, 1001, 0), "MAG", 1, 9.0))
             update_layers!(app)                # the old session's load waits for the hold
             @test only(values(app.map.entries)).loading
@@ -201,7 +237,7 @@ entry_of(app, id) = only(e for e in values(app.map.entries) if e.key.item == id)
             @test isempty(app.draw_errors)
             @test old_key == new_key           # both databases are db-1 with X, Y: only the session tells them apart
         finally
-            app.map.hold === nothing || put!(app.map.hold, nothing)
+            hold === nothing || close(hold)   # a held load ends, so the stop cannot hang
             stop_app!(app)
             isopen(s1) && Core.close_session!(s1)
         end

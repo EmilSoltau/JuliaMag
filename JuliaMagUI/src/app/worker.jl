@@ -47,6 +47,23 @@ struct BugReport
 end
 
 """
+    ConvertBuffer()
+
+The map loader's one buffer for reading a Float64 grid before it becomes Float32: `nx` by
+at most `limit ÷ nx` rows (at least 1), and at most a band's rows. It is made again only
+when the grid width changes, so it stays bounded whatever grids are loaded.
+`limit` is `CONVERT_VALUES`; tests make it small to read in more chunks.
+"""
+mutable struct ConvertBuffer
+    block::Matrix{Float64}
+    limit::Int
+end
+
+const CONVERT_VALUES = 2^20   # 8 MB of Float64
+
+ConvertBuffer() = ConvertBuffer(Matrix{Float64}(undef, 0, 0), CONVERT_VALUES)
+
+"""
     Worker()
 
 The serial worker queue: one task on the default thread pool that runs actions one at a
@@ -56,7 +73,8 @@ time, in the order they were submitted. It survives any exception from an action
 - `results`: messages for the render thread, read by `drain!`.
 - `map_inbox`, `map_task`: the map's layer loads and the second task that runs them, one
   at a time (`run_loader`, loader.jl). It touches no session, so a big load never holds up
-  the actions. Its results come back through `results` too.
+  the actions. Its results come back through `results` too. `map_scratch`: its buffer for
+  Float64 grids (a `ConvertBuffer`).
 - `pending`: actions submitted whose result `drain!` has not handled yet.
 - `failed`: the session and revision whose snapshot build failed, so `refresh!`
   does not try it again each frame; else `nothing`.
@@ -67,6 +85,7 @@ mutable struct Worker
     task::Task
     map_inbox::Channel{Any}
     map_task::Task
+    map_scratch::ConvertBuffer
     pending::Int
     failed::Union{Nothing,Tuple{Core.Session,Int}}
 end
@@ -76,8 +95,9 @@ function Worker()
     results = Channel{Any}(Inf)
     task = Threads.@spawn :default run_worker(inbox, results)
     map_inbox = Channel{Any}(Inf)
-    map_task = Threads.@spawn :default run_loader(map_inbox, results)
-    return Worker(inbox, results, task, map_inbox, map_task, 0, nothing)
+    map_scratch = ConvertBuffer()
+    map_task = Threads.@spawn :default run_loader(map_inbox, results, map_scratch)
+    return Worker(inbox, results, task, map_inbox, map_task, map_scratch, 0, nothing)
 end
 
 # Wake the window, if there is one, so the loop draws the result. Never throws:

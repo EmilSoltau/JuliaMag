@@ -171,10 +171,10 @@ Base.showerror(::IO, ::UnprintableError) = error("cannot print this error")
     @testset "stop_worker! logs a failed worker task" begin
         dead = Threads.@spawn error("the worker died")
         idle = Threads.@spawn nothing
-        w = UI.Worker(Channel{UI.WorkerAction}(Inf), Channel{Any}(Inf), dead, Channel{Any}(Inf), idle, 0, nothing)
+        w = UI.Worker(Channel{UI.WorkerAction}(Inf), Channel{Any}(Inf), dead, Channel{Any}(Inf), idle, UI.ConvertBuffer(), 0, nothing)
         @test_logs (:error, "The worker task failed") UI.stop_worker!(w)
         dead_loader = Threads.@spawn error("the loader died")
-        w = UI.Worker(Channel{UI.WorkerAction}(Inf), Channel{Any}(Inf), idle, Channel{Any}(Inf), dead_loader, 0, nothing)
+        w = UI.Worker(Channel{UI.WorkerAction}(Inf), Channel{Any}(Inf), idle, Channel{Any}(Inf), dead_loader, UI.ConvertBuffer(), 0, nothing)
         @test_logs (:error, "The map loader task failed") UI.stop_worker!(w)
         UI.stop_worker!(UI.Worker())   # a healthy worker stops quietly
     end
