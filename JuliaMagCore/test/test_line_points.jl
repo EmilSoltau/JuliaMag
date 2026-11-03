@@ -56,3 +56,44 @@ end
     read_line_points(db, "X", "Y", "MAG"; into = p)
     @test (@allocated read_line_points(db, "X", "Y", "MAG"; into = p)) < 100_000
 end
+
+# A database with line 1001 written (3 rows) and an open line 1002 (2 rows, not appended yet).
+function open_line_database(dir)
+    db = create_database(joinpath(dir, "d"), "d")
+    for (name, role) in (("X", ROLE_X), ("Y", ROLE_Y))
+        add_channel!(db, ChannelInfo(name, name, Float64, "m", role, :normal, 10, -1, false, 1))
+    end
+    add_line!(db, LineInfo(LineId(LINE, 1001, 0), 1, "2024-05-01", 0.0, 0.1, 3, 0, true))
+    apps = open_appenders(db, ["X", "Y"])
+    for r in 1:3
+        append_value!(apps["X"], 100.0 + r); append_value!(apps["Y"], 200.0 + r)
+    end
+    close_appenders!(apps)
+    add_line!(db, LineInfo(LineId(LINE, 1002, 0), 1, "2024-05-01", 0.0, 0.1, 2, 0, true))
+    return db
+end
+
+@testset "line points: a line still being appended is skipped" begin
+    mktempdir() do dir
+        db = open_line_database(dir)
+        p = read_line_points(db, "X", "Y")
+        @test length(p.x) == 3 && p.part_line == Int32[1] && length(p.lines) == 2
+        @test all(isnan, p.extents[2]) && p.extents[1] == (101.0, 201.0, 103.0, 203.0)
+    end
+end
+
+@testset "line points: the read follows one snapshot of the lines" begin
+    mktempdir() do dir
+        db = open_line_database(dir)
+        snap = JuliaMagCore.line_snapshot(db)
+        # The open line ends and another line is added after the snapshot.
+        end_line!(db)
+        add_line!(db, LineInfo(LineId(LINE, 1003, 0), 1, "2024-05-01", 0.0, 0.1, 4, 0, true))
+        end_line!(db)
+        p = JuliaMagCore.read_snapshot!(LinePoints(), db, snap, "X", "Y", nothing, nothing)
+        @test length(p.x) == 3 && length(p.lines) == 2 && length(p.extents) == 2
+        @test all(isnan, p.extents[2])
+        # A new read sees all lines.
+        @test length(read_line_points(db, "X", "Y").lines) == 3
+    end
+end

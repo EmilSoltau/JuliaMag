@@ -129,6 +129,23 @@ function pack_block!(p::LinePoints, st::PackState, wx::Vector{Float64}, wy::Vect
     return nothing
 end
 
+"""
+The lines of a database as they were at one moment: the line records, their
+row counts, and which were still being appended. `read_line_points` sizes its
+arrays and fills them from one snapshot, so a line that ends or is added while
+it reads cannot make it write past the arrays.
+"""
+struct LineSnapshot
+    lines::Vector{LineInfo}
+    nrows::Vector{Int}
+    open::Vector{Bool}
+end
+
+function line_snapshot(db::LineDatabase)::LineSnapshot
+    lines = copy(db.lines)
+    return LineSnapshot(lines, [l.nrows for l in lines], [is_open_line(db, l) for l in lines])
+end
+
 function numeric_channel(db::LineDatabase, name::AbstractString)::ChannelInfo
     channel_position(db, name) == 0 && throw(ArgumentError("there is no channel $name in database $(db.name)"))
     c = channel(db, name)
@@ -151,9 +168,14 @@ function read_line_points(db::LineDatabase, x::AbstractString, y::AbstractString
                           reproject::Union{Nothing,Reprojector} = nothing)::LinePoints
     foreach(c -> numeric_channel(db, c), (x, y))
     value === nothing || numeric_channel(db, value)
-    p = into
-    lines = db.lines
-    total = sum(l -> is_open_line(db, l) ? 0 : l.nrows, lines; init = 0)
+    return read_snapshot!(into, db, line_snapshot(db), x, y, value, reproject)
+end
+
+function read_snapshot!(p::LinePoints, db::LineDatabase, snap::LineSnapshot, x::AbstractString,
+                        y::AbstractString, value::Union{Nothing,AbstractString},
+                        reproject::Union{Nothing,Reprojector})::LinePoints
+    lines = snap.lines
+    total = sum(k -> snap.open[k] ? 0 : snap.nrows[k], eachindex(lines); init = 0)
     resize!(p.x, total); resize!(p.y, total); resize!(p.value, total)
     foreach(empty!, (p.part_first, p.part_count, p.part_line, p.part_row))
     resize!(p.lines, length(lines)); resize!(p.extents, length(lines))
@@ -166,7 +188,7 @@ function read_line_points(db::LineDatabase, x::AbstractString, y::AbstractString
             push!(readers, r)
             borrow_buffer!(r, p, length(readers))
         end
-        fill_line_points!(p, db, readers, reproject)
+        fill_line_points!(p, snap, readers, reproject)
     finally
         return_buffers!(p, readers)
         foreach(close, readers)
@@ -174,20 +196,20 @@ function read_line_points(db::LineDatabase, x::AbstractString, y::AbstractString
     return p
 end
 
-function fill_line_points!(p::LinePoints, db::LineDatabase, readers::Vector{BlockReader},
+function fill_line_points!(p::LinePoints, snap::LineSnapshot, readers::Vector{BlockReader},
                            reproject::Union{Nothing,Reprojector})
     st = PackState(0, false, 0.0, 0.0, false, NaN, NaN, NaN, NaN)
-    nb = min(LINE_POINTS_BLOCK, maximum(l -> l.nrows, db.lines; init = 0))
+    nb = min(LINE_POINTS_BLOCK, maximum(snap.nrows; init = 0))
     wx, wy, rx, ry = p.scratch
     foreach(b -> length(b) < nb && resize!(b, nb), p.scratch)
-    for (li, l) in enumerate(db.lines)
+    for (li, l) in enumerate(snap.lines)
         p.lines[li] = l.id
         st.in_run = false
         st.xmin = st.ymin = st.xmax = st.ymax = NaN
-        if !is_open_line(db, l)
+        if !snap.open[li]
             row = 1
-            while row <= l.nrows
-                rows = row:min(row + LINE_POINTS_BLOCK - 1, l.nrows)
+            while row <= snap.nrows[li]
+                rows = row:min(row + LINE_POINTS_BLOCK - 1, snap.nrows[li])
                 xs = numeric_block(read_block(readers[1], l, rows))
                 ys = numeric_block(read_block(readers[2], l, rows))
                 vs = length(readers) > 2 ? numeric_block(read_block(readers[3], l, rows)) : nothing
