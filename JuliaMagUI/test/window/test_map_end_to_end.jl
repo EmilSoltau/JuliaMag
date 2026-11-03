@@ -8,7 +8,8 @@ using JuliaMagUI: THEME_LIGHT, THEME_DARK, LIGHT, DARK, ToolDialog
 # A user's first map, in one window session: a new project, a line import and a grid import,
 # Show on Map for both, the view moved and walked back, a Layer Style for each layer with undo
 # and redo, a click that moves the cursor, the Map Drawing setting, and the project closed and
-# opened again. Light first, dark from the Settings step on. Every step goes through the
+# opened again. Light first, dark from the Settings step on. Steps 2, 6 and 7 are also shot in
+# the other theme, so each theme has shots of every kind of picture. Every step goes through the
 # window as a user does it; only the native file and folder dialogs are replaced.
 
 const MAP_E2E_SHOTS = joinpath(@__DIR__, "..", "shots")
@@ -92,6 +93,17 @@ map_e2e_layer(app, m, kind) = only(l for l in app.snap.maps[m].layers if l.kind 
 
 function first_map(; scale::Real, size, sfx::AbstractString)
     shot(ctx, name) = (ctx.frames(3); ctx.shot(joinpath(MAP_E2E_SHOTS, "e2e-map-$name$sfx.png")))
+    # A shot of map `m` in the other theme, drawn again in it, then back to the theme before.
+    function other_theme(ctx, app, m, name, theme)
+        back = app.config.theme
+        ctx.on_render(w -> UI.run_command!(app, theme == THEME_DARK ? "ui.theme.dark" : "ui.theme.light"))
+        map_e2e_wait(ctx, app, m)
+        shot(ctx, name)
+        ctx.on_render(w -> UI.run_command!(app, back == THEME_DARK ? "ui.theme.dark" : "ui.theme.light"))
+        map_e2e_wait(ctx, app, m)
+        @test app.config.theme == back
+        return nothing
+    end
     parent = mktempdir()
     xyz = map_e2e_xyz()
     with_test_app(; theme = THEME_LIGHT, scale, size, timeout = 300) do ctx
@@ -130,6 +142,7 @@ function first_map(; scale::Real, size, sfx::AbstractString)
         @test st.camera == map_e2e_full(app, m) && st.fitted == st.camera
         @test UI.header_doc(app) == app.snap.maps[m].name == "Map 1"
         shot(ctx, "01-shown-light")
+        other_theme(ctx, app, m, "01-shown-dark", THEME_DARK)
 
         # 3. Wheel zoom, a drag, Home and Previous Extent: the camera follows each.
         ctx.click("JuliaMag/tabs/Map")
@@ -220,11 +233,13 @@ function first_map(; scale::Real, size, sfx::AbstractString)
         map_e2e_wait(ctx, app, m; mode = UI.MAP_CPU)
         @test app.map.renderer.full_draws > n && app.config.map_drawing == "cpu"
         shot(ctx, "06-cpu-dark")
+        other_theme(ctx, app, m, "06-cpu-light", THEME_LIGHT)
         ctx.click("JuliaMag/ribbon/Map Drawing: Auto")
         n = app.map.renderer.full_draws
         map_e2e_wait(ctx, app, m; mode = UI.MAP_GL)
         @test app.map.renderer.full_draws > n
         shot(ctx, "06-auto-dark")
+        other_theme(ctx, app, m, "06-auto-light", THEME_LIGHT)
 
         # 7. Close the project and open it again: the map, its layers and their styles are
         # there, and the map shows at full extent.
@@ -245,6 +260,7 @@ function first_map(; scale::Real, size, sfx::AbstractString)
         st = app.map.views[m]
         @test st.camera == map_e2e_full(app, m) && isempty(st.history.past)
         shot(ctx, "07-reopened-dark")
+        other_theme(ctx, app, m, "07-reopened-light", THEME_LIGHT)
         @test isempty(app.draw_errors)
     end
     return nothing

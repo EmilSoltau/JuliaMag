@@ -44,6 +44,12 @@ image_rect_alloc(img, cam) = (image_rect(img, cam, 800, 600); @allocated image_r
         @test choose_mode("gpu", "") == MAP_GL
         @test should_transform(true, 0.030) && !should_transform(true, 0.010) && !should_transform(false, 0.5)
         @test !should_transform(true, FRAME_BUDGET)
+        # Uploads since the picture: a cheap picture is drawn again at once; a slow one at most
+        # every PENDING_REDRAW s, and always when the last upload is done.
+        redraw = UI.redraw_uploads
+        @test redraw(5, 6, 0.005, 0.0) && !redraw(6, 6, 0.005, 1.0) && !redraw(5, 0, 0.005, 1.0)
+        @test !redraw(5, 6, 0.05, UI.PENDING_REDRAW / 2) && redraw(5, 6, 0.05, UI.PENDING_REDRAW)
+        @test redraw(0, 6, 0.05, 0.0)
         img = MapImage(UInt32(1), Camera(0.0, 0.0, 1.0), (800, 600), UInt64(0), 0.05)
         @test image_rect(img, Camera(-10.0, 0.0, 1.0), 800, 600) == (10f0, 0f0, 810f0, 600f0)
         @test image_rect(img, Camera(0.0, 0.0, 0.5), 800, 600) == (-400f0, -300f0, 1200f0, 900f0)

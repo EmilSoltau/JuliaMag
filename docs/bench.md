@@ -404,58 +404,59 @@ Both runs are on a virtual display (Xvfb, 1920 by 1080):
 ### Results
 
 Run of 2026-11-04, the second of two runs on each renderer. Times in ms unless marked.
+A slow renderer redraws at most every 0.25 s while uploads wait (`PENDING_REDRAW`), and once when they are done.
 
 | Case | Intel GPU, median | Intel GPU, p95 | llvmpipe, median | llvmpipe, p95 |
 |---|---|---|---|---|
-| Load: read and build the grid | 0.66 s | | 0.64 s | |
-| Load: read and build the lines | 0.87 s | | 1.03 s | |
-| Load: all layers in | 1.55 s | | 1.69 s | |
-| Load: first full picture (40 uploads) | 2.27 s | | 3.97 s | |
-| Whole survey, frame | 11.6 | 12.2 | 52.9 | 58.9 |
-| Whole survey, GPU | 2.8 | 2.9 | 44.6 | 50.9 |
-| Zoom 10x, frame | 8.9 | 9.6 | 13.2 | 18.6 |
-| Zoom 10x, GPU | 0.6 | 0.6 | 7.7 | 8.1 |
-| Zoom 100x, frame | 10.4 | 12.3 | 41.2 | 46.7 |
-| Zoom 100x, GPU | 1.2 | 1.2 | 35.4 | 36.2 |
-| Grid only, frame | 9.1 | 9.7 | 8.0 | 10.5 |
-| Grid only, GPU | 0.7 | 0.7 | 2.3 | 2.4 |
-| Grid and lines, frame | 13.8 | 17.8 | 52.8 | 59.1 |
-| Grid and lines, GPU | 4.0 | 4.0 | 44.5 | 49.1 |
-| Pan, grid and lines, frame | 11.7 | 17.2 | 10.0 | 10.9 |
-| CPU renderer, whole survey, draw | 49.8 | 51.7 | 64.0 | 67.8 |
-| CPU renderer, whole survey, shown | 63.7 | 71.7 | 80.5 | 85.8 |
-| CPU renderer, grid, draw | 11.1 | 15.0 | 8.9 | 13.0 |
-| CPU renderer, grid, shown | 27.7 | 31.0 | 22.8 | 28.9 |
+| Load: read and build the grid | 0.84 s | | 0.76 s | |
+| Load: read and build the lines | 0.92 s | | 1.21 s | |
+| Load: all layers in | 1.78 s | | 1.98 s | |
+| Load: first full picture (40 uploads) | 2.50 s | | 2.82 s | |
+| Whole survey, frame | 11.9 | 12.3 | 58.5 | 66.2 |
+| Whole survey, GPU | 2.9 | 3.0 | 49.9 | 55.5 |
+| Zoom 10x, frame | 9.3 | 9.7 | 14.9 | 19.8 |
+| Zoom 10x, GPU | 0.6 | 0.6 | 9.1 | 9.4 |
+| Zoom 100x, frame | 9.6 | 14.6 | 43.0 | 47.6 |
+| Zoom 100x, GPU | 1.2 | 1.2 | 37.0 | 39.4 |
+| Grid only, frame | 9.0 | 9.5 | 9.4 | 15.1 |
+| Grid only, GPU | 0.7 | 0.7 | 2.7 | 2.8 |
+| Grid and lines, frame | 13.9 | 19.1 | 59.3 | 66.3 |
+| Grid and lines, GPU | 4.0 | 4.0 | 51.0 | 55.6 |
+| Pan, grid and lines, frame | 11.4 | 14.3 | 9.9 | 10.6 |
+| CPU renderer, whole survey, draw | 49.7 | 50.4 | 67.5 | 72.7 |
+| CPU renderer, whole survey, shown | 68.0 | 69.2 | 84.1 | 93.8 |
+| CPU renderer, grid, draw | 10.8 | 13.5 | 8.7 | 10.2 |
+| CPU renderer, grid, shown | 28.0 | 29.8 | 21.3 | 30.7 |
 
 On the Intel GPU every pan frame drew a full picture (120 of 120).
 On llvmpipe none did: a full picture costs more than a frame, so the last picture moved, and the full one came when the pan settled.
-The CPU renderer does not use OpenGL to draw, so its two columns differ only by noise and by the upload of the picture.
+The CPU renderer draws without OpenGL, but its whole survey draw is about 35 % slower in the llvmpipe run (67.5 ms against 49.7 ms).
+Most likely llvmpipe's own threads compete with the CPU renderer's threads for the cores.
 
-The first run on each renderer gave the same numbers within about 10 %, with two exceptions.
-On the Intel GPU the whole survey frame p95 was 16.4 ms (median 11.6 ms), and the pan frame p95 was 14.6 ms.
-On llvmpipe the CPU renderer's whole survey draw was 54.8 ms.
+The first run on each renderer gave the first full picture in 2.40 s (Intel GPU) and 2.45 s (llvmpipe).
+Its other numbers were within about 15 % of these, with a few p95 spikes on the Intel GPU (zoom 10x 18.6 ms, grid only 15.9 ms, grid and lines 21.3 ms) from the app frame, not the map pass.
+Before the redraw limit, the first full picture on llvmpipe took 3.97 s and 4.15 s, because the map drew a 45 ms picture after each of the 40 uploads.
 
 ### Targets
 
 | Target | Number | Met |
 |---|---|---|
-| First full picture of the 20 M points and the grid under 3 s | 2.27 s on the Intel GPU; 3.97 s on llvmpipe | Yes on the Intel GPU; no on llvmpipe |
-| Whole survey full frame on the Intel GPU under 16 ms | 11.6 ms median; p95 12.2 ms (16.4 ms in the first run); GPU 2.8 ms | Yes (the median; the p95 once just over) |
-| Pan frames p95 under 33 ms on llvmpipe, through the adaptive path | 10.9 ms | Yes |
-| Grid only full frame on llvmpipe under 16 ms | 8.0 ms median, 10.5 ms p95 | Yes |
+| First full picture of the 20 M points and the grid under 3 s | 2.50 s and 2.40 s on the Intel GPU; 2.82 s and 2.45 s on llvmpipe | Yes |
+| Whole survey full frame on the Intel GPU under 16 ms | 11.9 ms median, 12.3 ms p95; GPU 2.9 ms | Yes |
+| Pan frames p95 under 33 ms on llvmpipe, through the adaptive path | 10.6 ms | Yes |
+| Grid only full frame on llvmpipe under 16 ms | 9.4 ms median, 15.1 ms p95 | Yes |
 
 ### Findings
 
-- On llvmpipe the load takes 4 s, not 2.3 s, because the map draws a full picture after each of the 40 uploads, so the data shows as it comes.
-  A whole-survey picture costs about 45 ms there.
-  The reads and builds take the same time on both.
-- Zoom 100x costs more than zoom 10x: 35 ms against 8 ms on llvmpipe, and 1.2 ms against 0.6 ms on the GPU.
+- On llvmpipe a whole-survey picture costs about 50 ms.
+  While the 40 uploads run, the map redraws at most every 0.25 s, so the uploads get the frames and the first full picture comes in under 3 s.
+- Zoom 100x costs more than zoom 10x: 37 ms against 9 ms on llvmpipe, and 1.2 ms against 0.6 ms on the GPU.
   Culling is by the box of a whole line part, and these lines are 100 km long.
   At 100x, about 28 lines of 10,000 points pass the cull and draw at the finest level, almost all of them outside the view.
   At 10x, the point budget picks a coarser level.
   Cutting long parts into pieces with their own boxes would fix it; it is not needed for the targets.
 - The frame time on the Intel GPU is mostly the app frame itself (about 8 to 9 ms with an empty map here, with the test engine and Xvfb); the map pass adds 1 to 4 ms of GPU time.
-- The spike measured 15.6 ms of GPU time for all points of the whole survey; the point budget levels bring it to 2.8 ms.
+- The spike measured 15.6 ms of GPU time for all points of the whole survey; the point budget levels bring it to 2.9 ms.
 
 ### GL and CPU parity on the Intel GPU
 

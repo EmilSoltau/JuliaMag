@@ -126,6 +126,7 @@ These were out of scope for the map view (plan 4a).
 - Several maps side by side, view tabs and split views (plan 4b brings the other views).
 - Stored line levels and grid overviews next to the data, if loads of 50 M points need them.
 - A GPU memory budget with eviction for several large grids.
+- Cut long line parts into culled pieces, so a zoom of 100x does not draw whole lines.
 
 ## Checks on real systems
 

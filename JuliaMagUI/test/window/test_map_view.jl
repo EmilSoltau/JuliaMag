@@ -239,3 +239,60 @@ window_testset("map view") do
         end
     end
 end
+
+window_testset("map view while layers load") do
+    # Lines of 1000 m over a grid of 200 m: without the lines, the full extent is much smaller.
+    s = fresh_session()
+    db = survey_database!(s; lines = 10, rows = 100)
+    g = add_test_grid!(s, Float32[i + j for i in 1:20, j in 1:20]; name = "Small")
+    m = Core.new_map!(s; name = "Reload")
+    Core.add_layer!(s, m, g)
+    ld = Core.add_layer!(s, m, db)
+    with_project_app(s; timeout = 120) do ctx, app
+        app.ui.colour_bars = false   # no legend: the extent alone decides the fit
+        show_map!(ctx, app, m)
+        st = view_state(app)
+        @test st.fitted == st.camera
+        cam = st.camera
+
+        @testset "a line layer that loads again keeps the followed view" begin
+            hold = Channel{Nothing}(8)
+            app.map.hold = hold
+            ctx.on_render(w -> UI.submit!(app, "channel", s -> Core.set_layer!(s, m, ld; channel = "")))
+            seen = UI.Camera[]
+            ctx.wait_until(() -> any(e -> e.loading, values(app.map.entries)); timeout = 10)
+            for _ in 1:5
+                ctx.frames(1)
+                push!(seen, st.camera)
+            end
+            app.map.hold = nothing
+            put!(hold, nothing)
+            ctx.wait_until(() -> !any(e -> e.loading, values(app.map.entries)) &&
+                                 all(p -> p.entry !== nothing && p.entry.data !== nothing, app.map.plan); timeout = 10)
+            ctx.frames(3)
+            push!(seen, st.camera)
+            @test all(==(cam), seen)
+            @test st.fitted == st.camera   # it still follows
+        end
+
+        @testset "a slow picture redraws at most every $(UI.PENDING_REDRAW) s while uploads wait" begin
+            r = app.map.renderer
+            r.cost_override = 0.05   # more than a frame, as on llvmpipe
+            big = add_test_grid!(s, Float32[sin(i / 50) + j for i in 1:4300, j in 1:300]; name = "Wide")
+            ctx.on_render(w -> UI.submit!(app, "add", s -> Core.add_layer!(s, m, big)))
+            ctx.wait_until(() -> (gl = r.gl; gl !== nothing && !isempty(gl.pending)); timeout = 20)
+            draws, t0, most = r.full_draws, time(), 0
+            while !isempty(r.gl.pending)
+                most = max(most, length(r.gl.pending))
+                ctx.frames(1)
+            end
+            ctx.frames(2)
+            seconds = time() - t0
+            n = r.full_draws - draws
+            @info "Full draws while uploads wait" uploads = most draws = n seconds
+            @test most >= 4
+            @test n <= floor(Int, seconds / UI.PENDING_REDRAW) + 2
+            r.cost_override = nothing
+        end
+    end
+end

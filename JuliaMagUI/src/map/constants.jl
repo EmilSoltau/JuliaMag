@@ -11,6 +11,7 @@ const HISTORY_LIMIT = 50          # extent history entries each way
 # Timing
 const SETTLE = 0.15               # s after the last input before a gesture counts as done
 const FRAME_BUDGET = 1 / 60       # s
+const PENDING_REDRAW = 0.25       # s between full pictures of a slow renderer while uploads wait
 
 # Line levels
 const LOD_FACTOR = 8

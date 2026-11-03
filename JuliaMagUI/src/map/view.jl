@@ -341,6 +341,15 @@ function map_extent(app, mv)::Union{Nothing,NTuple{4,Float64}}
     return any(isnan, ext) ? nothing : ext
 end
 
+"Is a layer of the plan (`refresh_plan!`) still loading: no entry yet, a load out, or no data and no error?"
+function plan_loading(ms)::Bool
+    for p in ms.plan
+        e = p.entry
+        (e === nothing || e.loading || (e.data === nothing && isempty(e.error))) && return true
+    end
+    return false
+end
+
 """
     view_camera(app, mv, ext, w, h) -> Camera
 
@@ -434,8 +443,9 @@ function draw_map_view(app, dl, b::Box)
     vw, vh = round(Int, width(b)), round(Int, height(b))
     st = get!(MapViewState, ms.views, mv.id)
     # Until the view moves, the camera follows the full extent: of the data in so far, at this
-    # size and scale, clear of the legends.
-    if (st.camera === nothing || st.camera == st.fitted) && vw > 0 && vh > 0
+    # size and scale, clear of the legends. After the first fit, it waits while a layer loads,
+    # so a layer that loads again (a new channel, an undo) does not make the view jump.
+    if (st.camera === nothing || (st.camera == st.fitted && !plan_loading(ms))) && vw > 0 && vh > 0
         ext = map_extent(app, mv)
         if ext !== nothing
             st.camera = view_camera(app, mv, ext, vw, vh)

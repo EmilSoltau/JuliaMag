@@ -102,7 +102,8 @@ What draws the map. Changed on the render thread only.
   `ready`: the picture in it, which the next frame's view swaps in (`take_cpu_frame!`).
 - `full`: the view planned a full picture this frame (`plan_frame!`).
 - `handover`: the picture is of the other renderer; GL keeps it until its uploads are done.
-- `drawn_pending`: the uploads that were waiting when GL drew the picture.
+- `drawn_pending`: the uploads that were waiting when GL drew the picture; `drawn_at`: the
+  `time()` of that GL picture.
 - `generation`: one more each project; a CPU picture of another one is dropped.
 - `failed_key`: the scene a CPU frame failed on; it is not drawn again.
 - `gpu_noted`: the Graphics Card setting that cannot be had was said in a toast.
@@ -132,6 +133,7 @@ mutable struct MapRenderer
     full::Bool
     handover::Bool
     drawn_pending::Int
+    drawn_at::Float64
     generation::Int
     failed_key::UInt64
     gpu_noted::Bool
@@ -146,7 +148,7 @@ end
 MapRenderer() = MapRenderer(MAP_GL, nothing, "", MapImage(), (0, 0),
     (Matrix{UInt32}(undef, 0, 0), Matrix{UInt32}(undef, 0, 0)), 1, nothing,
     Scene(Camera(0, 0, 1), 1, 1, (0x00, 0x00, 0x00, 0xff), LineDraw[], 0), LineDraw[], GridDraw[],
-    nothing, 0, (0, 0), nothing, false, false, 0, 0, 0, false, 0, false, nothing, nothing, false, false)
+    nothing, 0, (0, 0), nothing, false, false, 0, 0.0, 0, 0, false, 0, false, nothing, nothing, false, false)
 
 "The cost of the last full picture, or the test hook's."
 frame_cost(r::MapRenderer)::Float64 = something(r.cost_override, r.image.cost)
@@ -291,7 +293,8 @@ end
 
 The GL part of the pass: make the GL objects once (`map_gl!`), run one `upload_step!`, and
 draw a full picture of scene `sc` (`nothing` for none) when it is planned and the picture
-is not of it, or uploads went on since it was drawn. Any error falls back to the CPU.
+is not of it, or uploads went on since it was drawn (`redraw_uploads`). Any error falls back
+to the CPU.
 """
 function gl_frame!(app, w::Window, r::MapRenderer, sc::Union{Nothing,Scene}, map::String)
     try
@@ -306,17 +309,32 @@ function gl_frame!(app, w::Window, r::MapRenderer, sc::Union{Nothing,Scene}, map
         n > 0 && request_frames!(w)
         (sc === nothing || !r.full) && return nothing
         img = r.image
-        (sc.key != img.key || img.map != map || (r.drawn_pending > 0 && n != r.drawn_pending)) || return nothing
+        now = time()
+        (sc.key != img.key || img.map != map ||
+         redraw_uploads(n, r.drawn_pending, frame_cost(r), now - r.drawn_at)) || return nothing
         gl_draw!(gl, sc)
         copy_gl_image!(r, gl)
         set_image!(r, sc.key, sc.camera, (sc.width, sc.height), gl.last_gpu_s, map)
         r.drawn_pending = n
+        r.drawn_at = now
     catch e
         e isa InterruptException && rethrow()
         fall_back!(app, r, e, catch_backtrace())
     end
     return nothing
 end
+
+"""
+    redraw_uploads(pending, drawn_pending, cost, since) -> Bool
+
+Draw the same scene again because uploads went on since the picture was drawn? The picture
+was drawn with `drawn_pending` uploads waiting (0: none, nothing to add) and `pending` wait
+now. A picture that costs more than a frame (`cost` s) is drawn again at most every
+`PENDING_REDRAW` s while uploads wait, so a slow renderer spends its frames on the uploads;
+always once they are all done.
+"""
+redraw_uploads(pending::Int, drawn_pending::Int, cost::Float64, since::Float64)::Bool =
+    drawn_pending > 0 && pending != drawn_pending && (pending == 0 || cost <= FRAME_BUDGET || since >= PENDING_REDRAW)
 
 """
     map_gl!(app, w, r) -> Union{Nothing,GlMap}
