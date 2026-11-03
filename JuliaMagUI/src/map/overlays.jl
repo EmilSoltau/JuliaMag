@@ -87,11 +87,11 @@ function draw_coordinate_bands(app, dl, b::Box, cam::Camera)
     step = tick_values!(ticks, lo, hi, gap, cam.res)
     for v in ticks
         x = rnd(b.x0 + world_to_screen(cam, w, h, v, 0.0)[1])
-        ig.AddRectFilled(dl, (x, iy - hl - tick), (x + hl, iy - hl), col)
         text = coord_text(v, step)
         tw = text_width(FONT_REGULAR, 10.5, text)
         x0 = x - tw / 2
-        (x0 >= ix && x0 + tw <= b.x1) || continue
+        (x0 >= ix && x0 + tw <= b.x1) || continue   # a tick only with its label
+        ig.AddRectFilled(dl, (x, iy - hl - tick), (x + hl, iy - hl), col)
         draw_text_mid(dl, FONT_REGULAR, 10.5, x0, label_mid, col, text)
     end
     # Y along the left, read upwards.
@@ -100,10 +100,10 @@ function draw_coordinate_bands(app, dl, b::Box, cam::Camera)
     step = tick_values!(ticks, lo, hi, gap, cam.res)
     for v in ticks
         y = rnd(b.y0 + world_to_screen(cam, w, h, 0.0, v)[2])
-        ig.AddRectFilled(dl, (ix - hl - tick, y), (ix - hl, y + hl), col)
         text = coord_text(v, step)
         tw = text_width(FONT_REGULAR, 10.5, text)
-        (y - tw / 2 >= iy && y + tw / 2 <= b.y1) || continue
+        (y - tw / 2 >= iy && y + tw / 2 <= b.y1) || continue   # a tick only with its label
+        ig.AddRectFilled(dl, (ix - hl - tick, y), (ix - hl, y + hl), col)
         # Drawn inside the view, where the clip rectangle keeps every glyph, then turned into the band.
         x0 = rnd(ix + px(s, 1))
         first = vertex_count(dl)
@@ -210,7 +210,7 @@ function draw_nav_buttons(app, b::Box, mv, st::MapViewState)
                 zoom_by!(st, 1 / ZOOM_STEP)
             elseif id == "full_extent"
                 ext = map_extent(app, mv)
-                ext === nothing || full_extent!(st, ext, vw, vh)
+                ext === nothing || full_extent!(st, ext, vw, vh; inset = px(s, BAND))
             elseif target !== nothing
                 go_to!(st, target)
             end

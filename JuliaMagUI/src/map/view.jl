@@ -15,6 +15,7 @@ The view of one map. Changed on the render thread only.
   is not a pick.
 - `last_input`: the time of the last input of the gesture.
 - `box`: the box of a box zoom, `(x0, y0, x1, y1)` in view px, or `nothing`.
+- `mouse`: the last valid mouse position (view px), used while the mouse is outside the window.
 - `size`: the view's size in device pixels at the last step.
 """
 mutable struct MapViewState
@@ -29,11 +30,12 @@ mutable struct MapViewState
     last_input::Float64
     box::Union{Nothing,NTuple{4,Float32}}
     size::NTuple{2,Int}
+    mouse::NTuple{2,Float32}
 end
 
 MapViewState(camera::Union{Nothing,Camera} = nothing) =
     MapViewState(camera, ExtentHistory(), :none, nothing, (0.0, 0.0), (0f0, 0f0), false, false, 0.0,
-                 nothing, (0, 0))
+                 nothing, (0, 0), (0f0, 0f0))
 
 """
 The input of one frame: the `mouse` in view px, whether it is over the view (`hovered`), the
@@ -53,6 +55,10 @@ end
 
 const CLICK_PX = 3   # a press that moves less is a click, not a pan
 const BOX_PX = 4     # a box zoom smaller than this each way is a click
+const MOUSE_FAR = -256000f0   # a mouse position below this is no position (ImGui's `IsMousePosValid`)
+
+# A mouse position that ImGui would call valid. Out of the window the GLFW backend sets -FLT_MAX.
+valid_mouse(m::NTuple{2,Float32})::Bool = isfinite(m[1]) && isfinite(m[2]) && m[1] >= MOUSE_FAR && m[2] >= MOUSE_FAR
 
 """
     step_view!(st, input) -> Union{Nothing,Tuple{Symbol,NTuple{2,Float64}}}
@@ -65,11 +71,17 @@ Move the view by one frame of input. Pure: no window.
   `(:pick, world_point)`; else `nothing`.
 - The wheel zooms about the mouse by `wheel_factor`.
 - A size change keeps the centre and, during a pan, the grabbed point under the mouse.
+- A mouse that is no position (it left the window) counts as the last valid one.
 
 When a gesture has ended and `SETTLE` s have passed since its last input, the camera before
 it goes into the history once, if the camera changed.
 """
 function step_view!(st::MapViewState, input::MapInput)::Union{Nothing,Tuple{Symbol,NTuple{2,Float64}}}
+    if valid_mouse(input.mouse)
+        st.mouse = input.mouse
+    else
+        input = MapInput(st.mouse, false, input.left_down, input.middle_down, input.shift, 0f0, input.size, input.now)
+    end
     st.size = input.size
     cam = st.camera
     cam === nothing && return nothing
@@ -168,23 +180,35 @@ function record_command!(st::MapViewState)
 end
 
 """
-    full_extent!(st, ext, w, h)
+    fit_inner(ext, w, h, inset) -> Camera
 
-Fit the extent `ext` of all the map's layers into a view of `w` by `h` device pixels.
-Records one extent (none for the first camera).
+`fit_extent` into the part of a `w` by `h` view right of and below `inset` device pixels (the
+coordinate bands): the extent fits `w - inset` by `h - inset`, centred in that part.
 """
-function full_extent!(st::MapViewState, ext::NTuple{4,Float64}, w, h)
+function fit_inner(ext::NTuple{4,Float64}, w, h, inset)::Camera
+    c = fit_extent(ext, max(w - inset, 1), max(h - inset, 1))
+    return Camera(c.cx - inset / 2 * c.res, c.cy + inset / 2 * c.res, c.res)
+end
+
+"""
+    full_extent!(st, ext, w, h; inset = 0)
+
+Fit the extent `ext` of all the map's layers into a view of `w` by `h` device pixels, inside
+`inset` px of coordinate bands at the left and top (`fit_inner`). Records one extent (none for
+the first camera).
+"""
+function full_extent!(st::MapViewState, ext::NTuple{4,Float64}, w, h; inset::Real = 0)
     record_command!(st)
-    st.camera = fit_extent(ext, w, h)
+    st.camera = fit_inner(ext, w, h, inset)
     return nothing
 end
 
 """
-    zoom_layer!(st, ext, w, h)
+    zoom_layer!(st, ext, w, h; inset = 0)
 
-Fit the extent `ext` of one layer. Records one extent.
+Fit the extent `ext` of one layer, as `full_extent!` does. Records one extent.
 """
-zoom_layer!(st::MapViewState, ext::NTuple{4,Float64}, w, h) = full_extent!(st, ext, w, h)
+zoom_layer!(st::MapViewState, ext::NTuple{4,Float64}, w, h; inset::Real = 0) = full_extent!(st, ext, w, h; inset)
 
 """
     zoom_by!(st, factor)
@@ -337,7 +361,7 @@ function draw_map_view(app, dl, b::Box)
     st = get!(MapViewState, ms.views, mv.id)
     if st.camera === nothing && vw > 0 && vh > 0
         ext = map_extent(app, mv)
-        ext === nothing || (st.camera = fit_extent(ext, vw, vh))
+        ext === nothing || (st.camera = fit_inner(ext, vw, vh, px(w.scale, BAND)))
     end
     ig.SetCursorScreenPos((b.x0, b.y0))
     lib.igSetNextItemAllowOverlap()   # the nav buttons on top take the mouse over themselves
@@ -347,14 +371,16 @@ function draw_map_view(app, dl, b::Box)
     active = ig.IsItemActive()
     io = ig.GetIO()
     mouse = unsafe_load(io.MousePos)
-    input = MapInput((mouse.x - b.x0, mouse.y - b.y0), hovered, active && ig.IsMouseDown(0),
+    # Out of the window the mouse is no position; `step_view!` then keeps the last valid one.
+    view_mouse = ig.IsMousePosValid() ? (Float32(mouse.x - b.x0), Float32(mouse.y - b.y0)) : (-floatmax(Float32), -floatmax(Float32))
+    input = MapInput(view_mouse, hovered, active && ig.IsMouseDown(0),
         active && ig.IsMouseDown(2), unsafe_load(io.KeyShift), hovered ? Float32(unsafe_load(io.MouseWheel)) : 0f0,
         (vw, vh), time())
     step_view!(st, input)   # a pick moves the shared cursor in a later task
     pending_gesture(st) && request_frames!(w)
     if !blocks_shortcuts(app) && !unsafe_load(io.WantTextInput) && ig.IsKeyPressed(lib.ImGuiKey_Home, false)
         ext = map_extent(app, mv)
-        ext === nothing || full_extent!(st, ext, vw, vh)
+        ext === nothing || full_extent!(st, ext, vw, vh; inset = px(w.scale, BAND))
     end
     gl = ms.gl
     if gl !== nothing && st.camera !== nothing

@@ -204,6 +204,13 @@ line_draw(d; level = 1, lo = 0f0, hi = 1f0, table = nothing, plain = (0xff, 0x00
                    line_draw(d; lut = lut2), line_draw(d; table = tab), line_draw(d; plain = (0x00, 0x00, 0x00, 0xff)))
             @test scene_key(mk(; ll)) != base
         end
+        # Every entry counts, not only those an array hash samples.
+        for k in (700, 1001)
+            far = copy(grey); far[k] ⊻= 0x01
+            @test scene_key(mk(gl = grid_draw(g; lut = far))) != base
+            t2 = copy(tab); t2[k] += 0.001f0
+            @test scene_key(mk(gl = grid_draw(g; table = t2))) != scene_key(mk(gl = grid_draw(g; table = tab)))
+        end
         # Same style values, new copies: equal keys
         @test scene_key(mk(gl = grid_draw(g; lut = copy(grey), table = nothing))) == base
         # A new build of the data changes the key

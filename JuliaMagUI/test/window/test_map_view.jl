@@ -40,6 +40,8 @@ function show_map!(ctx, app, m; timeout = 5)
 end
 
 view_state(app) = app.map.views[app.ui.current_map]
+# The full extent camera of map `m`: inside the coordinate bands.
+full_camera(app, m, w, h) = UI.fit_inner(UI.map_extent(app, app.snap.maps[m]), w, h, UI.px(app.window.scale, UI.BAND))
 view_size(app) = (round(Int, UI.width(app.map.view)), round(Int, UI.height(app.map.view)))
 view_point(app, x, y) = (app.map.view.x0 + x, app.map.view.y0 + y)   # device px of a view point
 
@@ -67,7 +69,7 @@ window_testset("map view") do
         @test time() - t0 < 5
         st = view_state(app)
         w, h = view_size(app)
-        @test st.camera == fit_extent(UI.map_extent(app, app.snap.maps[ids.m]), w, h)
+        @test st.camera == full_camera(app, ids.m, w, h)
         path = joinpath(MAP_SHOTS, "map-view-light.png")
         ctx.shot(path)
         img = PNGFiles.load(path)
@@ -100,7 +102,7 @@ window_testset("map view") do
         @testset "Home fits the full extent" begin
             ctx.key("Home")
             ctx.frames(2)
-            @test st.camera == fit_extent(UI.map_extent(app, app.snap.maps[ids.m]), w, h)
+            @test st.camera == full_camera(app, ids.m, w, h)
         end
 
         @testset "Shift and a drag zoom to the box" begin
@@ -125,7 +127,7 @@ window_testset("map view") do
             ctx.frames(1)
             @test st.camera.res ≈ res
             ctx.click("JuliaMag/mapnav/full_extent")
-            @test st.camera == fit_extent(UI.map_extent(app, app.snap.maps[ids.m]), w, h)
+            @test st.camera == full_camera(app, ids.m, w, h)
         end
 
         @testset "Review Focus 4: the window resized during a drag" begin
@@ -167,8 +169,8 @@ window_testset("map view") do
             legend = UI.legend_of(app, p)
             @test legend !== nothing && legend[3] === d
             ctx.shot(joinpath(MAP_SHOTS, "map-view-dummy-light.png"))
-            ctx.on_render(win -> UI.zoom_layer!(st2, UI.layer_extent(p.entry), w, h))
-            @test st2.camera == fit_extent(grid_extent(d.geo), w, h)
+            ctx.on_render(win -> UI.zoom_layer!(st2, UI.layer_extent(p.entry), w, h; inset = UI.px(1, UI.BAND)))
+            @test st2.camera == UI.fit_inner(grid_extent(d.geo), w, h, UI.px(1, UI.BAND))
             @test isempty(app.draw_errors)
         end
 
@@ -193,6 +195,15 @@ window_testset("map view") do
         s, ids = map_project()
         with_project_app(s; theme, scale, timeout = 120) do ctx, app
             show_map!(ctx, app, ids.m; timeout = 20)
+            # Every corner of the extent is inside the bands, also in this short view at 1.5.
+            st = view_state(app)
+            w, h = view_size(app)
+            ext = UI.map_extent(app, app.snap.maps[ids.m])
+            band = UI.px(scale, UI.BAND)
+            for x in (ext[1], ext[3]), y in (ext[2], ext[4])
+                sx, sy = UI.world_to_screen(st.camera, w, h, x, y)
+                @test band <= sx <= w && band <= sy <= h
+            end
             ctx.shot(joinpath(MAP_SHOTS, "map-view-$name" * (scale == 1 ? "" : "-1.5x") * ".png"))
         end
     end

@@ -81,16 +81,26 @@ mutable struct Scene
     end
 end
 
+# The hash of every entry of `v` (`Base.hash` of an array may read only some entries of a big one).
+hash_all(::Nothing, h::UInt)::UInt = hash(nothing, h)
+function hash_all(v::Vector{T}, h::UInt)::UInt where {T}
+    h = hash(length(v), h)
+    @inbounds for x in v
+        h = hash(x, h)
+    end
+    return h
+end
+
 # The hash of the style values of a layer, after its data's identity, version and level.
 function layer_key(l::LineDraw, h::UInt)::UInt
     h = hash(:line, h)
     h = hash(objectid(l.data), h)
     h = hash(l.data.version, h)
     h = hash(l.level, h)
-    h = hash(l.lut, h)
+    h = hash_all(l.lut, h)
     h = hash(l.lo, h)
     h = hash(l.hi, h)
-    h = hash(l.table, h)
+    h = hash_all(l.table, h)
     h = hash(l.plain, h)
     return hash(l.opacity, h)
 end
@@ -100,10 +110,10 @@ function layer_key(l::GridDraw, h::UInt)::UInt
     h = hash(objectid(l.data), h)
     h = hash(l.data.version, h)
     h = hash(l.level, h)
-    h = hash(l.lut, h)
+    h = hash_all(l.lut, h)
     h = hash(l.lo, h)
     h = hash(l.hi, h)
-    h = hash(l.table, h)
+    h = hash_all(l.table, h)
     h = hash(l.opacity, h)
     h = hash(l.shade, h)
     h = hash(l.sun, h)

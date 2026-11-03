@@ -77,6 +77,41 @@ end
         @test st5.camera == Camera(0.0, 0.0, 1.0)
     end
 
+    @testset "a mouse that left the window does not move the view" begin
+        far = (-floatmax(Float32), -floatmax(Float32))   # what ImGui's GLFW backend sets
+        st = MapViewState(Camera(500_000.0, 7_000_000.0, 2.0))
+        step_view!(st, drag_input((400, 300), (800, 600), 0.0))
+        step_view!(st, drag_input((430, 320), (800, 600), 0.016))
+        c = st.camera
+        step_view!(st, MapInput(far, false, true, false, false, 0f0, (800, 600), 0.032))
+        @test st.camera == c && all(isfinite, (st.camera.cx, st.camera.cy))
+        @test step_view!(st, MapInput(far, false, false, false, false, 0f0, (800, 600), 0.048)) === nothing
+        @test st.camera == c
+        # A box zoom fits the box to the last good position.
+        st2 = MapViewState(Camera(0.0, 0.0, 1.0))
+        step_view!(st2, MapInput((100f0, 100f0), true, true, false, true, 0f0, (800, 600), 0.0))
+        step_view!(st2, MapInput((300f0, 250f0), true, true, false, true, 0f0, (800, 600), 0.1))
+        step_view!(st2, MapInput(far, false, true, false, true, 0f0, (800, 600), 0.15))
+        @test st2.box == (100f0, 100f0, 300f0, 250f0)
+        step_view!(st2, MapInput(far, false, false, false, true, 0f0, (800, 600), 0.2))
+        @test st2.camera.res == 0.25 && (st2.camera.cx, st2.camera.cy) == (-200.0, 125.0)
+    end
+
+    @testset "full extent fits the box inside the coordinate bands" begin
+        ext = (500_000.0, 7_000_000.0, 502_000.0, 7_001_950.0)
+        w, h, inset = 1070, 600, 30
+        st = MapViewState(nothing)
+        full_extent!(st, ext, w, h; inset)
+        for x in (ext[1], ext[3]), y in (ext[2], ext[4])
+            sx, sy = world_to_screen(st.camera, w, h, x, y)
+            @test inset <= sx <= w && inset <= sy <= h
+        end
+        cx, cy = world_to_screen(st.camera, w, h, (ext[1] + ext[3]) / 2, (ext[2] + ext[4]) / 2)
+        @test cx ≈ inset + (w - inset) / 2 && cy ≈ inset + (h - inset) / 2
+        zoom_layer!(st, ext, w, h; inset)
+        @test st.camera == UI.fit_inner(ext, w, h, inset)
+    end
+
     @testset "Review Focus 4: a pan while the window resizes" begin
         st = MapViewState(Camera(500_000.0, 7_000_000.0, 3.0))
         step_view!(st, idle_input(0.0))
