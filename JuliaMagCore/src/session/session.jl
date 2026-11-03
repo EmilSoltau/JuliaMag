@@ -171,6 +171,8 @@ mutable struct Session
     held_edits::Union{Nothing,Vector{Union{UndoStep,HistoryEntry}}}
     "Counts every change a UI shows (see `revision`). Read without a lock."
     revision::Threads.Atomic{Int}
+    "Changes per item in this session (see `item_revision`). Guarded by `lock`."
+    item_revisions::Dict{String,Int}
     "0 open, 1 closing, 2 closed (see `isopen`)."
     state::Threads.Atomic{Int}
 end
@@ -196,6 +198,26 @@ starting or leaving `JOB_RUNNING`. Reading it takes no lock.
 revision(s::Session)::Int = s.revision[]
 
 bump!(s::Session) = (Threads.atomic_add!(s.revision, 1); nothing)
+
+"""
+    item_revision(s, id)::Int
+
+How many changes item `id` has had in this session: 0 for an item never changed.
+It goes up for each change that adds an undo step, and for each undo or redo.
+A map reloads an item when this number differs from the one it read.
+"""
+item_revision(s::Session, id::AbstractString)::Int = lock(() -> get(s.item_revisions, String(id), 0), s.lock)
+
+"A copy of all item change counts (see `item_revision`)."
+item_revisions(s::Session)::Dict{String,Int} = lock(() -> copy(s.item_revisions), s.lock)
+
+"Count one change for each item of `step`. Call it under `s.lock`."
+function count_changes!(s::Session, step::UndoStep)
+    for id in unique(step.items)
+        s.item_revisions[id] = get(s.item_revisions, id, 0) + 1
+    end
+    return nothing
+end
 
 """
     isopen(s)::Bool
@@ -225,7 +247,7 @@ function Session(p::Project)
     s = Session(p, UndoStep[], UndoStep[], history, nothing, nothing,
                 load_remembered(p, warnings), ReentrantLock(), warnings, Job[], 1,
                 ReentrantLock(), Dict{String,BusyMark}(), nothing, ReentrantLock(), nothing,
-                Threads.Atomic{Int}(0), Threads.Atomic{Int}(SESSION_OPEN))
+                Threads.Atomic{Int}(0), Dict{String,Int}(), Threads.Atomic{Int}(SESSION_OPEN))
     load_jobs!(s)
     return s
 end
