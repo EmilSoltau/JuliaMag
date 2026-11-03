@@ -341,6 +341,8 @@ end
 
 The shown map in box `b` of the central area: `canvas` fill, an invisible button over `b`
 that takes the mouse for `step_view!`, the map image, then the overlays (`draw_overlays`).
+A click (a `:pick`) moves the shared cursor (`pick_cursor!`); while the mouse is over the
+view, `map_hover` reads what is under it for the status bar.
 The map image is the last full picture (`draw_map_image`); a full GL picture is drawn by
 this frame's GL pass. The camera starts at the full extent once a layer has an extent. A map
 with no layers says so. The keys (`Home` for Full Extent) are the map commands' (map_commands.jl).
@@ -352,12 +354,13 @@ function draw_map_view(app, dl, b::Box)
     snap_ = app.snap
     id = app.ui.current_map
     # Not `shown_map`: its `Union` result boxes the map view (see `map_gl_pass!`).
-    (snap_ === nothing || !haskey(snap_.maps, id)) && return nothing
+    (snap_ === nothing || !haskey(snap_.maps, id)) && return clear_hover!(app)
     mv = snap_.maps[id]
     b = snap(b)
     ms.view = b
     ig.AddRectFilled(dl, (b.x0, b.y0), (b.x1, b.y1), u32(t.canvas))
     if isempty(mv.layers) && isempty(mv.error)
+        clear_hover!(app)
         draw_empty_map(app, dl, b)
         return nothing
     end
@@ -381,7 +384,15 @@ function draw_map_view(app, dl, b::Box)
     input = MapInput(view_mouse, hovered, active && ig.IsMouseDown(0),
         active && ig.IsMouseDown(2), unsafe_load(io.KeyShift), hovered ? Float32(unsafe_load(io.MouseWheel)) : 0f0,
         (vw, vh), time())
-    step_view!(st, input)   # a pick moves the shared cursor in a later task
+    pick = step_view!(st, input)
+    pick === nothing || pick_cursor!(app, mv, pick[2]...)
+    # The readout of what is under the pointer, while it is over the map.
+    cam = st.camera
+    if hovered && cam !== nothing && ig.IsMousePosValid()
+        map_hover(app, screen_to_world(cam, vw, vh, view_mouse[1], view_mouse[2])...)
+    else
+        clear_hover!(app)
+    end
     pending_gesture(st) && request_frames!(w)
     draw_map_image(ms.renderer, dl, b, st, vw, vh, mv.id)
     draw_overlays(app, dl, b, mv, st)

@@ -1,5 +1,6 @@
-# The status bar: the current database on the left; selected lines, jobs, the worker's
-# busy text and the render mode on the right.
+# The status bar: the current database on the left, or while a map is shown its coordinate
+# system, the pointer and the readout; selected lines, jobs, the worker's busy text and the
+# render mode on the right.
 
 plural(n::Integer, word::AbstractString) = string(n, " ", word, n == 1 ? "" : "s")
 
@@ -56,7 +57,9 @@ jobs_text(running::Integer) = running == 0 ? "No jobs running" :
 Where the status bar parts go, in device pixels: the `left` text (cut short with "..."
 when it would reach the right side), the left edge `x` of each right item (`nothing`
 when it is not shown), the separators' `seps`, the spinner and text widths of the jobs
-item, and `right_x`, where the right side starts.
+item, and `right_x`, where the right side starts. While a map is shown, `left` is its
+coordinate system (`left_w` wide), then the pointer text at `pointer_x` (`pointer_w` wide)
+and the `readout` (cut short) at `readout_x`; else `pointer_x` is `nothing`.
 """
 struct StatusLayout
     left::String
@@ -68,17 +71,25 @@ struct StatusLayout
     selected_x::Union{Nothing,Float32}
     seps::Vector{Float32}
     right_x::Float32
+    left_w::Float32
+    pointer_x::Union{Nothing,Float32}
+    pointer_w::Float32
+    readout_x::Float32
+    readout::String
 end
 
 """
-    status_layout(b, scale, measure, texts) -> StatusLayout
+    status_layout(b, scale, measure, texts; on_map = nothing) -> StatusLayout
 
 Lay out the status bar in box `b`, as the prototype's `#status`: padding 10, 10 px
 between the items and around the 1 px separators. The right side is laid out from the
 right edge; the left text gets the room that is left, at least 10 px from the right side.
-`measure(role, size, text)` is the text width in device pixels.
+With the texts of a shown map (`map_status`), the left side is its coordinate system, a
+separator, the pointer in mono, a separator and the readout: the readout is cut short
+first, then the coordinate system. `measure(role, size, text)` is the text width in device pixels.
 """
-function status_layout(b::Box, scale::Real, measure, texts::StatusTexts)::StatusLayout
+function status_layout(b::Box, scale::Real, measure, texts::StatusTexts;
+        on_map::Union{Nothing,NTuple{3,String}} = nothing)::StatusLayout
     p(v) = px(scale, v)
     hl = hairline(scale)
     seps = Float32[]
@@ -105,9 +116,94 @@ function status_layout(b::Box, scale::Real, measure, texts::StatusTexts)::Status
         x -= p(10) + measure(FONT_REGULAR, 11.5, texts.selected)
         selected_x = x
     end
-    room = x - p(10) - (b.x0 + p(10))
-    left = elide(measure, texts.database, room; role = FONT_REGULAR, size = 11.5)
-    return StatusLayout(left, mode_x, busy_x, jobs_x, spin, jobs_w, selected_x, seps, x)
+    x0 = b.x0 + p(10)
+    x1 = x - p(10)   # the left side ends here
+    if on_map === nothing
+        left = elide(measure, texts.database, x1 - x0; role = FONT_REGULAR, size = 11.5)
+        return StatusLayout(left, mode_x, busy_x, jobs_x, spin, jobs_w, selected_x, seps, x,
+            measure(FONT_REGULAR, 11.5, left), nothing, 0f0, x1, "")
+    end
+    crs, pointer, readout = on_map
+    pointer_w = measure(FONT_MONO, 11.5, pointer)
+    between = 2 * (p(10) + hl + p(10)) + pointer_w   # from the end of the system to the readout
+    left = elide(measure, crs, x1 - x0 - between; role = FONT_REGULAR, size = 11.5)
+    left_w = measure(FONT_REGULAR, 11.5, left)
+    sep = rnd(x0 + left_w + p(10))
+    push!(seps, sep)
+    pointer_x = sep + hl + p(10)
+    sep = rnd(pointer_x + pointer_w + p(10))
+    push!(seps, sep)
+    readout_x = sep + hl + p(10)
+    readout = elide(measure, readout, x1 - readout_x; role = FONT_REGULAR, size = 11.5)
+    return StatusLayout(left, mode_x, busy_x, jobs_x, spin, jobs_w, selected_x, seps, x,
+        left_w, pointer_x, pointer_w, readout_x, readout)
+end
+
+"""
+    StatusCache
+
+The status bar's texts (`texts`, see `status_texts`) and the snapshot, current database,
+running jobs, busy text and render inputs they were made from; and its `layout` and the
+box `box`, scale and texts (`shown`, `on_map`) it was laid out for. A steady frame makes neither again, so it
+allocates nothing.
+"""
+mutable struct StatusCache
+    snap::Any
+    db::String
+    running::Int
+    busy::Union{Nothing,String}
+    software::Bool
+    mode::MapMode
+    problem::String
+    texts::Union{Nothing,StatusTexts}
+    box::Box
+    scale::Float32
+    shown::Union{Nothing,StatusTexts}
+    on_map::Union{Nothing,NTuple{3,String}}
+    layout::Union{Nothing,StatusLayout}
+end
+
+StatusCache() = StatusCache(nothing, "", 0, nothing, false, MAP_GL, "", nothing, Box(0, 0, 0, 0), 0f0,
+                            nothing, nothing, nothing)
+
+"""
+    status_view(app, b) -> StatusCache
+
+The status bar's texts (`shown`), the shown map's texts (`on_map`: `map_status`, or `nothing`
+while no map is shown) and their `layout` in box `b`, in `app.ui.status_cache`. Each is made
+again only when what it is made from changed.
+"""
+function status_view(app, b::Box)::StatusCache
+    c = app.ui.status_cache
+    c isa StatusCache || (c = app.ui.status_cache = StatusCache())
+    snap = app.snap
+    w = app.window
+    software = w !== nothing && software_renderer(w.renderer)
+    r = app.map.renderer
+    mode = choose_mode(app.config.map_drawing, r.gl_problem)
+    running = running_jobs(snap)
+    if c.texts === nothing || c.snap !== snap || c.db != app.ui.current_db || c.running != running ||
+            c.busy !== app.busy || c.software != software || c.mode != mode || c.problem !== r.gl_problem
+        c.texts = status_texts(app)
+        c.snap, c.db, c.running, c.busy = snap, app.ui.current_db, running, app.busy
+        c.software, c.mode, c.problem = software, mode, r.gl_problem
+    end
+    texts = c.texts::StatusTexts
+    scale = w === nothing ? 1f0 : Float32(w.scale)
+    same = c.layout !== nothing && c.box == b && c.scale == scale && c.shown === texts
+    # The map's texts compared as a concrete tuple: a `Union` of them would be boxed.
+    if snap !== nothing && haskey(snap.maps, app.ui.current_map)
+        m = map_status(app)
+        prev = c.on_map
+        if !(same && prev isa NTuple{3,String} && prev === m)
+            c.layout = status_layout(b, scale, text_width, texts; on_map = m)
+            c.box, c.scale, c.shown, c.on_map = b, scale, texts, m
+        end
+    elseif !(same && c.on_map === nothing)
+        c.layout = status_layout(b, scale, text_width, texts)
+        c.box, c.scale, c.shown, c.on_map = b, scale, texts, nothing
+    end
+    return c
 end
 
 """
@@ -115,7 +211,8 @@ end
 
 Draw the status bar in box `b` (see `status_layout`): 26 high, `status_bar` fill, a 1 px
 `border` line on top, text 11.5 `text_dim`, 1 by 14 separators in `border_strong`.
-A click on the jobs text opens the Jobs tab.
+While a map is shown: its coordinate system, the pointer in mono 11.5 and the readout
+in `text`. A click on the jobs text opens the Jobs tab.
 """
 function draw_status_bar(app, dl, b::Box)
     w = app.window::Window
@@ -126,15 +223,27 @@ function draw_status_bar(app, dl, b::Box)
     ig.AddRectFilled(dl, (b.x0, b.y0), (b.x1, b.y1), u32(t.status_bar))
     ig.AddRectFilled(dl, (b.x0, b.y0), (b.x1, b.y0 + hl), u32(t.border))
     mid = (b.y0 + hl + b.y1) / 2
-    texts = status_texts(app)
-    l = status_layout(b, s, text_width, texts)
+    c = status_view(app, b)
+    texts = c.shown::StatusTexts
+    on_map = c.on_map
+    l = c.layout::StatusLayout
     dim = u32(t.text_dim)
     for x in l.seps
         ig.AddRectFilled(dl, (x, round(mid - p(7))), (x + hl, round(mid - p(7)) + p(14)),
             u32(t.border_strong))
     end
     ig.PushID("status")
-    draw_text_mid(dl, FONT_REGULAR, 11.5, b.x0 + p(10), mid, dim, l.left)
+    x0 = b.x0 + p(10)
+    draw_text_mid(dl, FONT_REGULAR, 11.5, x0, mid, dim, l.left)
+    pointer_x = l.pointer_x
+    if pointer_x !== nothing && on_map !== nothing
+        hit("Coordinate System", Box(x0, b.y0 + hl, x0 + l.left_w, b.y1))
+        ig.IsItemHovered() && item_tip!(app, "Map coordinate system"; help = "The coordinate system the map is drawn in.")
+        draw_text_mid(dl, FONT_MONO, 11.5, pointer_x, mid, dim, on_map[2])
+        hit("Pointer", Box(pointer_x, b.y0 + hl, pointer_x + l.pointer_w, b.y1))
+        ig.IsItemHovered() && item_tip!(app, "Pointer position"; help = "X and Y of the pointer in the map's coordinate system.")
+        draw_text_mid(dl, FONT_REGULAR, 11.5, l.readout_x, mid, u32(t.text), l.readout)
+    end
 
     # "GPU" in `accent_text`; "Software" and "CPU map" in `amber`.
     mw = draw_text_mid(dl, FONT_MONO, 11, l.mode_x, mid,

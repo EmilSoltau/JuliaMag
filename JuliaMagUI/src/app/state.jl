@@ -542,6 +542,11 @@ What the UI shows and where, apart from the project data. Changed on the render 
 - `layer_selected`: the id of the selected layer of the shown map, or `""`. The map commands
   act on it (map_commands.jl).
 - `colour_bars`: the shown map draws a colour bar (legend) for each coloured layer.
+- `hover`: what the shown map has under the pointer (a `MapHover`, see readout.jl), or
+  `nothing` while the pointer is not over the map. `hover_buf`: the one `MapHover` that
+  `map_hover` fills again in place. `map_status`: the map's status texts made last (see
+  `map_status`). `status_cache`: the status bar's texts and layout made last (a
+  `StatusCache`, see statusbar.jl), or `nothing`.
 - `opacity_preview`: a live opacity `(layer id, opacity)` for one layer of the shown map,
   drawn before it is set on the layer (an opacity slider sets it while it moves), or `nothing`.
   `opacity_edit`: the last release's edit (a `LayerEdit{Float64}`) until a snapshot has it, so
@@ -618,6 +623,10 @@ Base.@kwdef mutable struct UiState
     first_map::Bool = false
     layer_selected::String = ""
     colour_bars::Bool = true
+    hover::Union{Nothing,MapHover} = nothing
+    hover_buf::MapHover = MapHover()
+    map_status::MapStatusCache = MapStatusCache()
+    status_cache::Any = nothing
     opacity_preview::Union{Nothing,Tuple{String,Float64}} = nothing
     opacity_edit::Union{Nothing,LayerEdit{Float64}} = nothing
     style_preview::Union{Nothing,Tuple{String,Core.LayerStyle}} = nothing

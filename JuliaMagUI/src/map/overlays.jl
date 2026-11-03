@@ -14,20 +14,23 @@ const LEGEND_W = 228
 const RAMP_W = 210
 const OVERLAY_ALPHA = 0.88   # the bands and the scale bar
 const CARD_ALPHA = 0.92      # the legends and the hint
+const MARKER_SIZE = 12       # the shared cursor's ring, across
+const MARKER_RING = 2
 
 const EMPTY_MAP_LINES = ["This map has no layers.", "Show a database or grid on it from the Data tab."]
 
 """
     draw_overlays(app, dl, b, mv, st)
 
-Draw the overlays of map view `mv` in box `b`: with a camera, the line labels, the box of a box
-zoom, the coordinate bands, the scale bar, the legends (while Colour Bars is on) and the nav
+Draw the overlays of map view `mv` in box `b`: with a camera, the line labels, the shared
+cursor's marker, the box of a box zoom, the coordinate bands, the scale bar, the legends (while Colour Bars is on) and the nav
 buttons; and always the hint.
 """
 function draw_overlays(app, dl, b::Box, mv, st::MapViewState)
     cam = st.camera
     if cam !== nothing
         draw_line_labels(app, dl, b, cam)
+        draw_cursor_marker(app, dl, b, mv, cam)
         draw_zoom_box(app, dl, b, st)
         draw_coordinate_bands(app, dl, b, cam)
         draw_scale_bar(app, dl, b, mv, cam)
@@ -241,6 +244,32 @@ function cursor_target(app, mv)::Union{Nothing,NTuple{2,Float64}}
         pt = cursor_point(d, k, c.row)
         pt === nothing || return pt
     end
+    return nothing
+end
+
+"""
+    draw_cursor_marker(app, dl, b, mv, cam)
+
+The shared cursor on map `mv` when it is a point of a line layer (`cursor_target`): a ring
+$(MARKER_SIZE) px across, $(MARKER_RING) px of `accent` with a 1 px `on_accent` halo on each side. Its centre
+and sizes are whole pixels, so the ring is sharp at any scale.
+"""
+function draw_cursor_marker(app, dl, b::Box, mv, cam::Camera)
+    p = cursor_target(app, mv)
+    p === nothing && return nothing
+    s = app.window.scale
+    t = app.tokens
+    r, ring, halo = px(s, MARKER_SIZE / 2), px(s, MARKER_RING), hairline(s)
+    sx, sy = world_to_screen(cam, width(b), height(b), p[1], p[2])
+    x, y = rnd(b.x0 + sx), rnd(b.y0 + sy)
+    out = r + halo
+    (b.x0 - out <= x <= b.x1 + out && b.y0 - out <= y <= b.y1 + out) || return nothing
+    # Both stroked on their centre line, at r - ring / 2: the halo from r - ring - halo to
+    # r + halo, the ring from r - ring to r.
+    mid = r - ring / 2
+    centre = Int(lib.ImDrawFlags_StrokeCenter)
+    ig.AddCircle(dl, (x, y), mid, u32(t.on_accent), 32, ring + 2halo, centre)
+    ig.AddCircle(dl, (x, y), mid, u32(t.accent), 32, ring, centre)
     return nothing
 end
 

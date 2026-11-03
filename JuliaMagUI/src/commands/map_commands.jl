@@ -165,12 +165,12 @@ function history_reason(app, back::Bool)
     return nothing
 end
 
-# Reads the plan the map view built in this frame or the last one, and never builds it: an
-# enabled check runs every frame. Before the view has planned this map, the point is not on it.
+# Plans the shown map first (`refresh_plan!`, which does nothing when the plan is current),
+# so the reason follows a map switch at once, before the view draws the map.
 function cursor_reason(app)
     mv, why = map_target(app)
     why === nothing || return why
-    app.map.plan_map == mv.id || return NOT_ON_MAP_TEXT
+    refresh_plan!(app.map, app, mv)
     return cursor_target(app, mv) === nothing ? NOT_ON_MAP_TEXT : nothing
 end
 
