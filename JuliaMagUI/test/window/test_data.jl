@@ -418,9 +418,9 @@ window_testset("data tab") do
                     ctx.frames(2)
                     path = ctx.shot(joinpath(DATA_SHOTS, "data-jobs-badge.png"))
                     img = PNGFiles.load(path)
-                    # The badge: a 16 px accent pill after "Jobs".
+                    # The badge: a 16 px accent pill after "Jobs", after the Data and Layers tabs.
                     row = img[168 + 17, :]
-                    xs = [x for x in 80:140 if near(rgb255(row[x]), rgb255(LIGHT.accent); tol = 6)]
+                    xs = [x for x in 120:220 if near(rgb255(row[x]), rgb255(LIGHT.accent); tol = 6)]
                     @test !isempty(xs) && 14 <= last(xs) - first(xs) + 1 <= 17
                 finally
                     notify(go)   # before the session closes, which waits for the job

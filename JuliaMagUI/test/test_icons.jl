@@ -84,7 +84,8 @@ const PROTOTYPE_HTML = joinpath(@__DIR__, "..", "..", "prototype", "juliamag-ui.
         @test ICON_SIZES[icon_size_index(normal, 20)] == 20   # the Tools pane and recent rows
         @test ICON_SIZES[icon_size_index(normal, 44)] == 48
         @test ICON_SIZES[icon_size_index(normal, 64)] == 48
-        @test ICON_SIZES[icon_size_index(disabled, 10)] == 16
+        @test ICON_SIZES[icon_size_index(disabled, 10)] == 12
+        @test ICON_SIZES[icon_size_index(disabled, 12)] == 12   # the Layers tab's drag grip
         @test ICON_SIZES[icon_size_index(nav, 22)] == 22   # the backstage Back arrow
         @test ICON_SIZES[icon_size_index(nav, 44)] == 44   # the logo of the backstage pages
         @test ICON_SIZES[icon_size_index(on_accent, 32)] == 22

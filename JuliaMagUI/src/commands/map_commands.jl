@@ -14,6 +14,11 @@ const NO_LATER_EXTENT = "There is no later extent."
 const NEED_MAP_ITEM = "Import line data or a grid first."
 const NEED_MAP_LAYERS = "The map has no layers."
 const MAP_LOADING = "The map is still loading."
+const MAP_FAILED = "The map's layers could not be loaded."
+const MAP_HIDDEN = "Every layer of the map is hidden."
+const MAP_NO_DATA = "The map's layers have nothing to draw."
+const LAYER_AT_TOP = "The layer is at the top."
+const LAYER_AT_BOTTOM = "The layer is at the bottom."
 # "The current point is not on this map." is `NOT_ON_MAP_TEXT` (overlays.jl), as the nav button says.
 
 # --- What the commands act on ---
@@ -81,12 +86,27 @@ end
 
 map_reason(app) = last(map_target(app))
 
-# A view move needs a camera: the map has layers and its first data is in.
+# A view move needs a camera: the map has layers and its first data is in. Without a camera,
+# the reason comes from the layer states the Layers tab shows (`layer_status`): every layer
+# hidden; a visible layer still loading, or one with an extent (the view places the camera in
+# its next frame); every visible layer failed (its item missing, or its load gave an error and
+# no data); else the data that came has no point to place (all values missing).
 function view_reason(app)
     mv, why = map_target(app)
     why === nothing || return why
     isempty(mv.layers) && return NEED_MAP_LAYERS
-    return last(shown_view(app)) === nothing ? MAP_LOADING : nothing
+    last(shown_view(app)) === nothing || return nothing
+    any(l -> l.visible, mv.layers) || return MAP_HIDDEN
+    snap, entries = app.snap, app.map.entries
+    failed = true
+    for l in mv.layers
+        l.visible || continue
+        st = layer_status(snap, mv, l, entries)
+        st.loading && return MAP_LOADING
+        layer_extent(get(entries, layer_key(snap, mv, l), nothing)) === nothing || return MAP_LOADING
+        failed &= st.failed
+    end
+    return failed ? MAP_FAILED : MAP_NO_DATA
 end
 
 function layer_reason(app)
@@ -97,6 +117,17 @@ end
 
 # Zoom to Layer: a selected layer, and a camera to move.
 zoom_layer_reason(app) = something(layer_reason(app), view_reason(app), Some(nothing))
+
+# Move Up and Move Down: a selected layer that is not at the top (or the bottom) already.
+function move_reason(app, up::Bool)
+    mv, why = map_target(app)
+    why === nothing || return why
+    k = findfirst(l -> l.id == app.ui.layer_selected, mv.layers)
+    k === nothing && return NEED_LAYER
+    up && k == length(mv.layers) && return LAYER_AT_TOP
+    !up && k == 1 && return LAYER_AT_BOTTOM
+    return nothing
+end
 
 function kind_reason(app, kind::Symbol)
     mv, why = map_target(app)
@@ -138,12 +169,15 @@ end
 """
     open_map!(app, id)
 
-Show map `id` in the central area. Another map's selected layer is no longer selected.
+Show map `id` in the central area. Another map's selected layer is no longer selected, and a
+live opacity of the map shown before goes.
 """
 function open_map!(app, id::AbstractString)
     app.ui.current_map == id && return nothing
     app.ui.current_map = String(id)
     app.ui.layer_selected = ""
+    app.ui.opacity_preview = nothing
+    app.ui.opacity_wait = -1
     return nothing
 end
 
@@ -249,6 +283,16 @@ function remove_selected_layer!(app)
     return nothing
 end
 
+# Move the selected layer one place up (it draws later) or down (it draws earlier).
+function move_selected_layer!(app, up::Bool)
+    move_reason(app, up) === nothing || return nothing
+    mv = shown_map(app)::MapView
+    k = something(findfirst(l -> l.id == app.ui.layer_selected, mv.layers))
+    m, id, to = mv.id, mv.layers[k].id, up ? k + 1 : k - 1
+    submit!(app, up ? "Move layer up" : "Move layer down", s -> Core.move_layer!(s, m, id, to))
+    return nothing
+end
+
 hillshade_on(app) = (mv = shown_map(app); l = mv === nothing ? nothing : toggle_target(app, mv, :grid);
     l !== nothing && grid_layer_style(app, l).shade)
 
@@ -343,6 +387,12 @@ function map_commands()::Vector{Command}
         Command("map.remove_layer", "Remove Layer", remove_selected_layer!;
             icon = "removeLayer", help = "Remove the selected layer from the map. The item stays in the project.",
             places = map_place("Map"), enabled = layer_reason),
+        Command("map.move_up", "Move Up", app -> move_selected_layer!(app, true);
+            icon = "up", help = "Move the selected layer up, so it draws later, over the layers below.",
+            where = "Layers", enabled = app -> move_reason(app, true)),
+        Command("map.move_down", "Move Down", app -> move_selected_layer!(app, false);
+            icon = "down", help = "Move the selected layer down, so it draws earlier, under the layers above.",
+            where = "Layers", enabled = app -> move_reason(app, false)),
         Command("map.full_extent", "Full Extent", full_extent_now!;
             label = "Full\nExtent", icon = "fullExtent", help = "Zoom to all layers of the map.", shortcut = "Home",
             places = map_place("Navigate", :big), enabled = view_reason),

@@ -273,7 +273,7 @@ function crs_info(code::String)::CrsInfo
     end
 end
 
-missing_text(it::Core.ProjectItem) = "The folder of $(it.name) is missing."
+missing_text(it::Union{Core.ProjectItem,ItemRow}) = "The folder of $(it.name) is missing."
 
 # The message for an item that cannot be read. Unlike `user_message` it does not log:
 # a broken item stays broken, and the snapshot is built again after every change.
@@ -478,7 +478,7 @@ What the UI shows and where, apart from the project data. Changed on the render 
 - `tab`: the ribbon tab; `backstage`, `backstage_page`: the Project page and its page;
   `bs`: what its pages keep (a `BackstageState`);
   `ribbon_peek`: a collapsed ribbon shown for a moment.
-- `left_tab`: `:data` or `:jobs`; `right_tabs`, `right_active`: the open right panes (such
+- `left_tab`: `:data`, `:layers` or `:jobs`; `right_tabs`, `right_active`: the open right panes (such
   as `:tools`) in the order they opened, and the one shown (`:none` when none is open).
 - `current_db`: the database item the Database tab acts on, or `""`.
 - `current_map`: the map item shown in the central area, or `""`. `first_map`: the next
@@ -488,6 +488,12 @@ What the UI shows and where, apart from the project data. Changed on the render 
 - `colour_bars`: the shown map draws a colour bar (legend) for each coloured layer.
 - `opacity_preview`: a live opacity `(layer id, opacity)` for one layer of the shown map,
   drawn before it is set on the layer (the Layers tab sets it while its slider moves), or `nothing`.
+  `opacity_wait`: after the slider's release, the edit is on the worker (0) or done at that
+  project revision (above 0); the preview stays until a snapshot has the edit, so the map
+  never shows the old opacity for a frame. -1: no edit pending (see `settle_opacity_preview!`).
+- `layers_scroll`: how far the Layers tab's list is scrolled, in device pixels.
+  `layer_boxes`: where the last frame drew each layer row of the Layers tab, by layer id, and
+  the selected layer's opacity slider (`"opacity"`), in device pixels (tests read it).
 - `selected`: `(kind, item id, sub key)` of the selection in the Data tree, where the sub
   key is a line or channel name or `""`; or `nothing`.
 - `expanded`: the keys of expanded tree nodes (see `row_key`); `filter`: the Data tree
@@ -552,6 +558,9 @@ Base.@kwdef mutable struct UiState
     layer_selected::String = ""
     colour_bars::Bool = true
     opacity_preview::Union{Nothing,Tuple{String,Float64}} = nothing
+    opacity_wait::Int = -1
+    layers_scroll::Float32 = 0f0
+    layer_boxes::Dict{String,Box} = Dict{String,Box}()
     selected::Union{Nothing,Tuple{Symbol,String,String}} = nothing
     expanded::Set{String} = Set{String}()
     filter::String = ""
@@ -728,6 +737,9 @@ function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     ms.plan_complete = false
     clear_image!(ms.renderer)
     ui.opacity_preview = nothing
+    ui.opacity_wait = -1
+    ui.layers_scroll = 0f0
+    empty!(ui.layer_boxes)
     ui.selected = nothing
     empty!(ui.expanded)
     ui.filter = ""

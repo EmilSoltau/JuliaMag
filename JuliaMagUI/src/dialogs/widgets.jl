@@ -110,22 +110,26 @@ end
 # --- Buttons ---
 
 """
-    combo!(app, id, b, text; icon = "", items, error = false) -> Bool
+    combo!(app, id, b, text; icon = "", items, error = false, owner = "dialog/" * id,
+           size = 12.5, min_width = width of b) -> Bool
 
 A prototype `.combo` in box `b`: `input` fill, 1 px `input_border` (`border_strong` and
 `hover` on hover), the value `text` (with a 14 px `icon`) elided before the caret. A click
-opens its menu of `items()` as wide as the combo, over the dialog; while it is open the
-frame has the `accent` ring (an `error` makes it red). Returns whether its menu is open.
+opens its menu of `items()`, at least `min_width` logical px wide (the combo's width), over
+the dialog; while it is open the frame has the `accent` ring (an `error` makes it red).
+`owner` names the menu; a combo outside a dialog passes its own. `size` is the text size:
+11.5 for a `.combo.small`. Returns whether its menu is open.
 """
 function combo!(app, id::AbstractString, b::Box, text::AbstractString; icon::AbstractString = "",
-        items::Function, error::Bool = false)
+        items::Function, error::Bool = false, owner::AbstractString = "dialog/" * id,
+        size::Real = BODY_FONT_SIZE, min_width::Union{Nothing,Real} = nothing)
     s = app.window.scale
     t = app.tokens
     f(v) = fpx(s, v)
     hl = hairline(s)
     dl = ig.GetWindowDrawList()
+    text_mid = centre_y(b)   # the text centres on the unrounded box, as Chrome's does
     b = snap(b)
-    owner = "dialog/" * id
     open = menu_open(app, owner)
     clicked, hovered, _ = hit(id, b)
     open && keep_menu!(app, owner, b; items = items())
@@ -145,10 +149,99 @@ function combo!(app, id::AbstractString, b::Box, text::AbstractString; icon::Abs
     end
     caret_x = b.x1 - hl - f(7 + 8)
     draw_caret(dl, caret_x, mid - f(5) / 2, s, u32(t.text_dim))
-    draw_text_mid(dl, FONT_REGULAR, BODY_FONT_SIZE, x, mid, u32(t.text),
-        elide(text_width, text, caret_x - f(6) - x))
-    clicked && toggle_menu!(app, owner, b, items; min_width = width(b) / s)
+    draw_text_mid(dl, FONT_REGULAR, size, x, text_mid, u32(t.text),
+        elide(text_width, text, caret_x - f(6) - x; size))
+    clicked && toggle_menu!(app, owner, b, items; min_width = something(min_width, width(b) / s))
     return menu_open(app, owner)
+end
+
+"""
+A drag of a `slider!`: its ImGui `id`, the value it is at, and whether Esc `cancelled` it.
+"""
+mutable struct SliderDrag
+    id::UInt32
+    value::Float64
+    cancelled::Bool
+end
+
+const SLIDER_THUMB = 12   # the prototype's range thumb; its track is 4 px high
+const SLIDER_VALUE_W = 34 # `.opac .v`, 8 px after the track
+
+"""
+    slider!(app, id, b, value, lo, hi; format = nothing, step = 0) -> (value, changed, released)
+
+A prototype `input[type=range]` across box `b`: a 4 px track with radius 2, `accent` up to
+the value and `well` after it, and a 12 px round thumb (`input`, a 1 px `border_strong` ring
+and a small shadow) whose centre runs from 6 px in to 6 px before the end. With `format`, the
+text `format(value)` sits at the right of `b` in a $(SLIDER_VALUE_W) px column (`text`,
+right-aligned), and the track ends 8 px before it, as the prototype's `.opac`.
+
+A press on the track puts the thumb there and a drag moves it. The value goes from `lo` to
+`hi`, rounded to `step` when it is above 0. Pass the stored value as `value`: it is drawn
+while no drag runs. During a drag the dragged value is returned, with `changed` in each
+frame it changes. Esc ends a drag at once: the value goes back to `value` (with `changed`),
+and the release then keeps it. `released` is true in the frame the mouse is let go after a
+drag, with the value of the drag.
+"""
+function slider!(app, id::AbstractString, b::Box, value::Real, lo::Real, hi::Real;
+        format::Union{Nothing,Function} = nothing, step::Real = 0)::Tuple{Float64,Bool,Bool}
+    s = app.window.scale
+    t = app.tokens
+    f(v) = fpx(s, v)
+    hl = hairline(s)
+    dl = ig.GetWindowDrawList()
+    ui = app.ui
+    track_x1 = format === nothing ? b.x1 : b.x1 - f(SLIDER_VALUE_W + 8)
+    area = Box(b.x0, b.y0, track_x1, b.y1)
+    _, _, held = hit(id, area)
+    key = ig.GetItemID()
+    span = Float64(hi) - Float64(lo)
+    run = max(width(area) - f(SLIDER_THUMB), 1f0)   # the thumb centre's travel
+    function at(x)
+        u = Float64(lo) + clamp((x - area.x0 - f(SLIDER_THUMB / 2)) / run, 0, 1) * span
+        return step > 0 ? clamp(round(u / step) * step, Float64(lo), Float64(hi)) : u
+    end
+    ig.IsItemActivated() && (ui.drag = SliderDrag(key, Float64(value), false))
+    cur = ui.drag
+    d = cur isa SliderDrag && cur.id == key ? cur : nothing   # this slider's drag, or `nothing`
+    changed = released = false
+    if held && d !== nothing && !d.cancelled
+        if ig.IsKeyPressed(lib.ImGuiKey_Escape, false)
+            d.cancelled = true
+            changed = d.value != value
+            d.value = Float64(value)
+        else
+            v = at(unsafe_load(ig.GetIO().MousePos).x)
+            changed = v != d.value
+            d.value = v
+        end
+    end
+    if ig.IsItemDeactivated() && d !== nothing
+        released = true
+        ui.drag = nothing
+    end
+    shown = d === nothing ? Float64(value) : d.value
+
+    frac = span == 0 ? 0f0 : Float32(clamp((shown - lo) / span, 0, 1))
+    mid = centre_y(area)
+    track = snap(Box(area.x0, mid - f(2), area.x1, mid + f(2)))
+    ig.AddRectFilled(dl, (track.x0, track.y0), (track.x1, track.y1), u32(t.well), f(2))
+    fill_x = rnd(track.x0 + frac * width(track))
+    fill_x > track.x0 && ig.AddRectFilled(dl, (track.x0, track.y0), (fill_x, track.y1), u32(t.accent), f(2),
+        Int(fill_x >= track.x1 ? lib.ImDrawFlags_RoundAll : lib.ImDrawFlags_RoundLeft))
+    cx = area.x0 + f(SLIDER_THUMB / 2) + frac * run
+    r = f(SLIDER_THUMB / 2)
+    thumb = Box(cx - r, mid - r, cx + r, mid + r)
+    draw_shadow(dl, thumb, r, f(1), f(2), t.shadow)
+    ig.AddCircleFilled(dl, (cx, mid), r, u32(t.input), 32)
+    # Stroked on its centre line, so the ring is the outer 1 px of the thumb, as a CSS border.
+    ig.AddCircle(dl, (cx, mid), r - hl / 2, u32(t.border_strong), 32, hl, Int(lib.ImDrawFlags_StrokeCenter))
+    if format !== nothing
+        text = format(shown)
+        tw = text_width(FONT_REGULAR, 11.5, text)
+        draw_text_mid(dl, FONT_REGULAR, 11.5, b.x1 - tw, mid, u32(t.text), text)
+    end
+    return shown, changed, released
 end
 
 """

@@ -351,7 +351,7 @@ end
 
 """
     button(app, id, label, x, y; primary = false, small = false, link = false, enabled = true,
-           busy = false, alpha = 1, dl = window draw list) -> Bool
+           busy = false, dim = false, alpha = 1, dl = window draw list) -> Bool
 
 A prototype `.btn` at `(x, y)`: 26 high (22 when `small`), radius 6 (5), 1 px
 `input_border` on `input`; `hover` and `border_strong` on hover, `pressed` when held.
@@ -359,11 +359,12 @@ A `primary` button is `accent` with semibold `on_accent` text; it is lighter on 
 half transparent when disabled. A `link` button (`.btn.link`) has no frame and no fill,
 `accent_text` text and 6 px padding; it shows `hover` (`pressed` when held) under the mouse.
 A `busy` button keeps its width, shows a spinner in place of its label and takes no clicks.
+A `dim` button has `text_dim` text, as a button in the prototype's `.empty` state.
 Returns true when clicked while enabled.
 """
 function button(app, id::AbstractString, label::AbstractString, x::Real, y::Real;
         primary::Bool = false, small::Bool = false, link::Bool = false, enabled::Bool = true,
-        busy::Bool = false, alpha::Real = 1, dl = ig.GetWindowDrawList())::Bool
+        busy::Bool = false, dim::Bool = false, alpha::Real = 1, dl = ig.GetWindowDrawList())::Bool
     w = app.window::Window
     t = app.tokens
     s = w.scale
@@ -388,7 +389,7 @@ function button(app, id::AbstractString, label::AbstractString, x::Real, y::Real
     end
     size = small ? 11.5 : BODY_FONT_SIZE
     role = primary ? FONT_SEMIBOLD : FONT_REGULAR
-    col = primary ? t.on_accent : !enabled ? t.text_disabled : link ? t.accent_text : t.text
+    col = primary ? t.on_accent : !enabled ? t.text_disabled : link ? t.accent_text : dim ? t.text_dim : t.text
     if busy
         draw_spinner(app, dl, (b.x0 + b.x1) / 2, centre_y(b); col = primary ? t.on_accent : t.accent)
         request_frames!(w)   # the spinner turns
@@ -420,7 +421,7 @@ function icon_button(app, id::AbstractString, icon::AbstractString, b::Box; size
             u32(held ? app.tokens.pressed : app.tokens.hover, alpha), px(s, radius))
     end
     d = px(s, size)
-    draw_icon(dl, icon, (b.x0 + (width(b) - d) / 2, b.y0 + (height(b) - d) / 2), size;
+    draw_icon(dl, icon, (rnd(b.x0 + (width(b) - d) / 2), rnd(b.y0 + (height(b) - d) / 2)), size;
         style = enabled ? style : :disabled, alpha)
     return clicked && enabled, hovered
 end
