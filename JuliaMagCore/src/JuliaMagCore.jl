@@ -12,6 +12,7 @@ include("storage/atomic.jl")
 include("storage/database.jl")
 include("storage/grid.jl")
 include("project/project.jl")
+include("map/map_item.jl")
 include("jobs/job.jl")
 include("session/lock.jl")
 include("session/session.jl")
@@ -41,6 +42,7 @@ include("crs/crs.jl")
 include("builtin/coordinates.jl")
 include("builtin/channel_math.jl")
 include("builtin/grid_properties.jl")
+include("session/map_edits.jl")
 include("builtin/statistics.jl")
 
 export LineType, LINE, TIE, BASE, TEST, TREND, SPECIAL, RANDOM
@@ -88,6 +90,8 @@ export valid_crs, crs_name, crs_from_wkt, crs_from_name, crs_wkt, guess_utm, rep
 public crs_axis_unit, deactivate_settings, PROJECT_FILE
 export parse_channel_expr, ChannelStats, channel_stats, grid_stats
 export set_grid_crs!, set_grid_georef!, set_grid_style!
+export LayerStyle, MapLayer, MapItem, MapError, MAP_FILE, create_map, open_map, save_map, map_item
+export default_colour_channel, new_map!, add_layer!, remove_layer!, move_layer!, set_layer!
 
 # The one `__init__` of the package. Each part that needs setup when the
 # package loads gets a named function, called from here.

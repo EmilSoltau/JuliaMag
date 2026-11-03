@@ -122,7 +122,8 @@ const CORE_COMMANDS = ("database.set_cell", "database.set_line_selected", "sessi
                        "grid.set_georef", "grid.set_style", "project.remove_item", "project.rename_item",
                        "database.set_channel_protected", "database.rename_channel", "database.delete_channel",
                        "database.set_channel_info", "database.set_lines_selected", "database.add_pair",
-                       "database.remove_pair")
+                       "database.remove_pair", "map.new", "map.add_layer", "map.remove_layer", "map.move_layer",
+                       "map.set_layer")
 
 # True for an entry of `set_grid_crs!`: `"grid.set_grid_crs"`. History files from
 # before that name wrote it as `"grid.set_crs"` with an `"item"` and no `"inputs"`;
@@ -143,6 +144,7 @@ function bind_items(command::String, args::AbstractDict, vars::AbstractDict)::Di
     isempty(vars) && return a
     ref(x) = x isa AbstractString && haskey(vars, x) ? ScriptVar(vars[x]) : x
     haskey(a, "item") && (a["item"] = ref(a["item"]))
+    haskey(a, "source") && (a["source"] = ref(a["source"]))
     ins = get(a, "inputs", nothing)
     ins isa AbstractDict && (a["inputs"] = Dict{String,Any}(String(k) => ref(v) for (k, v) in ins))
     for st in command_settings(command)
@@ -185,6 +187,19 @@ function command_text(c::String, args::AbstractDict, vars::AbstractDict)::String
         return "set_grid_georef!(s, $(literal(a["item"])); $kw)"
     elseif c == "grid.set_style"
         return "set_grid_style!(s, $(literal(a["item"])), $(style_text(a)))"
+    elseif c == "map.new"
+        return "new_map!(s; name = $(literal(a["name"])))"
+    elseif c == "map.add_layer"
+        # A blank channel is the default of a database, and none for a grid.
+        ch = get(a, "channel", "")
+        kw = isempty(ch) ? "" : "; channel = $(literal(ch))"
+        return "add_layer!(s, $(literal(a["item"])), $(literal(a["source"]))$kw)"
+    elseif c == "map.remove_layer"
+        return "remove_layer!(s, $(literal(a["item"])), $(literal(a["layer"])))"
+    elseif c == "map.move_layer"
+        return "move_layer!(s, $(literal(a["item"])), $(literal(a["layer"])), $(literal(a["position"])))"
+    elseif c == "map.set_layer"
+        return "set_layer!(s, $(literal(a["item"])), $(literal(a["layer"])); $(set_layer_text(a)))"
     elseif c == "project.remove_item"
         return "remove_item!(s, $(literal(a["item"])))"
     elseif c == "project.rename_item"
@@ -223,6 +238,31 @@ Throws `ArgumentError` for args that cannot be written (see `script_text`).
 """
 script_call(command::AbstractString, args::AbstractDict)::String =
     command_text(String(command), args, Dict{String,String}())
+
+"""
+The keywords of a `"map.set_layer"` entry, sorted. A style becomes `LayerStyle(...)` with all
+its fields as keywords, sorted. Numbers are written as `Float64` and names as symbols.
+"""
+function set_layer_text(a::AbstractDict)::String
+    parts = String[]
+    for k in sort!([String(k) for k in keys(a) if !(k in ("item", "layer"))])
+        v = a[k]
+        text = if k == "style"
+            fields = String[]
+            for (f, T) in sort!(collect(zip(fieldnames(LayerStyle), fieldtypes(LayerStyle))); by = first)
+                x = v[String(f)]
+                push!(fields, "$f = " * (T === Symbol ? repr(Symbol(x)) : repr(T(x))))
+            end
+            "LayerStyle(" * join(fields, ", ") * ")"
+        elseif k == "opacity"
+            repr(Float64(v))
+        else
+            literal(v)
+        end
+        push!(parts, "$(kwname(k)) = $text")
+    end
+    return join(parts, ", ")
+end
 
 "The keywords of a `\"database.set_channel_info\"` entry, sorted. `format` is written as a symbol."
 function channel_info_text(a::AbstractDict)::String
@@ -299,8 +339,14 @@ function script_text(s::Session)::String
                 # A quick tool returns `(ok, message, outputs)`, not a job.
                 quick = isempty(e.job) && is_tool_call(e.command, e.args) && !is_import(e.command, e.args) &&
                         !is_export(e.command, e.args)
+                # A core command with outputs returns the item id (or ids) itself.
+                core = isempty(e.job) && e.command in CORE_COMMANDS
                 outs = quick ? "$line[3]" : "$line.outputs"
-                println(io, length(names) == 1 ? "$(only(names)) = only($outs)" : "$(join(names, ", ")) = $outs")
+                if core
+                    println(io, join(names, ", "), " = ", line)
+                else
+                    println(io, length(names) == 1 ? "$(only(names)) = only($outs)" : "$(join(names, ", ")) = $outs")
+                end
             end
             for id in e.replaced
                 println(io, "remove_item!(s, ", haskey(vars, id) ? vars[id] : repr(id), ")")

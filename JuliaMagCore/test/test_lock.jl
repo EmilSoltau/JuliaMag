@@ -239,7 +239,7 @@ end
             @test !JuliaMagCore.create_lock(path, b, String[])
             rm(path)
             @test JuliaMagCore.take_over!(path, raw, folder) === nothing   # gone: nothing to clear
-            @test readdir(folder) == sort(["databases", "grids", "jobs", "templates", "project.jmag.json"])
+            @test readdir(folder) == sort(["databases", "grids", "jobs", "maps", "templates", "project.jmag.json"])
         end
     end
 
