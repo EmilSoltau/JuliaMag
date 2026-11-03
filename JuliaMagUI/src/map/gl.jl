@@ -70,6 +70,8 @@ end
 A layer on the GPU: its `key` (the caller's), the data and its `version` when it was queued,
 its levels, its look-up and equalization table textures with the values they hold, and
 `error` (`GL_ROOM_TEXT` after a failed upload; then it holds no GL objects and draws nothing).
+`remaining` counts the uploads still to do. `previous` is the layer it replaces under the same
+key: that one is fully up and draws instead, until this one is fully up too; then it is freed.
 """
 mutable struct GlLayer
     key::Any
@@ -82,6 +84,8 @@ mutable struct GlLayer
     table::UInt32
     lut_bytes::Vector{UInt8}
     table_values::Vector{Float32}
+    remaining::Int
+    previous::Union{Nothing,GlLayer}
 end
 
 "One upload: batch or tile `item` (a linear tile index) of level `level` (an index into `lines` or `grids`)."
@@ -299,12 +303,32 @@ end
 "The error of the GPU layer of `key`: `\"\"` when it has none or is not there."
 layer_error(r::GlMap, key)::String = (g = gl_layer(r, key); g === nothing ? "" : g.error)
 
-# The GPU layer that holds this build of `data`, or `nothing`.
+holds(g::GlLayer, data)::Bool = g.data === data && g.version == data.version
+
+# The GPU layer to draw for this build of `data`, or `nothing`. While a new layer is still
+# going up, the one it replaces draws; it may hold other data (an older build).
 function find_layer(r::GlMap, data)::Union{Nothing,GlLayer}
     for g in r.layers
-        (g.data === data && g.version == data.version) && return g
+        p = g.previous
+        holds(g, data) && return (g.remaining > 0 && p !== nothing) ? p : g
+        (p !== nothing && holds(p, data)) && return p
     end
     return nothing
+end
+
+"""
+    gpu_uses(r, data) -> Bool
+
+Does a GPU layer, current or the one it replaces, still draw from the object `data`? While it
+does, the object must not be built into (a line layer needs its levels to draw).
+"""
+function gpu_uses(r::GlMap, data)::Bool
+    for g in r.layers
+        g.data === data && return true
+        p = g.previous
+        (p !== nothing && p.data === data) && return true
+    end
+    return false
 end
 
 # The batches of a line level: whole parts up to `max_points` each.
@@ -334,12 +358,14 @@ end
     queue_uploads!(r, key, data)
 
 Queue the uploads of a line layer's batches or a grid layer's tiles, coarsest level first,
-as the layer `key`. A layer already there under `key` is freed first. Data with no levels
-queues nothing. No GL calls; `upload_step!` does them.
+as the layer `key`. A layer already under `key` that is fully up keeps drawing until the new
+one is fully up, and is freed then; one that was still going up is freed now (the layer it
+replaced keeps drawing). Data with no levels queues nothing. No GL calls but frees; `upload_step!`
+does the uploads.
 """
 function queue_uploads!(r::GlMap, key, data::Union{LineLayerData,GridLayerData})
-    free_layer!(r, key)
-    g = GlLayer(key, data, data.version, "", GlLineLevel[], GlGridLevel[], 0, 0, UInt8[], Float32[])
+    keep = take_drawn!(r, key)
+    g = GlLayer(key, data, data.version, "", GlLineLevel[], GlGridLevel[], 0, 0, UInt8[], Float32[], 0, keep)
     push!(r.layers, g)
     if data isa LineLayerData
         for lv in data.levels
@@ -356,6 +382,32 @@ function queue_uploads!(r::GlMap, key, data::Union{LineLayerData,GridLayerData})
             push!(r.pending, Upload(g, k, t))
         end
     end
+    g.remaining = count(u -> u.layer === g, r.pending)
+    g.remaining == 0 && free_previous!(r, g)
+    return nothing
+end
+
+# Take the layer under `key` out of the list. Return the one that is fully up and can draw
+# until a new one is (`nothing` if none); free the rest.
+function take_drawn!(r::GlMap, key)::Union{Nothing,GlLayer}
+    old = gl_layer(r, key)
+    old === nothing && return nothing
+    filter!(x -> x !== old, r.layers)
+    if isempty(old.error) && old.remaining == 0
+        free_previous!(r, old)
+        return old
+    end
+    keep = old.previous
+    old.previous = nothing
+    free_layer_objects!(r, old)
+    return keep
+end
+
+function free_previous!(r::GlMap, g::GlLayer)
+    p = g.previous
+    p === nothing && return nothing
+    free_layer_objects!(r, p)
+    g.previous = nothing
     return nothing
 end
 
@@ -374,7 +426,12 @@ function upload_step!(r::GlMap)
         (isempty(g.error) && g.version == g.data.version) || continue
         clear_gl_errors()
         ok = g.data isa LineLayerData ? upload_batch!(r, g, u.level, u.item) : upload_tile!(r, g, u.level, u.item)
-        ok || fail_layer!(r, g)
+        if ok
+            g.remaining -= 1
+            g.remaining == 0 && free_previous!(r, g)
+        else
+            fail_layer!(r, g)
+        end
         return nothing
     end
     return nothing
@@ -402,7 +459,9 @@ function upload_batch!(r::GlMap, g::GlLayer, k::Int, b::Int)::Bool
         buf[3i] = lv.v[s+i]
     end
     vbo = gl_gen(GL.glGenBuffers)
+    gll.vbos[b] = vbo   # freed with the layer if the upload fails
     vao = gl_gen(GL.glGenVertexArrays)
+    gll.vaos[b] = vao
     GL.glBindVertexArray(vao)
     GL.glBindBuffer(GL.GL_ARRAY_BUFFER, vbo)
     GL.glBufferData(GL.GL_ARRAY_BUFFER, sizeof(buf), buf, GL.GL_STATIC_DRAW)
@@ -412,7 +471,6 @@ function upload_batch!(r::GlMap, g::GlLayer, k::Int, b::Int)::Bool
     GL.glEnableVertexAttribArray(1)
     GL.glBindVertexArray(0)
     GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
-    gll.vaos[b], gll.vbos[b] = vao, vbo   # freed with the layer when the upload failed
     upload_error(r) == GL.GL_NO_ERROR || return false
     gll.uploaded += 1
     r.uploaded_last_frame = sizeof(buf)
@@ -422,8 +480,7 @@ end
 function upload_tile!(r::GlMap, g::GlLayer, k::Int, t::Int)::Bool
     d = g.data::GridLayerData
     cells = d.levels[k].tiles[t]
-    n = size(cells, 1)
-    n <= gl_max_texture_size() || return false
+    maximum(size(cells)) <= gl_max_texture_size() || return false
     tex = gl_gen(GL.glGenTextures)
     g.grids[k].textures[t] = tex
     GL.glActiveTexture(GL.GL_TEXTURE0)
@@ -431,7 +488,7 @@ function upload_tile!(r::GlMap, g::GlLayer, k::Int, t::Int)::Bool
     set_texture_params!(GL.GL_NEAREST)
     GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 4)
     GL.glPixelStorei(GL.GL_UNPACK_ROW_LENGTH, 0)
-    GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_R32F, n, size(cells, 2), 0, GL.GL_RED, GL.GL_FLOAT, cells)
+    GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_R32F, size(cells, 1), size(cells, 2), 0, GL.GL_RED, GL.GL_FLOAT, cells)
     GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
     upload_error(r) == GL.GL_NO_ERROR || return false
     g.grids[k].uploaded += 1
@@ -465,6 +522,7 @@ function free_layer_objects!(r::GlMap, g::GlLayer)
 end
 
 function fail_layer!(r::GlMap, g::GlLayer)
+    free_previous!(r, g)
     free_layer_objects!(r, g)
     g.error = GL_ROOM_TEXT
     return nothing
@@ -478,6 +536,7 @@ Delete the GL objects of the layer `key` and forget it. Render thread only.
 function free_layer!(r::GlMap, key)
     g = gl_layer(r, key)
     g === nothing && return nothing
+    free_previous!(r, g)
     free_layer_objects!(r, g)
     filter!(x -> x !== g, r.layers)
     return nothing
@@ -491,6 +550,7 @@ Render thread only.
 """
 function free_all!(r::GlMap)
     for g in r.layers
+        free_previous!(r, g)
         free_layer_objects!(r, g)
     end
     empty!(r.layers)
@@ -555,6 +615,8 @@ function resize_colour!(r::GlMap, w::Int, h::Int)
     GL.glBindTexture(GL.GL_TEXTURE_2D, r.colour)
     GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGBA8, w, h, 0, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, C_NULL)
     GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+    err = GL.glGetError()
+    err == GL.GL_NO_ERROR || error("The map image of $w by $h pixels could not be made: " * gl_error_text(err) * ".")
     r.width, r.height = w, h
     return nothing
 end
@@ -643,13 +705,15 @@ function ready_level(levels::Vector{T}, want::Int)::Int where {T<:Union{GlLineLe
 end
 
 function draw_gl_layer!(r::GlMap, sc::Scene, l::LineDraw)
-    d = l.data
-    (1 <= l.level <= length(d.levels) && length(l.lut) >= 1024) || return nothing
-    g = find_layer(r, d)
+    length(l.lut) >= 1024 || return nothing
+    g = find_layer(r, l.data)
     (g === nothing || !isempty(g.error)) && return nothing
-    k = ready_level(g.lines, l.level)
-    k == 0 && return nothing
+    d = g.data::LineLayerData   # the layer's own data: a replaced one draws its old build
     w, h = sc.width, sc.height
+    want = d === l.data ? l.level : choose_level(d, sc.camera, w, h)
+    (1 <= want <= length(d.levels)) || return nothing
+    k = ready_level(g.lines, want)
+    k == 0 && return nothing
     draw_list!(r.firsts, r.counts, d, k, sc.camera, w, h)
     isempty(r.firsts) && return nothing
     u = r.line_u
@@ -707,11 +771,13 @@ function multi_draw!(gl::GlLineLevel, b::Int, bf::Vector{Int32}, bc::Vector{Int3
 end
 
 function draw_gl_layer!(r::GlMap, sc::Scene, gd::GridDraw)
-    d = gd.data
-    (0 <= gd.level < length(d.levels) && length(gd.lut) >= 1024) || return nothing
-    g = find_layer(r, d)
+    length(gd.lut) >= 1024 || return nothing
+    g = find_layer(r, gd.data)
     (g === nothing || !isempty(g.error)) && return nothing
-    k = ready_level(g.grids, gd.level + 1)
+    d = g.data::GridLayerData   # the layer's own data: a replaced one draws its old build
+    want = d === gd.data ? gd.level : grid_level(d, sc.camera.res)
+    (0 <= want < length(d.levels)) || return nothing
+    k = ready_level(g.grids, want + 1)
     k == 0 && return nothing
     geo, lv, tile = d.geo, d.levels[k], d.tile
     f = 2.0^(k - 1)
@@ -720,7 +786,6 @@ function draw_gl_layer!(r::GlMap, sc::Scene, gd::GridDraw)
     GL.glUseProgram(r.grid_prog)
     bind_colours!(g, gd.lut, gd.table, LUT_UNIT_GRID, TABLE_UNIT_GRID)
     set_colour_uniforms!(u, gd.lo, gd.hi, gd.table, gd.opacity, gl_transform(sc.camera, (geo.x0, geo.y0), sc.width, sc.height))
-    GL.glUniform1i(u.last, tile + 1)
     GL.glUniform1i(u.nearest, gd.nearest ? 1 : 0)
     GL.glUniform1i(u.shade, gd.shade ? 1 : 0)
     GL.glUniform2f(u.cell_size, Float32(geo.dx * f), Float32(geo.dy * f))
@@ -743,6 +808,7 @@ function draw_gl_layer!(r::GlMap, sc::Scene, gd::GridDraw)
         end
         GL.glUniform2fv(u.corner, 4, corners)
         GL.glUniform4f(u.cells, 0.5f0, 0.5f0, Float32(ni + 0.5), Float32(nj + 0.5))
+        GL.glUniform2i(u.last, ni + 1, nj + 1)
         GL.glBindTexture(GL.GL_TEXTURE_2D, textures[ti, tj])
         GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
     end

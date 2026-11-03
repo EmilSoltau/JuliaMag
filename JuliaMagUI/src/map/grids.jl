@@ -18,8 +18,9 @@ GridGeo(g::Core.Grid) = GridGeo(g.nx, g.ny, g.x0, g.y0, g.dx, g.dy, g.rotation)
 
 """
 One level of a grid: `nx` by `ny` cells (halves of the level below, rounded up). Tile
-`(ti, tj)` is `(tile + 2)` by `(tile + 2)` values: its cells with a 1-cell border from the
-neighbours at the same level, `NaN` outside the grid.
+`(ti, tj)` holds the `ni` by `nj` cells of the level inside it (at most `tile` each way) with a
+1-cell border from the neighbours at the same level, `NaN` outside the grid: `(ni + 2)` by
+`(nj + 2)` values (`tile_size`). So a small coarse level has small tiles.
 """
 mutable struct GridLevel
     k::Int
@@ -66,11 +67,18 @@ function grid_extent(geo::GridGeo)::NTuple{4,Float64}
     return (minimum(xs), minimum(ys), maximum(xs), maximum(ys))
 end
 
-# The tile matrix of a level, reusing the old tiles when the sizes fit.
-function level_tiles(old::Union{Nothing,GridLevel}, nti::Int, ntj::Int, tile::Int)::Matrix{Matrix{Float32}}
-    size_ok = old !== nothing && size(old.tiles) == (nti, ntj) && all(t -> size(t) == (tile + 2, tile + 2), old.tiles)
-    size_ok && return old.tiles
-    return [Matrix{Float32}(undef, tile + 2, tile + 2) for _ in 1:nti, _ in 1:ntj]
+# The values along one side of tile `t` of a level with `n` cells that way: its cells plus the border.
+tile_size(n::Int, t::Int, tile::Int)::Int = min(tile, n - (t - 1) * tile) + 2
+
+# The tile matrix of a level of `nx` by `ny` cells, reusing the old tiles when every size fits.
+function level_tiles(old::Union{Nothing,GridLevel}, nx::Int, ny::Int, tile::Int)::Matrix{Matrix{Float32}}
+    nti, ntj = cld(nx, tile), cld(ny, tile)
+    if old !== nothing && size(old.tiles) == (nti, ntj)
+        tiles = old.tiles
+        all(t -> size(tiles[t]) == (tile_size(nx, t[1], tile), tile_size(ny, t[2], tile)), CartesianIndices(tiles)) &&
+            return tiles
+    end
+    return [Matrix{Float32}(undef, tile_size(nx, ti, tile), tile_size(ny, tj, tile)) for ti in 1:nti, tj in 1:ntj]
 end
 
 # The band buffer with `n` rows: one of the kept buffers, or a new one added to them.
@@ -100,11 +108,11 @@ function cut_band!(tiles::Matrix{Matrix{Float32}}, tj::Int, band::Matrix{Float32
     n = size(band, 2)
     Threads.@threads for ti in 1:nti
         t = tiles[ti, tj]
-        @inbounds for b in 1:tile+2
+        @inbounds for b in axes(t, 2)
             j = (tj - 1) * tile + b - 1
             row = j - r1 + 1
             rowok = 1 <= j <= ny && 1 <= row <= n
-            for a in 1:tile+2
+            for a in axes(t, 1)
                 i = (ti - 1) * tile + a - 1
                 t[a, b] = rowok && 1 <= i <= nx ? band[i, row] : NaN32
             end
@@ -138,9 +146,9 @@ function cut_level!(lv::Matrix{Matrix{Float32}}, nx::Int, ny::Int, below::GridLe
         ti = (idx - 1) % nti + 1
         tj = (idx - 1) ÷ nti + 1
         t = lv[ti, tj]
-        @inbounds for b in 1:tile+2
+        @inbounds for b in axes(t, 2)
             j = (tj - 1) * tile + b - 1
-            for a in 1:tile+2
+            for a in axes(t, 1)
                 i = (ti - 1) * tile + a - 1
                 if 1 <= i <= nx && 1 <= j <= ny
                     i2, j2 = 2i - 1, 2j - 1
@@ -240,10 +248,10 @@ function build_grid_layer!(d::GridLayerData, read_band!::F, geo::GridGeo; tile::
     (geo.nx > 0 && geo.ny > 0) || throw(ArgumentError("a grid needs at least one cell in each direction"))
     d.tile != tile && (empty!(d.levels); empty!(d.bands))
     nx, ny = geo.nx, geo.ny
-    nti, ntj = cld(nx, tile), cld(ny, tile)
+    ntj = cld(ny, tile)
     isempty(d.bands) || size(d.bands[1], 1) == nx || empty!(d.bands)
     levels = d.levels
-    tiles = level_tiles(isempty(levels) ? nothing : levels[1], nti, ntj, tile)
+    tiles = level_tiles(isempty(levels) ? nothing : levels[1], nx, ny, tile)
     for tj in 1:ntj
         r1 = max(1, (tj - 1) * tile)
         r2 = min(ny, tj * tile + 1)
@@ -256,8 +264,7 @@ function build_grid_layer!(d::GridLayerData, read_band!::F, geo::GridGeo; tile::
     while nx > 1 || ny > 1
         k = nlev
         nx, ny = cld(nx, 2), cld(ny, 2)
-        nti, ntj = cld(nx, tile), cld(ny, tile)
-        lv = level_tiles(length(levels) > k ? levels[k+1] : nothing, nti, ntj, tile)
+        lv = level_tiles(length(levels) > k ? levels[k+1] : nothing, nx, ny, tile)
         cut_level!(lv, nx, ny, levels[k], tile)
         set_level!(levels, k + 1, nx, ny, lv)
         nlev += 1

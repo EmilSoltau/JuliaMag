@@ -106,6 +106,23 @@ build(A, geo; tile) = build_grid_layer!(GridLayerData(), band_reader(A), geo; ti
         @test dn.extent == (9.0, 19.0, 23.0, 29.0)
     end
 
+    @testset "a tile holds only its cells and the border" begin
+        # With the default TILE a 600 by 400 grid is one tile per level, each as small as its level.
+        R = noise(600, 400, 3.0)
+        dt = build_grid_layer!(GridLayerData(), band_reader(R), GridGeo(600, 400, 0.0, 0.0, 1.0, 1.0, 0.0))
+        @test dt.tile == UI.TILE
+        @test [size(only(l.tiles)) for l in dt.levels] == [(l.nx + 2, l.ny + 2) for l in dt.levels]
+        @test size(only(dt.levels[end].tiles)) == (3, 3)
+        # All levels together: the data, a third more for the coarse levels, and the borders. Bound: 1.4 times the data.
+        bytes = sum(sizeof(t) for l in dt.levels for t in l.tiles)
+        @test bytes < 1.4 * sizeof(R)
+        @test isequal(level_matrix(dt, 0), R)
+        # Edge tiles of a level with several tiles are cut to the level
+        ds = build(noise(37, 29, 7.0), GridGeo(37, 29, 0.0, 0.0, 1.0, 1.0, 0.0); tile = 4)
+        @test size(ds.levels[1].tiles) == (10, 8)
+        @test size(ds.levels[1].tiles[1, 1]) == (6, 6) && size(ds.levels[1].tiles[10, 8]) == (3, 3)
+    end
+
     @testset "rebuilding reuses the tiles" begin
         t = d.levels[1].tiles[1, 1]
         build_grid_layer!(d, band_reader(A), geo; tile = 2)
@@ -116,6 +133,9 @@ build(A, geo; tile) = build_grid_layer!(GridLayerData(), band_reader(A), geo; ti
         rd = (buf, j1) -> copyto!(buf, view(R, :, j1:j1+size(buf, 2)-1))   # does not allocate itself
         g = GridGeo(300, 200, 0.0, 0.0, 1.0, 1.0, 0.0)
         build_grid_layer!(dr, rd, g; tile = 64)
+        # @allocated counts what finalizers allocate when a GC runs inside it. Collect first, so
+        # garbage from earlier tests (sessions, files, images) is not finalized in the measurement.
+        GC.gc()
         bytes = @allocated build_grid_layer!(dr, rd, g; tile = 64)
         @test bytes < 16 * 1024 + 10 * 1024 * Threads.nthreads()
         @test isequal(level_matrix(dr, 0), R)

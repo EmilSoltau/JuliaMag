@@ -188,10 +188,12 @@ window_testset("map GL pass") do
                     thrown[] = true
                 end
                 state[] = (gl_int(GL.GL_FRAMEBUFFER_BINDING), gl_viewport(), (0, 0, fb...),
-                           gl_int(GL.GL_CURRENT_PROGRAM), gl_int(GL.GL_VERTEX_ARRAY_BINDING))
+                           gl_int(GL.GL_CURRENT_PROGRAM), gl_int(GL.GL_VERTEX_ARRAY_BINDING),
+                           gl_int(GL.GL_ACTIVE_TEXTURE), gl_int(GL.GL_TEXTURE_BINDING_2D), gl_int(GL.GL_ARRAY_BUFFER_BINDING))
             end)
             @test thrown[] && !r.throw_in_draw
             @test state[][1] == 0 && state[][2] == state[][3] && state[][4] == 0 && state[][5] == 0
+            @test state[][6] == GL.GL_TEXTURE0 && state[][7] == 0 && state[][8] == 0
         end
 
         @testset "no allocation while drawing, and one texture id when the size changes" begin
@@ -204,6 +206,7 @@ window_testset("map GL pass") do
                 for _ in 1:3
                     tex[] = gl_draw!(r, sc)
                 end
+                GC.gc()   # no finalizers of earlier garbage inside the measurement
                 bytes[] = draw_allocated(r, sc)
             end, ctx)
             @test bytes[] == 0
@@ -257,6 +260,64 @@ window_testset("map GL pass") do
             gl = UI.gl_layer(r, "tiles")
             @test [l.uploaded for l in gl.grids] == [k == length(g.levels) ? 1 : 0 for k in eachindex(g.levels)]
             gl_run(w -> free_layer!(r, "tiles"), ctx)
+
+            # With the default TILE each level is one tile as small as the level: the coarsest
+            # tile is 3 by 3 values, and all tiles together are under 1.4 times the grid's values.
+            gd = parity_grid(; tile = UI.TILE)
+            queue_uploads!(r, "default", gd)
+            sizes = Int[]
+            while !isempty(r.pending)
+                gl_run(w -> upload_step!(r), ctx)
+                push!(sizes, r.uploaded_last_frame)
+            end
+            @test first(sizes) == 3 * 3 * 4
+            @test sum(sizes) == sum(sizeof(t) for l in gd.levels for t in l.tiles)
+            @test sum(sizes) < 1.4 * 4 * 600 * 400
+            gl_run(w -> free_layer!(r, "default"), ctx)
+        end
+
+        @testset "a new build draws the old one until it is fully up: $kind" for kind in (:grid, :lines)
+            w, h = 300, 200
+            cam = Camera(500_000.0 + 7500.0, 7_000_000.0 + 5000.0, 52.0)
+            # A fixed style, so both builds draw with the same colours.
+            draw(d::GridLayerData) = GridDraw(d, grid_level(d, cam.res), GEOSOFT, 0f0, 40f0, nothing, 1f0, true,
+                                              Float32.(Core.sun_vector(45, 45)), 1f0, false)
+            draw(d::LineLayerData) = LineDraw(d, choose_level(d, cam, w, h), TURBO, -1f0, 1f0, nothing, (0x20, 0x20, 0x20, 0xff), 1f0)
+            if kind == :grid
+                a = parity_grid()
+                shifted = 20f0 .+ UI.level_matrix(a, 0)
+                b = build_grid_layer!(GridLayerData(), (buf, j1) -> (buf .= view(shifted, :, j1:j1+size(buf, 2)-1); buf),
+                                      a.geo; tile = a.tile)
+            else
+                a = parity_lines()
+                b = parity_lines()
+                b.points.value .*= -1f0
+                build_line_layer!(b, b.points)
+            end
+            queue_uploads!(r, "hand", a)
+            upload_all!(ctx, r)
+            img_a = Ref{Matrix{UInt32}}()
+            gl_run(win -> (gl_draw!(r, parity_scene(cam, w, h, [draw(a)])); img_a[] = read_texture(r)), ctx)
+
+            queue_uploads!(r, "hand", b)
+            @test UI.gpu_uses(r, a) && UI.gpu_uses(r, b)
+            sc_b = parity_scene(cam, w, h, [draw(b)])
+            frames = Tuple{Bool,Matrix{UInt32}}[]
+            while !isempty(r.pending)
+                gl_run(win -> begin
+                    upload_step!(r)
+                    gl_draw!(r, sc_b)
+                    push!(frames, (UI.gl_layer(r, "hand").remaining == 0, read_texture(r)))
+                end, ctx)
+            end
+            img_b = Ref{Matrix{UInt32}}()
+            gl_run(win -> (gl_draw!(r, sc_b); img_b[] = read_texture(r)), ctx)
+            @test img_b[] != img_a[]
+            @test count(f -> !f[1], frames) >= (kind == :grid ? 5 : 1)   # frames while b goes up
+            @test all(f -> f[2] == (f[1] ? img_b[] : img_a[]), frames)
+            @test !UI.gpu_uses(r, a) && UI.gpu_uses(r, b)
+            @test UI.gl_layer(r, "hand").previous === nothing
+            gl_run(win -> free_layer!(r, "hand"), ctx)
         end
 
         @testset "a failed upload gives the layer an error, not an exception" begin

@@ -57,8 +57,8 @@ void main() {
 
 # One quad per tile. `u_corner` holds the corners in the order of `gl_VertexID` (a triangle
 # strip): low i low j, high i low j, low i high j, high i high j. `u_cells` is the cell range
-# of the quad in the tile's texel numbers: texel k holds cell k of the tile, texel 0 and
-# tile + 1 are the border.
+# of the quad in the tile's texel numbers: texel k holds cell k of the tile, texel 0 and the
+# last texel (`u_last`, one past the tile's cells) are the border.
 const GRID_VS = """
 #version 330 core
 uniform vec2 u_c;
@@ -80,8 +80,8 @@ void main() {
 const GRID_FS = """
 #version 330 core
 in vec2 v_cell;
-uniform sampler2D u_cells_tex;   // (tile + 2) by (tile + 2) R32F
-uniform int u_last;              // tile + 1, the last texel
+uniform sampler2D u_cells_tex;   // the tile's cells plus a 1-cell border, R32F
+uniform ivec2 u_last;            // the last texel of the tile
 uniform int u_nearest;
 uniform int u_shade;
 uniform vec2 u_cell_size;        // world size of a cell at this level
@@ -92,7 +92,7 @@ uniform float u_opacity;
 out vec4 colour;
 """ * COLOUR_GLSL * """
 float cell(ivec2 p) {
-    return texelFetch(u_cells_tex, clamp(p, ivec2(0), ivec2(u_last)), 0).r;
+    return texelFetch(u_cells_tex, clamp(p, ivec2(0), u_last), 0).r;
 }
 
 float neighbour(float v, float centre) { return isnan(v) ? centre : v; }
