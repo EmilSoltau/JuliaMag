@@ -8,6 +8,9 @@ import JuliaMagUI as UI
 # `fresh_session`, `make_test_database!`, `add_test_database!`, `testdata`, `write_synthetic_xyz`.
 include(joinpath(@__DIR__, "..", "..", "..", "JuliaMagCore", "test", "support", "synthetic.jl"))
 
+# `survey_database!`, `add_test_grid!`.
+include(joinpath(@__DIR__, "..", "..", "..", "JuliaMagCore", "test", "support", "maps.jl"))
+
 """
     test_app_state(s) -> AppState
 
@@ -451,4 +454,29 @@ function drop_jobs!(s::Core.Session, ids)
     lock(() -> filter!(j -> !(j.id in ids), s.jobs), s.jobs_lock)
     Core.bump!(s)
     return nothing
+end
+
+"""
+    line_points(lines) -> Core.LinePoints
+
+A `LinePoints` from `lines`, one vector of `(x, y, value)` tuples per line. Each line is one
+part. The origin is the floor of the first point.
+"""
+function line_points(lines::AbstractVector)::Core.LinePoints
+    p = Core.LinePoints()
+    first_pt = first(first(lines))
+    ox, oy = floor(first_pt[1]), floor(first_pt[2])
+    p.origin = (ox, oy)
+    n = 0
+    for (li, pts) in enumerate(lines)
+        push!(p.part_first, Int32(n)); push!(p.part_count, Int32(length(pts)))
+        push!(p.part_line, Int32(li)); push!(p.part_row, Int32(1))
+        push!(p.lines, Core.LineId(Core.LINE, 1000 + li, 0))
+        for (x, y, v) in pts
+            push!(p.x, Float32(x - ox)); push!(p.y, Float32(y - oy)); push!(p.value, Float32(v))
+        end
+        n += length(pts)
+        push!(p.extents, (minimum(t -> t[1], pts), minimum(t -> t[2], pts), maximum(t -> t[1], pts), maximum(t -> t[2], pts)))
+    end
+    return p
 end
