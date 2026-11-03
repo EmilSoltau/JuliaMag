@@ -177,12 +177,16 @@ window_testset("map GL pass") do
         whole = parity_grid(; tile = UI.TILE)
         queue_uploads!(r, "one tile", whole)
         upload_all!(ctx, r)
-        @testset "bilinear hillshade has no seams between tiles: level $k, $px px per cell" for k in 0:2, px in (3, 24)
-            # Cell edge 128.5 of level k each way; level 2 has 100 rows, one tile row, so its middle row there.
+        @test length(grid.levels) == 11
+        @testset "bilinear hillshade has no seams between tiles: level $k, $px px per cell" for k in 0:length(grid.levels)-1,
+                                                                                            px in (3, 24)
+            # Cell edge 128.5 of level k each way. A level with one tile that way (from level 3 on in
+            # i, level 2 on in j) has no tile edge: its middle there, and the two builds must still agree.
             f = 2.0^k
-            cj = grid.levels[k+1].ny > 128 ? 128 : grid.levels[k+1].ny ÷ 2
+            lv = grid.levels[k+1]
+            ci, cj = lv.nx > 128 ? 128 : lv.nx ÷ 2, lv.ny > 128 ? 128 : lv.ny ÷ 2
             w, h = 300, 200
-            cam = Camera(500_000.0 + (128f - 0.5) * 25 + 3.1, 7_000_000.0 + (cj * f - 0.5) * 25 - 2.3, 25f / px)
+            cam = Camera(500_000.0 + (ci * f - 0.5) * 25 + 3.1, 7_000_000.0 + (cj * f - 0.5) * 25 - 2.3, 25f / px)
             imgs = map((grid, whole)) do d
                 sc = parity_scene(cam, w, h, [grid_layer(d, cam, w, h; nearest = false, shade = true, level = k, z = 40f0)])
                 out = Ref{Matrix{UInt32}}()
@@ -190,15 +194,17 @@ window_testset("map GL pass") do
                 out[]
             end
             dump_parity("seam-$k-$px", imgs...)
-            # The tile edges cross at (ex, ey) on the screen. Within 3 px of them the images agree;
-            # a 1-cell border gave steps of 5 to 11 there. Elsewhere a few pixels take the next
-            # colour entry on rounding (3 at most, measured), as the two quads place cells apart by a rounding.
+            # The tile edges cross at (ex, ey) on the screen. Within half a cell of them (3 px at
+            # least) the images agree: a 1-cell border gave a line of hundreds of pixels off by 5 to
+            # 11 there. Anywhere, a lone pixel may take the next colour entry on rounding (3 at most,
+            # measured), as the two quads place cells apart by a rounding.
             ex, ey = w / 2 - 3.1 / cam.res, h / 2 - 2.3 / cam.res
+            band = max(3, px / 2)
             off = [maximum(abs.(px_rgb(imgs[1][x, y]) .- px_rgb(imgs[2][x, y]))) for x in 1:w, y in 1:h]
-            edge = [abs(x - 0.5 - ex) <= 3 || abs(y - 0.5 - ey) <= 3 for x in 1:w, y in 1:h]
+            edge = [abs(x - 0.5 - ex) <= band || abs(y - 0.5 - ey) <= band for x in 1:w, y in 1:h]
             worst = maximum(off[edge])
-            @info "Map GL tile seams" level = k px_per_cell = px worst flips = count(>(1), off)
-            @test worst <= 1
+            @info "Map GL tile seams" level = k px_per_cell = px worst at_edges = count(>(1), off[edge]) flips = count(>(1), off)
+            @test count(>(1), off[edge]) <= 5   # measured 2 at most; a seam gave 318 or more
             @test maximum(off) <= 4
         end
         gl_run(w -> free_layer!(r, "one tile"), ctx)

@@ -133,18 +133,35 @@ end
 end
 
 # Bilinear cells: the slopes of the four corner cells blended with the weights of the value,
-# so the shade is as smooth as the value. The pixel is drawn only when no corner is NaN.
+# so the shade is as smooth as the value. Called only for a drawn pixel, so no corner is NaN
+# and cell `(i0, j0)` is in the level. Its tile then holds the 12 cells the slopes need (the 4
+# by 4 block around the corners, without the block's corners): the border is `TILE_BORDER` = 2
+# cells. Each is read once, straight from the tile, as the shader reads them.
 @inline function shade_bilinear(tiles, nx::Int, ny::Int, tile::Int, fi::Float64, fj::Float64,
                                 cw::Float64, ch::Float64, c::Float64, s::Float64, g::GridDraw)::Float32
     i0, j0 = cell_floor(fi), cell_floor(fj)
+    (1 <= i0 < nx && 1 <= j0 < ny) || return 1f0
     tx, ty = fi - i0, fj - j0
-    u00, v00 = cell_slope(tiles, nx, ny, tile, i0, j0)
-    u01, v01 = cell_slope(tiles, nx, ny, tile, i0, j0 + 1)
-    u10, v10 = cell_slope(tiles, nx, ny, tile, i0 + 1, j0)
-    u11, v11 = cell_slope(tiles, nx, ny, tile, i0 + 1, j0 + 1)
+    @inbounds t = tiles[(i0-1)÷tile+1, (j0-1)÷tile+1]
+    a, b = (i0 - 1) % tile + 1 + TILE_BORDER, (j0 - 1) % tile + 1 + TILE_BORDER
+    @inbounds begin
+        v00, v10, v01, v11 = t[a, b], t[a+1, b], t[a, b+1], t[a+1, b+1]   # the corners
+        l0, l1, r0, r1 = t[a-1, b], t[a-1, b+1], t[a+2, b], t[a+2, b+1]   # left and right of them
+        d0, d1, u0, u1 = t[a, b-1], t[a+1, b-1], t[a, b+2], t[a+1, b+2]   # below and above them
+    end
+    u00, w00 = corner_slope(v00, l0, v10, d0, v01)
+    u01, w01 = corner_slope(v01, l1, v11, v00, u0)
+    u10, w10 = corner_slope(v10, v00, r0, d1, v11)
+    u11, w11 = corner_slope(v11, v01, r1, v10, u1)
     du = (1 - tx) * (1 - ty) * u00 + (1 - tx) * ty * u01 + tx * (1 - ty) * u10 + tx * ty * u11
-    dv = (1 - tx) * (1 - ty) * v00 + (1 - tx) * ty * v01 + tx * (1 - ty) * v10 + tx * ty * v11
+    dv = (1 - tx) * (1 - ty) * w00 + (1 - tx) * ty * w01 + tx * (1 - ty) * w10 + tx * ty * w11
     return shade_of_slope(du, dv, cw, ch, c, s, g)
+end
+
+# `cell_slope` from the values already read: the cell and its left, right, lower and upper neighbours.
+@inline function corner_slope(centre::Float32, l::Float32, r::Float32, dn::Float32, up::Float32)::NTuple{2,Float64}
+    return (Float64(neighbour(r, centre)) - Float64(neighbour(l, centre)),
+            Float64(neighbour(up, centre)) - Float64(neighbour(dn, centre)))
 end
 
 # `0.25 + 0.75 h` for a slope from `cell_slope`: divided by two cell sizes, times the vertical

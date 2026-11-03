@@ -91,21 +91,17 @@ uniform float u_z;
 uniform float u_opacity;
 out vec4 colour;
 """ * COLOUR_GLSL * """
-// Every read is inside the tile and its border; the clamp only guards against a rounding at the quad's edge.
+// Every read is inside the tile and its border (TILE_BORDER cells), so the clamp never fires. It
+// only keeps a read defined if the border ever shrinks; the GL seam test catches that case.
 float cell(ivec2 p) {
     return texelFetch(u_cells_tex, clamp(p, ivec2(0), u_last), 0).r;
 }
 
 float neighbour(float v, float centre) { return isnan(v) ? centre : v; }
 
-// Right minus left and up minus down at cell p; a NaN neighbour counts as the cell itself.
-vec2 slope(ivec2 p) {
-    float c0 = cell(p);
-    float l = neighbour(cell(p - ivec2(1, 0)), c0);
-    float r = neighbour(cell(p + ivec2(1, 0)), c0);
-    float dn = neighbour(cell(p - ivec2(0, 1)), c0);
-    float up = neighbour(cell(p + ivec2(0, 1)), c0);
-    return vec2(r - l, up - dn);
+// Right minus left and up minus down at a cell; a NaN neighbour counts as the cell itself.
+vec2 slope(float c0, float l, float r, float dn, float up) {
+    return vec2(neighbour(r, c0) - neighbour(l, c0), neighbour(up, c0) - neighbour(dn, c0));
 }
 
 void main() {
@@ -113,14 +109,14 @@ void main() {
     vec2 f0 = floor(v_cell);
     ivec2 p = ivec2(f0);
     vec2 t = v_cell - f0;
-    float v;
+    float v, v00, v10, v01, v11;
     if (u_nearest != 0) {
         v = cell(near);
     } else {
-        float v00 = cell(p);
-        float v10 = cell(p + ivec2(1, 0));
-        float v01 = cell(p + ivec2(0, 1));
-        float v11 = cell(p + ivec2(1, 1));
+        v00 = cell(p);
+        v10 = cell(p + ivec2(1, 0));
+        v01 = cell(p + ivec2(0, 1));
+        v11 = cell(p + ivec2(1, 1));
         if (isnan(v00) || isnan(v10) || isnan(v01) || isnan(v11)) discard;
         v = (1.0 - t.x) * (1.0 - t.y) * v00 + (1.0 - t.x) * t.y * v01 + t.x * (1.0 - t.y) * v10 + t.x * t.y * v11;
     }
@@ -129,10 +125,16 @@ void main() {
     if (u_shade != 0) {
         vec2 d;
         if (u_nearest != 0) {
-            d = slope(near);
+            d = slope(v, cell(near - ivec2(1, 0)), cell(near + ivec2(1, 0)), cell(near - ivec2(0, 1)),
+                      cell(near + ivec2(0, 1)));
         } else {
-            d = (1.0 - t.x) * (1.0 - t.y) * slope(p) + (1.0 - t.x) * t.y * slope(p + ivec2(0, 1))
-              + t.x * (1.0 - t.y) * slope(p + ivec2(1, 0)) + t.x * t.y * slope(p + ivec2(1, 1));
+            // The 4 by 4 block around the corners without its corners: the corners above, and 8 more.
+            float l0 = cell(p + ivec2(-1, 0)), l1 = cell(p + ivec2(-1, 1));
+            float r0 = cell(p + ivec2(2, 0)), r1 = cell(p + ivec2(2, 1));
+            float d0 = cell(p + ivec2(0, -1)), d1 = cell(p + ivec2(1, -1));
+            float u0 = cell(p + ivec2(0, 2)), u1 = cell(p + ivec2(1, 2));
+            d = (1.0 - t.x) * (1.0 - t.y) * slope(v00, l0, v10, d0, v01) + (1.0 - t.x) * t.y * slope(v01, l1, v11, v00, u0)
+              + t.x * (1.0 - t.y) * slope(v10, v00, r0, d1, v11) + t.x * t.y * slope(v11, v01, r1, v10, u1);
         }
         float gu = d.x / (2.0 * u_cell_size.x) * u_z;
         float gv = d.y / (2.0 * u_cell_size.y) * u_z;
