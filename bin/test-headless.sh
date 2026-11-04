@@ -4,6 +4,10 @@
 #
 # It needs xvfb-run (Linux). Set JULIA to use another Julia than ~/.juliaup/bin/julia
 # or the one on the PATH.
+#
+# It draws with Mesa's software renderer, so test timing does not depend on the GPU driver.
+# Under WSL the GPU path can stall a frame for half a second, which fails the loop timing
+# tests. Set JULIAMAG_TEST_GPU=1 to draw on the GPU instead.
 set -euo pipefail
 unset CDPATH
 
@@ -24,7 +28,10 @@ else
     julia="julia"
 fi
 
+software=1
+[ "${JULIAMAG_TEST_GPU:-0}" = "1" ] && software=0
+
 cd "$repo"
 # WAYLAND_DISPLAY is unset so GLFW uses the virtual X display, not the desktop.
 exec xvfb-run -a -s "-screen 0 1920x1080x24" env -u WAYLAND_DISPLAY \
-    "$julia" -t auto,1 --project=JuliaMagUI "$@" -e 'using Pkg; Pkg.test()'
+    LIBGL_ALWAYS_SOFTWARE="$software" "$julia" -t auto,1 --project=JuliaMagUI "$@" -e 'using Pkg; Pkg.test()'

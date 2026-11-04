@@ -182,7 +182,10 @@ julia -t auto,1 --project=JuliaMagUI -e 'using Pkg; Pkg.test()'
 `bin/test-headless.sh` runs the UI tests on a virtual display, so no window opens on the desktop.
 It uses `xvfb-run`; install it with `sudo apt-get install -y xvfb`.
 Extra arguments go to Julia.
-The screenshots are the same as on the desktop, except for timing details such as a toast that fades.
+It draws with Mesa's software renderer, so the timing tests do not depend on the GPU driver.
+Under WSL the GPU path can stall a frame for half a second, and the loop timing tests then fail.
+Set `JULIAMAG_TEST_GPU=1` to draw on the GPU instead.
+Software and GPU screenshots look the same; they differ only in a few anti-aliased edge pixels.
 
 ## The shot tool
 
