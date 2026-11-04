@@ -38,8 +38,10 @@ end
 Change the metadata of grid `id` to `new` with `setter!(g, value)`, save
 `grid.json`, and push an undo step that puts back the value `getter(g)` had.
 Throws `ItemBusyError` when the grid is busy, before anything changes.
+`data = false` for an edit that changes nothing a map reads (`UndoStep.data`).
 """
-function edit_grid_meta!(getter::Function, setter!::Function, s::Session, id::AbstractString, label::String, new)
+function edit_grid_meta!(getter::Function, setter!::Function, s::Session, id::AbstractString, label::String, new;
+                         data::Bool = true)
     key = String(id)
     lock(s.lock) do
         check_not_busy(s, key)
@@ -50,7 +52,7 @@ function edit_grid_meta!(getter::Function, setter!::Function, s::Session, id::Ab
             save_grid_meta(g)
             nothing
         end
-        step = UndoStep(label, apply(old), apply(new), () -> nothing, [key])
+        step = UndoStep(label, apply(old), apply(new), () -> nothing, [key]; data)
         step.redo()
         push_undo!(s, step)
     end
@@ -149,7 +151,7 @@ function set_grid_style!(s::Session, id::AbstractString, style::GridStyle)
     lock(s.lock) do
         check_open(s)
         edit_grid_meta!(g -> copy_style(g.style), (g, v) -> (g.style = copy_style(v)), s, id,
-                        "set the style of grid $id", new)
+                        "set the style of grid $id", new; data = false)
         args = Dict{String,Any}("item" => String(id))
         for f in fieldnames(GridStyle)
             v = getfield(new, f)

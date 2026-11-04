@@ -44,7 +44,8 @@ entry_of(app, id) = only(e for e in values(app.map.entries) if e.key.item == id)
             @test snap.grids[g].style isa Core.GridStyle && snap.grids[g].style.colours == "geosoft"
             row = first(snap.databases[db].lines)
             @test row.fid_start == 0.0 && row.fid_step == 0.1
-            @test snap.item_revisions[db] == 0 && snap.item_revisions[m] == 2
+            # The map's two edits change no data a layer reads.
+            @test snap.data_revisions[db] == 0 && snap.data_revisions[m] == 0
         end
     end
 
@@ -56,12 +57,12 @@ entry_of(app, id) = only(e for e in values(app.map.entries) if e.key.item == id)
             wait_layers(app)
             e = only(values(app.map.entries))
             @test e.key == LayerKey(db, :lines, "MAG", "X", "Y", "EPSG:32755")
-            @test e.data isa LineLayerData && e.error == "" && e.revision == app.snap.item_revisions[db]
+            @test e.data isa LineLayerData && e.error == "" && e.revision == app.snap.data_revisions[db]
             @test length(e.data.points.x) == 15 && e.data.points.value[1] == 101f0 && e.seconds >= 0
             first_x = e.data.points.x
             edit_now!(app, s -> Core.set_cell!(s, db, Core.LineId(Core.LINE, 1001, 0), "MAG", 1, 9.0))
             wait_layers(app)
-            @test e.revision == app.snap.item_revisions[db] && e.data.points.value[1] == 9f0
+            @test e.revision == app.snap.data_revisions[db] && e.data.points.value[1] == 9f0
             @test e.spare isa LineLayerData && e.spare !== e.data
             edit_now!(app, s -> Core.set_cell!(s, db, Core.LineId(Core.LINE, 1001, 0), "MAG", 2, 8.0))
             wait_layers(app)
@@ -194,11 +195,11 @@ entry_of(app, id) = only(e for e in values(app.map.entries) if e.key.item == id)
             for _ in 1:5
                 update_layers!(app)
             end
-            @test !e.loading && e.revision < app.snap.item_revisions[db] && e.data.points.value[1] == 9f0
+            @test !e.loading && e.revision < app.snap.data_revisions[db] && e.data.points.value[1] == 9f0
             up!(gl_layer(gl, e.key))           # the new build is up: the old one is freed
             @test spare_free(app.map, e)
             wait_layers(app)
-            @test e.revision == app.snap.item_revisions[db] && e.data === a && e.data.points.value[1] == 8f0
+            @test e.revision == app.snap.data_revisions[db] && e.data === a && e.data.points.value[1] == 8f0
         end
     end
 

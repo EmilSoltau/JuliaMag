@@ -184,7 +184,7 @@ image_rect_alloc(img, cam) = (image_rect(img, cam, 800, 600); @allocated image_r
             for _ in 1:5
                 update_layers!(app)
             end
-            @test !e.loading && e.revision < app.snap.item_revisions[db] && e.spare === a   # no load into `a`
+            @test !e.loading && e.revision < app.snap.data_revisions[db] && e.spare === a   # no load into `a`
             build_scene!(ms.scene, app, mv, st, 200, 150)       # the render thread goes on meanwhile
             put!(hold, nothing)
             wait_cpu_frame(app)
@@ -193,7 +193,7 @@ image_rect_alloc(img, cam) = (image_rect(img, cam, 800, 600); @allocated image_r
             @test frame_pixels(done.buffer, 200, 150) == want   # not torn by the reload
             @test !cpu_uses(r, a) && spare_free(ms, e)
             wait_layers(app)
-            @test e.revision == app.snap.item_revisions[db] && e.data.points.value[1] == 8f0
+            @test e.revision == app.snap.data_revisions[db] && e.data.points.value[1] == 8f0
             r.cpu_hold = nothing
         end
     end

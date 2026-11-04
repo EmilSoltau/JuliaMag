@@ -25,6 +25,7 @@ end
 """
 Put `new` (the state of `m` after the edit) into map `key` as one undo step that goes
 back to `old`. Writes `map.json` now. Call it under `s.lock`.
+The step changes no data (`UndoStep.data`): a layer reads its own item, not the map.
 """
 function push_map_step!(s::Session, key::String, label::String, old::MapState, new::MapState)
     apply(st::MapState) = () -> lock(s.lock) do        # `undo!` runs it without the lock
@@ -35,7 +36,7 @@ function push_map_step!(s::Session, key::String, label::String, old::MapState, n
         save_map(m)
         nothing
     end
-    step = UndoStep(label, apply(old), apply(new), () -> nothing, [key])
+    step = UndoStep(label, apply(old), apply(new), () -> nothing, [key]; data = false)
     step.redo()
     push_undo!(s, step)
     return nothing
@@ -98,7 +99,7 @@ function new_map!(s::Session; name::AbstractString = "")::String
             rm(joinpath(p.folder, "maps", id); recursive = true, force = true)
             rethrow()
         end
-        push_undo!(s, UndoStep("new map $label", take_out, put_in, free, [id]; commit = free))
+        push_undo!(s, UndoStep("new map $label", take_out, put_in, free, [id]; commit = free, data = false))
         record!(s, "map.new", Dict{String,Any}("name" => label); outputs = [id])
         return id
     end

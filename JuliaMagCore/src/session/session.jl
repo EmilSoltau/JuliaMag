@@ -28,6 +28,11 @@ for that part only.
 `recorded` is false for a change that is not in the history, such as the rows
 a failed job kept (see `undo_noted!`). Then its undo and redo are not recorded
 either, so a script does not undo some other step in its place.
+
+`data` is false for a step that leaves what a map reads of its items as it was,
+such as selecting a line, renaming an item or a grid's default style. It
+defaults to true, so a step that forgets it makes a map read again, never miss
+a change (see `data_revision`).
 """
 struct UndoStep
     label::String
@@ -37,6 +42,7 @@ struct UndoStep
     items::Vector{String}
     recorded::Bool
     commit::Function
+    data::Bool
 end
 
 "The default `commit` of an `UndoStep` and of `note_job_undo!`: the step keeps nothing for undo."
@@ -44,10 +50,10 @@ nothing_to_commit() = nothing
 
 UndoStep(label, undo, redo) = UndoStep(label, undo, redo, () -> nothing, String[])
 UndoStep(label, undo, redo, drop) = UndoStep(label, undo, redo, drop, String[])
-UndoStep(label, undo, redo, drop, items; commit::Function = nothing_to_commit) =
-    UndoStep(label, undo, redo, drop, items, true; commit)
-UndoStep(label, undo, redo, drop, items, recorded::Bool; commit::Function = nothing_to_commit) =
-    UndoStep(String(label), undo, redo, drop, collect(String, items), recorded, commit)
+UndoStep(label, undo, redo, drop, items; commit::Function = nothing_to_commit, data::Bool = true) =
+    UndoStep(label, undo, redo, drop, items, true; commit, data)
+UndoStep(label, undo, redo, drop, items, recorded::Bool; commit::Function = nothing_to_commit, data::Bool = true) =
+    UndoStep(String(label), undo, redo, drop, collect(String, items), recorded, commit, data)
 
 """
 One recorded action. `time` is local time as text. `job` is a job id or `\"\"`.
@@ -173,6 +179,8 @@ mutable struct Session
     revision::Threads.Atomic{Int}
     "Changes per item in this session (see `item_revision`). Guarded by `lock`."
     item_revisions::Dict{String,Int}
+    "Changes per item of what a map reads (see `data_revision`). Guarded by `lock`."
+    data_revisions::Dict{String,Int}
     "0 open, 1 closing, 2 closed (see `isopen`)."
     state::Threads.Atomic{Int}
 end
@@ -204,17 +212,43 @@ bump!(s::Session) = (Threads.atomic_add!(s.revision, 1); nothing)
 
 How many changes item `id` has had in this session: 0 for an item never changed.
 It goes up for each change that adds an undo step, and for each undo or redo.
-A map reloads an item when this number differs from the one it read.
+A map uses `data_revision` instead, which skips changes that leave the data as it was.
 """
 item_revision(s::Session, id::AbstractString)::Int = lock(() -> get(s.item_revisions, String(id), 0), s.lock)
 
 "A copy of all item change counts (see `item_revision`)."
 item_revisions(s::Session)::Dict{String,Int} = lock(() -> copy(s.item_revisions), s.lock)
 
+"""
+    data_revision(s, id)::Int
+
+How many changes of what a map reads item `id` has had in this session: 0 for
+an item never changed. It goes up with `item_revision`, but only for a step that
+changes data (`UndoStep.data`), such as a written value, a channel renamed or
+deleted, a position pair or coordinate system, a grid moved, a job's output or
+appended rows, or the item taken out or put back. Selecting a line, a new name
+or a grid's default style leave it as it is. The undo and redo of a data step
+count too, and so does a failed job that takes back what it wrote.
+A map reloads a layer when this number differs from the one it read.
+"""
+data_revision(s::Session, id::AbstractString)::Int = lock(() -> get(s.data_revisions, String(id), 0), s.lock)
+
+"A copy of all item data change counts (see `data_revision`)."
+data_revisions(s::Session)::Dict{String,Int} = lock(() -> copy(s.data_revisions), s.lock)
+
 "Count one change for each item of `step`. Call it under `s.lock`."
 function count_changes!(s::Session, step::UndoStep)
     for id in unique(step.items)
         s.item_revisions[id] = get(s.item_revisions, id, 0) + 1
+    end
+    step.data && count_data!(s, step.items)
+    return nothing
+end
+
+"Count one data change for each item of `items` (see `data_revision`). Call it under `s.lock`."
+function count_data!(s::Session, items::Vector{String})
+    for id in unique(items)
+        s.data_revisions[id] = get(s.data_revisions, id, 0) + 1
     end
     return nothing
 end
@@ -247,7 +281,8 @@ function Session(p::Project)
     s = Session(p, UndoStep[], UndoStep[], history, nothing, nothing,
                 load_remembered(p, warnings), ReentrantLock(), warnings, Job[], 1,
                 ReentrantLock(), Dict{String,BusyMark}(), nothing, ReentrantLock(), nothing,
-                Threads.Atomic{Int}(0), Dict{String,Int}(), Threads.Atomic{Int}(SESSION_OPEN))
+                Threads.Atomic{Int}(0), Dict{String,Int}(), Dict{String,Int}(),
+                Threads.Atomic{Int}(SESSION_OPEN))
     load_jobs!(s)
     return s
 end
@@ -755,7 +790,8 @@ function set_line_selected!(s::Session, item_id::AbstractString, id::LineId, fla
             nothing
         end
         put(flag)()
-        push_undo!(s, UndoStep("select $(line_name(id))", put(old), put(flag), () -> nothing, [String(item_id)]))
+        push_undo!(s, UndoStep("select $(line_name(id))", put(old), put(flag), () -> nothing, [String(item_id)];
+                               data = false))
         record!(s, "database.set_line_selected", Dict("item" => String(item_id), "line" => line_args(id),
                                                       "selected" => flag))
         return nothing
@@ -787,7 +823,8 @@ function set_lines_selected!(s::Session, item_id::AbstractString, ids::AbstractV
         end
         put(flag)()
         n = length(changing)
-        push_undo!(s, UndoStep("select $n lines", put(!flag), put(flag), () -> nothing, [String(item_id)]))
+        push_undo!(s, UndoStep("select $n lines", put(!flag), put(flag), () -> nothing, [String(item_id)];
+                               data = false))
         record!(s, "database.set_lines_selected", Dict("item" => String(item_id),
                                                        "lines" => [line_args(id) for id in changing],
                                                        "selected" => flag))
@@ -1048,7 +1085,7 @@ function rename_item!(s::Session, id::AbstractString, name::AbstractString)
             end
             nothing
         end
-        step = UndoStep("rename $old to $new", put(old), put(new), () -> nothing, [key])
+        step = UndoStep("rename $old to $new", put(old), put(new), () -> nothing, [key]; data = false)
         step.redo()
         push_undo!(s, step)
         record!(s, "project.rename_item", Dict{String,Any}("item" => key, "name" => new))
@@ -1066,6 +1103,7 @@ end
 Change a fact of channel `name` of database `id` to `new` with `setter!(c, value)`,
 save `database.json`, and push an undo step that puts back the value `getter(c)` had.
 Call it under `s.lock`. Throws `ItemBusyError` when the database is busy, before anything changes.
+The step changes no data (`UndoStep.data`): the facts it edits are not what a map reads.
 """
 function edit_channel_meta!(getter::Function, setter!::Function, s::Session, id::String, name::String,
                             label::String, new)
@@ -1084,7 +1122,7 @@ function edit_channel_meta!(getter::Function, setter!::Function, s::Session, id:
         end
         nothing
     end
-    step = UndoStep(label, put(old), put(new), () -> nothing, [id])
+    step = UndoStep(label, put(old), put(new), () -> nothing, [id]; data = false)
     step.redo()
     push_undo!(s, step)
     return nothing

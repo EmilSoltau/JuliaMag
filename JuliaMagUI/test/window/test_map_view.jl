@@ -275,23 +275,86 @@ window_testset("map view while layers load") do
             @test st.fitted == st.camera   # it still follows
         end
 
+        @testset "edits that do not change a layer's data do not load it again" begin
+            entry(item) = only(p.entry for p in app.map.plan if p.layer.item == item)
+            # Run `act`, wait for `done()`, then a few frames more. Returns whether a layer loaded.
+            function loads_after(act, done)
+                el, eg = entry(db), entry(g)
+                dl, dg, wl, wg = el.data, eg.data, el.wanted, eg.wanted
+                seen = Ref(false)
+                look() = (seen[] |= el.loading || eg.loading ||
+                                    startswith(UI.map_hint(app, app.snap.maps[m]), "Loading"))
+                act()
+                ctx.wait_until(() -> (look(); done()); timeout = 10)
+                for _ in 1:5
+                    ctx.frames(1)
+                    look()
+                end
+                return seen[] || el.data !== dl || eg.data !== dg || el.wanted != wl || eg.wanted != wg
+            end
+            edit!(label, f) = ctx.on_render(w -> UI.submit!(app, label, f))
+            union!(app.ui.expanded, ["databases", db, "$db/lines"])
+            ctx.frames(2)
+            first_line = app.snap.databases[db].lines[1]
+            selected() = app.snap.databases[db].lines[1].selected
+            @test selected()
+            # A line ticked off in the data tree, as a user does it.
+            @test !loads_after(() -> ctx.click(tree_ref("$db/lines/$(first_line.name)", "check")), () -> !selected())
+            name() = app.snap.items[findfirst(it -> it.id == db, app.snap.items)].name
+            @test !loads_after(() -> edit!("rename", s -> Core.rename_item!(s, db, "Renamed")),
+                               () -> name() == "Renamed")
+            style = deepcopy(app.snap.grids[g].style)
+            style.colours = "grey"
+            @test !loads_after(() -> edit!("grid style", s -> Core.set_grid_style!(s, g, style)),
+                               () -> app.snap.grids[g].style.colours == "grey")
+            # Their undo does not load either.
+            @test !loads_after(() -> ctx.key("Ctrl+Z"), () -> app.snap.grids[g].style.colours != "grey")
+            # A changed value loads the database's layer again, and so does its undo.
+            el = entry(db)
+            for act in (() -> edit!("edit", s -> Core.set_cell!(s, db, first_line.id, "MAG", 2, 7.0)),
+                        () -> ctx.key("Ctrl+Z"))
+                wanted = el.wanted
+                act()
+                ctx.wait_until(() -> el.wanted != wanted && !el.loading; timeout = 10)
+                @test el.data !== nothing && el.error == ""
+            end
+            ctx.wait_until(() -> isempty(app.map.renderer.gl.pending); timeout = 10)
+        end
+
         @testset "a slow picture redraws at most every $(UI.PENDING_REDRAW) s while uploads wait" begin
             r = app.map.renderer
             r.cost_override = 0.05   # more than a frame, as on llvmpipe
             big = add_test_grid!(s, Float32[sin(i / 50) + j for i in 1:4300, j in 1:300]; name = "Wide")
             ctx.on_render(w -> UI.submit!(app, "add", s -> Core.add_layer!(s, m, big)))
-            ctx.wait_until(() -> (gl = r.gl; gl !== nothing && !isempty(gl.pending)); timeout = 20)
-            draws, t0, most = r.full_draws, time(), 0
+            # The uploads of the wide grid, not of an earlier load.
+            ctx.wait_until(() -> (gl = r.gl; gl !== nothing && any(u -> u.layer.key.item == big, gl.pending));
+                           timeout = 20)
+            # Each full picture from now on: when GL drew it, the uploads waiting then, and its scene.
+            draws = Tuple{Float64,Int,UInt64}[]
+            seen, most = r.full_draws, 0
+            function note!()
+                r.full_draws == seen && return nothing
+                seen = r.full_draws
+                push!(draws, (r.drawn_at, r.drawn_pending, r.image.key))
+                return nothing
+            end
             while !isempty(r.gl.pending)
                 most = max(most, length(r.gl.pending))
                 ctx.frames(1)
+                note!()
             end
             ctx.frames(2)
-            seconds = time() - t0
-            n = r.full_draws - draws
-            @info "Full draws while uploads wait" uploads = most draws = n seconds
+            note!()
             @test most >= 4
-            @test n <= floor(Int, seconds / UI.PENDING_REDRAW) + 2
+            # The same scene drawn again while uploads wait: never sooner than PENDING_REDRAW
+            # after the picture before. Both times come from one clock, so a few ms is ample slack.
+            for k in 2:length(draws)
+                at, pending, key = draws[k]
+                (pending > 0 && key == draws[k-1][3]) || continue
+                @test at - draws[k-1][1] >= UI.PENDING_REDRAW - 0.002
+            end
+            # Exactly one picture with no upload left: the one after the queue emptied.
+            @test count(d -> d[2] == 0, draws) == 1 && last(draws)[2] == 0
             r.cost_override = nothing
         end
     end

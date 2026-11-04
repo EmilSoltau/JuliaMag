@@ -25,9 +25,9 @@ end
 """
 The data of one layer key.
 
-- `data`: the build drawn now, or `nothing`; `revision`: the item revision it was read at
-  (-1 before the first load).
-- `wanted`: the item revision of the last load started (-1 for none).
+- `data`: the build drawn now, or `nothing`; a load that fails keeps the build from before.
+  `revision`: the item's data revision it was read at (-1 before the first load).
+- `wanted`: the data revision of the last load started (-1 for none).
 - `spare`: the build the next load builds into, or `nothing`. Out on loan while `loading`.
 - `error`: why the last load failed, or a note on the data, such as a grid drawn without
   reprojection; `\"\"` for none. `seconds`: how long the last load took.
@@ -278,10 +278,10 @@ Start the loads the shown map needs. Call it on the render thread each frame, af
 `drain!` and `refresh!`.
 
 Every visible layer of the map `app.ui.current_map` gets an entry. One whose data was read
-at another item revision than the snapshot's gets a load, when none runs for it and its
-spare is free (`spare_free`); else it waits for a later frame. Meanwhile it keeps
-drawing its old data. When the snapshot changes, entries no map uses are dropped and their
-GL objects freed.
+at another data revision (`Core.data_revision`) than the snapshot's gets a load, when none
+runs for it and its spare is free (`spare_free`); else it waits for a later frame.
+Meanwhile it keeps drawing its old data. When the snapshot changes, entries no map uses
+are dropped and their GL objects freed.
 """
 function update_layers!(app)
     ms = app.map
@@ -304,7 +304,7 @@ function update_layers!(app)
         key = layer_key(snap, mv, l)
         e = get(ms.entries, key, nothing)
         e === nothing && (e = ms.entries[key] = LayerEntry(key); ms.version += 1)
-        rev = get(snap.item_revisions, l.item, 0)
+        rev = get(snap.data_revisions, l.item, 0)
         (e.loading || e.wanted == rev || !spare_free(ms, e)) && continue
         start_load!(app, e, rev)
     end

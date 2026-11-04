@@ -22,6 +22,74 @@
     @test item_revision(s, "db-99") == 0
 end
 
+@testset "data revisions: every write says whether it changes data" begin
+    s = fresh_session(); id = survey_database!(s)
+    g = add_test_grid!(s, Float32[i + j for i in 1:4, j in 1:3])
+    L = LineId(LINE, 1001, 0)
+    m, lid = Ref(""), Ref("")
+    # How much `f()`, its undo and its redo change `item_revision` and `data_revision` of `item[]`.
+    function counts(f, item)
+        step(act) = (i = item_revision(s, item[]); d = data_revision(s, item[]); act();
+                     (item_revision(s, item[]) - i, data_revision(s, item[]) - d))
+        return (step(f), step(() -> undo!(s)), step(() -> redo!(s)))
+    end
+    yes, no = ((1, 1), (1, 1), (1, 1)), ((1, 0), (1, 0), (1, 0))
+    ins = Dict("database" => id)
+    writes = [
+        ("set_cell!", yes, Ref(id), () -> set_cell!(s, id, L, "MAG", 2, 7.0)),
+        ("set_line_selected!", no, Ref(id), () -> set_line_selected!(s, id, L, false)),
+        ("set_lines_selected!", no, Ref(id), () -> set_lines_selected!(s, id, [L], true)),
+        ("rename_item!", no, Ref(id), () -> rename_item!(s, id, "Survey")),
+        ("set_channel_protected!", no, Ref(id), () -> set_channel_protected!(s, id, "X", true)),
+        ("set_channel_info!", no, Ref(id), () -> set_channel_info!(s, id, "X"; units = "km")),
+        ("add_pair!", yes, Ref(id), () -> add_pair!(s, id, "MAG", "Y")),
+        ("coordinates.set_current", yes, Ref(id),
+         () -> run_tool(s, "coordinates.set_current"; inputs = ins, pair = "MAG,Y")),
+        ("coordinates.set_crs", yes, Ref(id),
+         () -> run_tool(s, "coordinates.set_crs"; inputs = ins, pair = "X,Y", crs = "EPSG:7855")),
+        ("remove_pair!", yes, Ref(id), () -> remove_pair!(s, id, "MAG", "Y")),
+        ("coordinates.reproject", yes, Ref(id),
+         () -> wait_job(run_tool(s, "coordinates.reproject"; inputs = ins, pair = "X,Y", crs = "EPSG:32755"))),
+        ("database.channel_math", yes, Ref(id),
+         () -> wait_job(run_tool(s, "database.channel_math"; inputs = ins, expr = "M2 = MAG + 1", lines = "all"))),
+        ("rename_channel!", yes, Ref(id), () -> rename_channel!(s, id, "M2", "M3")),
+        ("delete_channel!", yes, Ref(id), () -> delete_channel!(s, id, "M3")),
+        ("set_grid_crs!", yes, Ref(g), () -> set_grid_crs!(s, g, "EPSG:7855")),
+        ("set_grid_georef!", yes, Ref(g), () -> set_grid_georef!(s, g; x0 = 1.0)),
+        ("set_grid_style!", no, Ref(g),
+         () -> set_grid_style!(s, g, GridStyle("grey", :linear, NaN, NaN, false, false, 45.0, 45.0, 1.0))),
+        ("new_map!", no, m, () -> (m[] = new_map!(s; name = "M"))),
+        ("add_layer!", no, m, () -> (lid[] = add_layer!(s, m[], g))),
+        ("set_layer!", no, m, () -> set_layer!(s, m[], lid[]; opacity = 0.5)),
+        ("add_layer! again", no, m, () -> add_layer!(s, m[], g)),
+        ("move_layer!", no, m, () -> move_layer!(s, m[], lid[], 2)),
+        ("remove_layer!", no, m, () -> remove_layer!(s, m[], lid[])),
+        ("remove_item!", yes, Ref(g), () -> remove_item!(s, g)),
+    ]
+    for (name, want, item, f) in writes
+        @test (name, counts(f, item)) == (name, want)
+    end
+    @test data_revision(s, m[]) == 0
+    # The cursor is no undo step: neither number moves.
+    i, d = item_revision(s, id), data_revision(s, id)
+    set_cursor!(s, Cursor(id, L, 1))
+    @test (item_revision(s, id), data_revision(s, id)) == (i, d)
+    # A new item from an import starts with one data change.
+    mktempdir() do dir
+        a = joinpath(dir, "a.xyz"); write_synthetic_xyz(a; lines = 2, ties = 0, rows_per_line = 5)
+        out = only(wait_job(import_file(s, a)).outputs)
+        @test data_revision(s, out) == 1 && data_revisions(s)[out] == 1
+    end
+    # A failed job takes back what it noted: a map may have read the half-written item.
+    i, d = item_revision(s, id), data_revision(s, id)
+    j = wait_job(start_job!(s, "test.fails", Dict{String,Any}(), (p, io) -> begin
+        JuliaMagCore.note_job_undo!(() -> nothing, () -> nothing, () -> nothing; items = [id])
+        error("the work failed")
+    end))
+    @test status(j) == JOB_FAILED
+    @test (item_revision(s, id), data_revision(s, id)) == (i, d + 1)
+end
+
 @testset "line points: edge cases" begin
     s = fresh_session(); id = survey_database!(s; lines = 2, nan_line = 1)
     set_cell!(s, id, LineId(LINE, 1002, 0), "X", 1, NaN)

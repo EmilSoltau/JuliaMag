@@ -154,7 +154,7 @@ What the UI shows of a session at one revision. Never changed after it is built.
 - `undo_label`, `redo_label`: the label of the step `undo!` or `redo!` would run, or `nothing`.
 - `cursor`: a copy of the session cursor, or `nothing`; `marked`: `(first, last)` or `nothing`.
 - `crs`: a `CrsInfo` for every coordinate system code of the pairs and grids.
-- `item_revisions`: `Core.item_revision` of every item (0 for one never changed); a map
+- `data_revisions`: `Core.data_revision` of every item (0 for one never changed); a map
   layer loads again when it differs from the revision its data was read at.
 """
 struct Snapshot
@@ -172,7 +172,7 @@ struct Snapshot
     cursor::Union{Nothing,Core.Cursor}
     marked::Union{Nothing,Tuple{Int,Int}}
     crs::Dict{String,CrsInfo}
-    item_revisions::Dict{String,Int}
+    data_revisions::Dict{String,Int}
 end
 
 copy_item(it::Core.ProjectItem) =
@@ -202,7 +202,7 @@ function snapshot(s::Core.Session)::Snapshot
             isempty(s.undo_stack) ? nothing : last(s.undo_stack).label,
             isempty(s.redo_stack) ? nothing : last(s.redo_stack).label,
             c === nothing ? nothing : Core.Cursor(c.item, c.line, c.row),
-            s.marked, [(j, deepcopy(j.args)) for j in Core.jobs(s)], Core.item_revisions(s))
+            s.marked, [(j, deepcopy(j.args)) for j in Core.jobs(s)], Core.data_revisions(s))
     end
     warns = Core.warnings(s)
 

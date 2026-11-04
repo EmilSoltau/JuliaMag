@@ -66,7 +66,7 @@ export values_path, block_rows, read_rows, write_rows!, with_grid_values, cell_c
 export UndoStep, HistoryEntry, Cursor, Session, ProtectedError, ItemBusyError
 export LOCK_FILE, ProjectLockedError
 export open_session, new_session, close_session!, close_left_open, check_not_busy, push_undo!, undo!, redo!, can_undo, can_redo
-export revision, warnings, SessionClosedError, item_revision, item_revisions
+export revision, warnings, SessionClosedError, item_revision, item_revisions, data_revision, data_revisions
 export LinePoints, read_line_points
 export record!, set_cell!, set_line_selected!, set_cursor!, script_text, script_call
 export rename_item!, set_marked!, set_channel_protected!, rename_channel!, delete_channel!, set_channel_info!
