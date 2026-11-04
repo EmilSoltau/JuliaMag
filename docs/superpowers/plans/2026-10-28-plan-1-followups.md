@@ -127,6 +127,30 @@ These were out of scope for the map view (plan 4a).
 - Stored line levels and grid overviews next to the data, if loads of 50 M points need them.
 - A GPU memory budget with eviction for several large grids.
 - Cut long line parts into culled pieces, so a zoom of 100x does not draw whole lines.
+- Tests: the `add_test_grid!` of the UI test support shadows the core test helper of the same name, with other defaults.
+- Tests: no test replays a script from a reopened session (NaN style values read back from the history).
+- Tests: no test of integer X, Y or value channels in `read_line_points`, and none that a held undo step counts once.
+- A line level dropped by the 75 % rule is thinned again on each rebuild.
+- Tests: line levels lack tests of a part that starts mid-line (`part_row > 1`), of the lowest value surviving, of the 75 % drop and of all-NaN values.
+- Inf grid cells count as good values (the histogram range becomes infinite), and `cut_band!` starts a `@threads` region per tile row.
+- Tests: no test rebuilds a grid layer into the same data with another size or tile.
+- Uploads are queued per layer, not coarse levels first across all layers: a second layer waits for all of the first.
+- The GL path ignores the alpha of a layer's plain colour, and a grid tile over `GL_MAX_TEXTURE_SIZE` shows the "no room" text.
+- A GPU layer with no levels becomes `previous`, so the new layer draws nothing until it is fully up.
+- The map loader does not try again when its open races a channel rename or delete; the layer keeps its old data with a warning until the next change.
+- The loader's test hooks (`hold`) live in production structs, and a load steps a data version twice.
+- The GL frame cost counts GPU time only, so slow CPU-side GL work does not switch to the moved-image mode.
+- The map image and back textures are freed only when the GL context ends; free them at project close or renderer teardown.
+- No auto-scroll while dragging a layer row in the Layers tab.
+- `settle_drags!` does not end a lost `SplitterDrag` or `ScrollDrag`.
+- An opacity edit from the Layer Style pane goes through `commit_opacity!`, so its undo label can differ from the other style edits.
+- `grid_bilinear` reads its corner values through `level_value`; reading the tile directly would be faster.
+- At scale 1 the cursor marker's centre sits on a pixel corner (0.5 px off a 1 px line).
+- `status_cache` is typed `Any`, so JET cannot see its type.
+- The map plan can be built up to 3 times in one frame while layers load.
+- `cursor_why` runs each frame while Go To Cursor is disabled; it is not pinned at 0 bytes.
+- In a borderline fit, the status bar separators can push the pointer text about 1 px past its box.
+- The Aqua precompile step stalled twice in full UI runs; most likely contention on a shared depot during a concurrent precompile.
 
 ## Checks on real systems
 
@@ -154,6 +178,7 @@ These were out of scope for the map view (plan 4a).
 - Windows: undo, append, rename and delete of a channel while its map layer loads (the loader holds files open with plain reads for a short time).
 - Windows: frame time p95 while a 20 M point layer and a 10k by 10k grid load (GC pauses).
 - Windows: the CPU fallback on a machine whose driver lacks `GL_R32F` or a complete float framebuffer.
+- Windows: watch for hitches from a 16.8 MB grid tile upload in one frame; if seen, split tile uploads into row bands with `glTexSubImage2D`.
 - Plan 5: `thrown_by_juliamag` (`app/worker.jl`) compares the first frame's file with `SOURCE_DIR` and `pathof(JuliaMagCore)`.
   In a packaged or relocated build the debug paths can differ.
   Then every JuliaMag `ArgumentError` would count as a bug.

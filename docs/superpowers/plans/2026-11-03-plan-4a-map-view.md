@@ -65,6 +65,7 @@ New for plan 4a:
   - line levels: buckets 1, 8, 64, 512, 4096 (`LOD_FACTOR = 8`), at most `POINT_BUDGET = 0.5` drawn points per view pixel;
   - culling margin: half the view size on each side (`CULL_MARGIN = 0.5`);
   - grid tiles `TILE = 2048` cells plus a 1-cell border on each side, `GL_R32F`;
+    Note: 2-cell border (`TILE_BORDER = 2`) by Task 14b ruling (2026-11-03); tiles hold only used cells plus the border.
   - histogram `HIST_BINS = 4096` (core), equalization table 1024 entries (core), colour tables 256 entries (core);
   - hillshade: Oasis defaults inclination 45, declination 45; light `(cosd(inc) sind(dec), cosd(inc) cosd(dec), sind(inc))`; vertical scale auto `2.5 / mean gradient`; colour times `0.25 + 0.75 h`;
   - percent clip default 0.5 low and 0.5 high;
@@ -441,6 +442,7 @@ A second `build_line_layer!` into the same `LineLayerData` with points of the sa
 - Produces:
   - `struct GridGeo; nx::Int; ny::Int; x0::Float64; y0::Float64; dx::Float64; dy::Float64; rotation::Float64; end`; `GridGeo(g::Core.Grid)`.
   - `struct GridLevel`: `k::Int`, `nx::Int`, `ny::Int` (`ceil` halves of the level below), `tiles::Matrix{Matrix{Float32}}`: tile `(ti, tj)` is `(tile + 2)` by `(tile + 2)` cells, with a 1-cell border taken from the neighbours at the same level, NaN outside the grid. Levels go down to 1 by 1.
+    Note: 2-cell border (`TILE_BORDER = 2`) by Task 14b ruling (2026-11-03); tiles hold only used cells plus the border.
   - `mutable struct GridLayerData`: `geo::GridGeo`, `tile::Int`, `levels::Vector{GridLevel}` (level 0 is the grid; the last is 1 by 1), `hist::Core.ValueHistogram`, `count::Int` (cells not NaN), `mean_gradient::Float64` (mean of `hypot(gx, gy)` from central differences over cells whose four neighbours are not NaN, in value units per world unit; NaN when there are none), `extent::NTuple{4,Float64}` (from the four corners), `version::Int`.
   - `build_grid_layer!(d, read_band!::Function, geo; tile = TILE)::GridLayerData`: `read_band!(buf, j1)` fills `buf` (`nx` by `n`, Float32) with rows `j1` on; the builder reads bands of `tile` rows (plus one border row), cuts level-0 tiles, adds to the histogram, then builds each level from the one below with NaN-aware 2 by 2 means (a 2 by 2 block of all NaN gives NaN), and cuts it into tiles with borders from that same level. Reuses `d`'s arrays.
   - `grid_level(d, res)::Int = clamp(floor(Int, log2(res / min(dx, dy))), 0, length(d.levels) - 1)`.
@@ -937,6 +939,7 @@ These are my calls; each says what it costs if wrong.
 
 - **Map items are written at once to `maps/<id>/map.json`, every change undoable and recorded**, as the approved scope says, not saved with a project Save. The app has no Save command, so spec 5.2 now says the same. The camera is view state and is not saved. Cost: a map opens at full extent each time.
 - **Grid levels are separate textures per level, cut from the whole level with a 1-cell border**, not GL mipmaps per tile. This fixes the spike's seams at tile edges and keeps NaN out of coarse levels. Cost: one draw per tile per level shown; at most a few dozen tiles.
+  Note: 2-cell border (`TILE_BORDER = 2`) by Task 14b ruling (2026-11-03); tiles hold only used cells plus the border.
 - **Grid cells are fetched with `texelFetch` and filtered in the shader**, so the NaN rule and bilinear filtering are the same on every driver and in the CPU renderer. Cost: four fetches per pixel for bilinear, plus four for hillshade.
 - **The line level is chosen by a point budget (0.5 points per view pixel)**, not by ground length per pixel, so a whole-survey view stays near the screen's pixel count; the llvmpipe numbers showed that the spike's 8-point buckets were too fine. Cost: a dense survey zoomed out shows coarser paths; min and max per bucket keep spikes.
 - **The map loader is a second task of the worker**, which reads item files by folder and never touches the session. So a big load never delays an Undo click on the serial worker. Cost: a load can read while a job writes the same item; the item's revision is checked when the load comes back, and a changed item is loaded again.
