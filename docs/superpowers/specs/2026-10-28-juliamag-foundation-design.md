@@ -242,7 +242,7 @@ Research: [`oasis-database.md`](../../research/oasis-database.md), [`oasis-grid-
 
 | Data | Formats in the first version |
 |---|---|
-| Line data | Geosoft XYZ, CSV and other delimited or fixed-width text |
+| Line data | Geosoft XYZ, Geosoft database (`.gdb`, read only), CSV and other delimited or fixed-width text |
 | Grids | Geosoft `.grd`, ER Mapper `.ers` |
 
 Later: ASEG-GDF2, Geosoft binary (GBN), Oasis import templates (`.i0`, `.i3`), Shapefile and KML into vector items.
@@ -274,6 +274,73 @@ The reader must handle:
 - `*` as the missing value, matched as text.
 - A column named `FIDUCIAL` sets the line's fiducial start and step.
 - A file with no line headers goes into one line.
+
+### 6.3a Geosoft database (`.gdb`)
+
+Research: [`geosoft-gdb-format.md`](../../research/geosoft-gdb-format.md).
+This subsection is numbered 6.3a so the numbers of 6.4 to 6.7 stay the same.
+
+JuliaMag reads Oasis montaj databases.
+It never writes them.
+Geosoft has never published the format.
+The reader follows the research note, and it is tested against public files and their Oasis XYZ exports.
+
+**How it imports.**
+
+- A `.gdb` file is imported once into the project's own format, like an XYZ file.
+- The two modes of 6.5 apply: a new database, or append to an existing one.
+- The file is read blob by blob through its directory.
+  A blob is the data of one channel on one line.
+  Memory stays at about one decompressed blob.
+- Progress and cancel work per blob (6.2).
+- The reader handles plain, zlib and LZRW1 data.
+
+**What it refuses.**
+
+- A folder named `*.gdb` is an ArcGIS file geodatabase, not a Geosoft database.
+  The message says so.
+- A file that does not start with `!CBD`, or that fails the layout checks, is refused with a clear message.
+  The reader never guesses.
+
+**Lines.**
+
+- Each line keeps its type (by its Oasis letter), number, version, flight and date.
+- A line name that is not a number, such as `L28_29`, gets the next free number of its type.
+  The warning keeps the original name.
+- Group lines are skipped with a warning.
+
+**Channels.**
+
+- Each channel keeps its name, label, units, display format, width, decimals and array width.
+- Deleted channel slots in the file are skipped.
+- Imported channels start protected, as with every import.
+- Integer types that JuliaMag lacks are widened to the smallest JuliaMag type that holds every value.
+  When no type does, the channel becomes Float64 with a warning.
+- Geosoft dummies become JuliaMag missing values.
+  A real value that equals JuliaMag's missing marker gives a warning.
+
+**Sampling.**
+
+- JuliaMag keeps one sampling per line (5.3).
+  Oasis allows a fiducial start and step per channel.
+- The line's main sampling is the one most of its channels share.
+  On a tie, it is the sampling of the first channel in display order.
+- A channel with another fiducial start or step is resampled onto the main sampling by linear interpolation, as Oasis does on XYZ export.
+  A warning names the line and the channels.
+- Missing values are not interpolated across.
+- Channels with the same sampling but fewer rows are padded with missing values, with a warning.
+
+**Coordinate system.**
+
+- Oasis stores a coordinate system per pair of channels, as JuliaMag does.
+- The current X and Y channels of the file become the current position pair.
+- The coordinate system name is looked up as an EPSG code.
+- An unknown or custom coordinate system gives an empty coordinate system and a warning.
+  The user then sets it (6.6).
+
+**Warnings.**
+
+Every skipped or changed item gives a warning that names the line and the channel.
 
 ### 6.4 CSV and other text
 
@@ -576,7 +643,8 @@ From the RustGIS code, that means:
 - A plugin registry or installer (tool packages are loaded from folders only).
 - Basemaps and web data.
 - AI assistant, web version, translations.
-- Reading or writing Oasis `.gdb` databases, `.gpf` projects or `.map` files.
+- Writing Oasis `.gdb` databases.
+- Reading or writing Oasis `.gpf` projects or `.map` files.
 - Oasis-only items with no use here: database sizing and maintenance (Grow, Defragment), ODBC, old instrument formats, plotter set-ups, Seequent Central, control-file gridding, Backup/Restore X,Y (undo covers it), Design Survey.
 
 ## 12. Anti-goals
@@ -617,6 +685,7 @@ Also, following from the above:
   Plan 4a is the map view (agreed on 2026-11-03).
   Plan 4b is the database view, the profile view and the statistics pane.
   Plan 4c is the CSV import wizard and the coordinate system picker.
+- The user decided JuliaMag imports Oasis `.gdb` databases, read only (2026-11-04).
 
 ### 13.3 Claude's calls (the user handed library choices over)
 
