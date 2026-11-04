@@ -4,7 +4,11 @@
 
 using CodecZlib: ZlibCompressor, transcode
 
-"One channel record of a test database. `type` is a Geosoft `GS_*` code, or minus the width of a string."
+"""
+One channel record of a test database. `type` is a Geosoft `GS_*` code, or minus the width of a string.
+`deleted` sets bit 0 of the flags. A non-empty `name_bytes` is stored as the name instead of `name`,
+so a test can write a name that is not UTF-8.
+"""
 Base.@kwdef struct TestChannel
     name::String
     type::Int = 5
@@ -14,9 +18,13 @@ Base.@kwdef struct TestChannel
     decimals::Int = 2
     flags::Int = 2
     deleted::Bool = false
+    name_bytes::Vector{UInt8} = UInt8[]
 end
 
-"One line record of a test database. `type` is the Geosoft line type code (0 `L` ... 6 `D`)."
+"""
+One line record of a test database. `type` is the Geosoft line type code (0 `L` ... 6 `D`).
+A non-empty `name_bytes` is stored as the name instead of `name`.
+"""
 Base.@kwdef struct TestLine
     name::String
     number::Int = 0
@@ -25,6 +33,7 @@ Base.@kwdef struct TestLine
     flight::Int = 0
     date::Float64 = 0.0
     category::Int = 100
+    name_bytes::Vector{UInt8} = UInt8[]
 end
 
 "The data of one channel on one line. `pack` is `:none`, `:zlib`, `:lzrw1` or `:lzrw1_stored`."
@@ -63,6 +72,25 @@ put_u16!(b::Vector{UInt8}, off::Int, v::Integer) = (b[off + 1:off + 2] = reinter
 put_f64!(b::Vector{UInt8}, off::Int, v::Real) = (b[off + 1:off + 8] = reinterpret(UInt8, [htol(Float64(v))]); b)
 put_bytes!(b::Vector{UInt8}, off::Int, x::AbstractVector{UInt8}) = (b[off + 1:off + length(x)] = x; b)
 put_name!(b::Vector{UInt8}, off::Int, s::AbstractString) = put_bytes!(b, off, Vector{UInt8}(codeunits(s)))
+"Store a record name: `raw` when it is not empty, else the UTF-8 bytes of `s`."
+put_name!(b::Vector{UInt8}, off::Int, s::AbstractString, raw::Vector{UInt8}) =
+    isempty(raw) ? put_name!(b, off, s) : put_bytes!(b, off, raw)
+
+"""
+    test_gdb_garbage(n, seed)
+
+`n` bytes that look like garbage (binary, mostly not printable). The same
+`seed` always gives the same bytes, so the tests do not depend on luck.
+"""
+function test_gdb_garbage(n::Int, seed::Int)::Vector{UInt8}
+    x = UInt64(0x9e3779b97f4a7c15) * UInt64(seed + 1)
+    out = Vector{UInt8}(undef, n)
+    for k in 1:n
+        x ⊻= x << 13; x ⊻= x >> 7; x ⊻= x << 17
+        out[k] = UInt8(x & 0xff)
+    end
+    return out
+end
 
 "The chunk magic that starts the payload part of a packed blob header."
 const TEST_GDB_CHUNK_MAGIC = UInt8[0x0f, 0x0e, 0xff, 0xfe, 0x12, 0x34, 0x56, 0x78]
@@ -122,12 +150,23 @@ returns a `TestBlob` or `nothing` (no directory entry). `admin` adds named admin
 objects: the bytes of the whole blob, whose first 24 bytes the writer fills in.
 `tweak(bytes)` gets the 256 header bytes before they are written.
 The writer streams: it writes the blobs first, then seeks back for the tables.
+
+Damage and history, by blob index (`line_slot * chans_max + chan_slot`, or an admin index):
+- `garbage_channels`: that many channel slots after the real ones hold garbage bytes with bit 0
+  of the flags set, as in `7042_106_wform`.
+- `stale`: a second, later copy of those blobs, with other values, that the directory does not
+  point at (as the `__552` registry in AirMag).
+- `dead`: those blobs are written, but their slots are not live.
+- `misdirect`: those live slots point one page past their blob.
 """
 function write_test_gdb(path::AbstractString; channels::Vector{TestChannel}, lines::Vector{TestLine},
-                        blob = (line_slot, chan_slot) -> nothing,
-                        chans_max::Int = max(4, length(channels)), lines_max::Int = max(4, length(lines)),
+                        blob = (line_slot, chan_slot) -> nothing, garbage_channels::Int = 0,
+                        chans_max::Int = max(4, length(channels) + garbage_channels), lines_max::Int = max(4, length(lines)),
                         blobs_max::Int = 16, users_max::Int = 2, cache::Int = 8, page_size::Int = 1024,
-                        comp_level::Int = 0, admin = Pair{String,Vector{UInt8}}[], tweak = h -> h)
+                        comp_level::Int = 0, admin = Pair{String,Vector{UInt8}}[], tweak = h -> h,
+                        stale::Vector{Int} = Int[], dead::Vector{Int} = Int[],
+                        misdirect::Vector{Int} = Int[])
+    chans_max >= length(channels) + garbage_channels || error("chans_max is too small for the garbage channels")
     first_admin = lines_max * chans_max
     w60 = first_admin + blobs_max + users_max
     dir_slots = w60 + cache
@@ -138,12 +177,16 @@ function write_test_gdb(path::AbstractString; channels::Vector{TestChannel}, lin
     page = 0
     open(path, "w") do io
         seek(io, start_page * page_size)
-        function put_blob(index::Int, body::Vector{UInt8})
+        stale_bodies = Dict{Int,Vector{UInt8}}()
+        function put_blob(index::Int, body::Vector{UInt8}; in_dir::Bool = true)
             bytes = test_gdb_page_blob(body, index, page_size)
             pages = length(bytes) ÷ page_size
             write(io, bytes)
-            put_u32!(dir, index * 6, UInt32(page) | 0x80000000)
-            put_u16!(dir, index * 6 + 4, pages)
+            if in_dir
+                slot = index in misdirect ? page + 1 : page
+                put_u32!(dir, index * 6, index in dead ? UInt32(slot) : UInt32(slot) | 0x80000000)
+                put_u16!(dir, index * 6 + 4, pages)
+            end
             page += pages
         end
         for (ls, _) in enumerate(lines), (cs, c) in enumerate(channels)
@@ -151,12 +194,22 @@ function write_test_gdb(path::AbstractString; channels::Vector{TestChannel}, lin
             b === nothing && continue
             index = (ls - 1) * chans_max + (cs - 1)
             put_blob(index, test_gdb_blob_bytes(b, c.type, index))
+            if index in stale
+                other = c.type < 0 ? reverse(b.values) : b.values .+ 1
+                stale_bodies[index] = test_gdb_blob_bytes(TestBlob(values = other, fid_start = b.fid_start,
+                                                                   fid_step = b.fid_step, pack = b.pack),
+                                                          c.type, index)
+            end
         end
         for (k, (_, bytes)) in enumerate(admin)
             body = copy(bytes)
             length(body) < 24 && append!(body, zeros(UInt8, 24 - length(body)))
             put_i32!(body, 20, 100)
             put_blob(first_admin + k - 1, body)
+            first_admin + k - 1 in stale && (stale_bodies[first_admin + k - 1] = vcat(body, UInt8[0x01]))
+        end
+        for index in sort!(collect(keys(stale_bodies)))
+            put_blob(index, stale_bodies[index]; in_dir = false)
         end
         h = zeros(UInt8, 256)
         put_name!(h, 0, "!CBD")
@@ -177,7 +230,7 @@ function write_test_gdb(path::AbstractString; channels::Vector{TestChannel}, lin
         l0 = blobs_max * 128
         for (k, l) in enumerate(lines)
             r = l0 + (k - 1) * 128
-            put_name!(tables, r, l.name)
+            put_name!(tables, r, l.name, l.name_bytes)
             put_i32!(tables, r + 76, l.category)
             put_f64!(tables, r + 84, l.date)
             put_i32!(tables, r + 92, l.number)
@@ -188,7 +241,7 @@ function write_test_gdb(path::AbstractString; channels::Vector{TestChannel}, lin
         c0 = l0 + lines_max * 128
         for (k, c) in enumerate(channels)
             r = c0 + (k - 1) * 128
-            put_name!(tables, r, c.name)
+            put_name!(tables, r, c.name, c.name_bytes)
             put_i16!(tables, r + 76, c.type)
             put_i16!(tables, r + 78, c.deleted ? c.flags | 1 : c.flags)
             put_i16!(tables, r + 84, c.format)
@@ -198,12 +251,19 @@ function write_test_gdb(path::AbstractString; channels::Vector{TestChannel}, lin
             put_i16!(tables, r + 108, 5)
             put_i16!(tables, r + 110, c.arraylen)
         end
+        for k in 1:garbage_channels
+            r = c0 + (length(channels) + k - 1) * 128
+            put_bytes!(tables, r, test_gdb_garbage(128, k))
+            tables[r + 79] |= 0x01          # the low byte of the int16 flags at +78
+        end
         put_name!(tables, c0 + chans_max * 128, "SUPER")
         seekstart(io)
         write(io, tweak(h))
         write(io, zeros(UInt8, 24))
         write(io, dir)
         write(io, tables)
+        # A file with no blobs ends at the first blob page, as the header says.
+        truncate(io, (start_page + page) * page_size)
     end
     return path
 end
