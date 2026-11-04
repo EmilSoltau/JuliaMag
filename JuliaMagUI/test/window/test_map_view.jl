@@ -66,9 +66,12 @@ window_testset("map view") do
             put!(hold, nothing)
             ctx.on_render(w -> (app.ui.current_map = ""))
         end
+        # The plan's first show within 5 s is measured by bench/map_frame.jl on a survey-sized
+        # map. Here the bound only catches a hang: 12 s is 3 times the slowest first picture seen
+        # on llvmpipe (about 4 s, Task 16); this small map shows in about 0.2 s.
         t0 = time()
-        show_map!(ctx, app, ids.m)
-        @test time() - t0 < 5
+        show_map!(ctx, app, ids.m; timeout = 15)
+        @test time() - t0 < 12
         st = view_state(app)
         w, h = view_size(app)
         @test st.camera == full_camera(app, ids.m, w, h)

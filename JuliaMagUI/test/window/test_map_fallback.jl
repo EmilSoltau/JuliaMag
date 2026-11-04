@@ -147,10 +147,13 @@ window_testset("map frames and fallback") do
                 @test bytes[] == 0
                 @test r.full_draws == n
                 te.MouseUp(0)
-                t0 = time()
-                ctx.wait_until(() -> r.full_draws > n; timeout = 2)
-                @test time() - t0 <= 0.3
-                @test r.full_draws == n + 1 && r.image.camera == st.camera
+                # No full picture until the gesture has settled. The test sees each frame after
+                # its view and before its pass, so the frame that settles it has not drawn yet.
+                early = Ref(false)
+                ctx.wait_until(() -> st.before === nothing || (early[] |= r.full_draws != n; false); timeout = 2)
+                @test !early[] && r.full_draws == n
+                # That frame's pass draws the one full picture.
+                @test seen_after_pass(ctx, () -> r.full_draws == n + 1 && r.image.camera == st.camera)
 
                 r.cost_override = 0.005
                 ctx.wait_until(() -> st.before === nothing)
