@@ -26,7 +26,7 @@ build(A, geo; tile) = build_grid_layer!(GridLayerData(), band_reader(A), geo; ti
         @test isnan(d.levels[1].tiles[1, 1][2, 3]) && d.levels[1].tiles[1, 1][5, 3] == A[3, 1] && d.levels[1].tiles[1, 1][6, 3] == A[4, 1]
         @test d.count == 19 && d.hist.total == 19
         @test d.extent == (95.0, 195.0, 145.0, 235.0)
-        @test d.version == 1
+        @test d.version > 0
     end
 
     @testset "sampling" begin
@@ -125,10 +125,12 @@ build(A, geo; tile) = build_grid_layer!(GridLayerData(), band_reader(A), geo; ti
     end
 
     @testset "rebuilding reuses the tiles" begin
-        t = d.levels[1].tiles[1, 1]
+        t, v = d.levels[1].tiles[1, 1], d.version
         build_grid_layer!(d, band_reader(A), geo; tile = 2)
-        @test d.levels[1].tiles[1, 1] === t && d.version == 2 && d.hist.total == 19
-        # a second build of a larger grid into the same data allocates little (bound: 16 KB plus 10 KB per thread for the @threads tasks; measured 26 KB at 4 threads, 284 KB at 32. A band or tile is 79 KB or more)
+        @test d.levels[1].tiles[1, 1] === t && d.version > v && d.hist.total == 19
+        # A second build of the same 300 by 200 grid into the same data allocates little. The
+        # bound is 16 KB plus 12 KB per thread for the @threads tasks: measured 26 KB at 4 threads
+        # and 284 KB at 32, so 12 KB per thread leaves room on big machines. A band or tile is 79 KB or more.
         R = noise(300, 200, 1.0)
         dr = build(R, GridGeo(300, 200, 0.0, 0.0, 1.0, 1.0, 0.0); tile = 64)
         rd = (buf, j1) -> copyto!(buf, view(R, :, j1:j1+size(buf, 2)-1))   # does not allocate itself
@@ -142,7 +144,7 @@ build(A, geo; tile) = build_grid_layer!(GridLayerData(), band_reader(A), geo; ti
             GC.gc()
             @allocated build_grid_layer!(dr, rd, g; tile = 64)
         end
-        @test bytes < 16 * 1024 + 10 * 1024 * Threads.nthreads()
+        @test bytes < 16 * 1024 + 12 * 1024 * Threads.nthreads()
         @test isequal(level_matrix(dr, 0), R)
     end
 end

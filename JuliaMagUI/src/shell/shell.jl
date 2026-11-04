@@ -407,3 +407,16 @@ function draw_tooltip(app)
     end
     return nothing
 end
+
+"""
+    settle_drags!(app)
+
+End a drag of the shell whose item is no longer ImGui's active item: a layer row drag or a
+slider drag whose row or slider went away while the mouse was down (an undo took the layer
+out), so no release ever comes. Call it once per frame, before drawing.
+"""
+function settle_drags!(app)
+    d = app.ui.drag
+    (d isa LayerDrag || d isa SliderDrag) && lib.igGetActiveID() != d.id && (app.ui.drag = nothing)
+    return nothing
+end

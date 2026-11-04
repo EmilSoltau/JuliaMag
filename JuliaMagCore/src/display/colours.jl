@@ -196,14 +196,16 @@ end
     colour_position(v, lo, hi, table) -> Float32
 
 Where `v` falls on a colour table, from 0 to 1. `NaN` for a `NaN` value, 0.5 when the
-limits are equal or `NaN`. `table` is an equalization table (see `equalize_table`) or
-`nothing` for a linear stretch.
+limits are equal or not finite. `table` is an equalization table (see `equalize_table`) or
+`nothing` for a linear stretch; a table of one entry gives that entry, an empty one counts
+as `nothing`.
 """
 function colour_position(v::Real, lo::Real, hi::Real, table::Union{Nothing,AbstractVector{Float32}})::Float32
     isnan(v) && return NaN32
-    (isnan(lo) || isnan(hi) || lo == hi) && return 0.5f0
+    (isfinite(lo) && isfinite(hi) && lo != hi) || return 0.5f0
     t = clamp((Float64(v) - lo) / (Float64(hi) - lo), 0.0, 1.0)
-    table === nothing && return Float32(t)
+    (table === nothing || isempty(table)) && return Float32(t)
+    length(table) == 1 && return table[1]
     x = t * (length(table) - 1)
     i = min(floor(Int, x), length(table) - 2)
     f = Float32(x - i)

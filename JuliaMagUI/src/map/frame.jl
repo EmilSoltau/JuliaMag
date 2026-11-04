@@ -616,9 +616,10 @@ end
 
 # A texture `tex` (made when 0) of `size`, sized again to `w` by `h` when it differs: the
 # texture and its size. Linear, so a moved and scaled picture is smooth; drawn at its own size
-# it shows each pixel as it is.
+# it shows each pixel as it is. A texture made here is deleted again when it cannot be sized.
 function sized_texture!(tex::UInt32, size::NTuple{2,Int}, w::Int, h::Int)::Tuple{UInt32,NTuple{2,Int}}
-    if tex == 0
+    made = tex == 0
+    if made
         tex = gl_gen(GL.glGenTextures)
         GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
         set_texture_params!(GL.GL_LINEAR)
@@ -630,8 +631,10 @@ function sized_texture!(tex::UInt32, size::NTuple{2,Int}, w::Int, h::Int)::Tuple
         GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGBA8, w, h, 0, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, C_NULL)
         GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
         err = GL.glGetError()
-        err == GL.GL_NO_ERROR ||
+        if err != GL.GL_NO_ERROR
+            made && gl_delete(GL.glDeleteTextures, tex)
             error("The map image of $w by $h pixels could not be made: " * gl_error_text(err) * ".")
+        end
         size = (w, h)
     end
     return tex, size

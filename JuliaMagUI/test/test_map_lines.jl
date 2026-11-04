@@ -79,9 +79,10 @@ using JuliaMagUI: Camera, fit_extent, LineLayerData, build_line_layer!, choose_l
         mk() = line_points([[(500_000.0 + 10i, 7_000_000.0, sin(i / 50)) for i in 1:10_000]])
         d = LineLayerData()
         build_line_layer!(d, mk())
+        v = d.version
         pts = mk()
         build_line_layer!(d, pts)
         @test (@allocated build_line_layer!(d, pts)) < 1024
-        @test d.version == 3
+        @test d.version >= v + 2   # a new version for each build
     end
 end

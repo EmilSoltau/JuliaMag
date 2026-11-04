@@ -6,6 +6,10 @@
         @test length(g) == 256 && g[1] == (0x00, 0x00, 0xa0) && g[129] == (62, 220, 59) && g[256] == (230, 0, 160)
         @test colour_table("viridis")[1] == (68, 1, 84) && colour_table("viridis")[256] == (253, 231, 37)
         @test colour_table("turbo")[1] == (48, 18, 59) && colour_table("turbo")[256] == (122, 4, 3)
+        # Mid-table spot checks, so a typo inside a table shows: matplotlib's viridis(0.25) and
+        # viridis(0.5) are #3b528b and #21918c; Google's turbo at 64 and 128 is #28bceb and #a4fc3c.
+        @test colour_table("viridis")[65] == (0x3b, 0x52, 0x8b) && colour_table("viridis")[129] == (0x21, 0x91, 0x8c)
+        @test colour_table("turbo")[65] == (0x28, 0xbc, 0xeb) && colour_table("turbo")[129] == (0xa4, 0xfc, 0x3c)
         @test colour_table("rainbow")[1] == (0, 0, 255) && colour_table("rainbow")[256] == (255, 0, 0)
         @test colour_table("grey")[256] == (255, 255, 255) && colour_table("blue-red")[129][3] > 0xf0
         for (name, _) in colour_tables()
@@ -53,6 +57,15 @@
         @test colour_position(0.25, 0.0, 1.0, tab) == 0.25f0 && colour_position(1.0, 0.0, 1.0, tab) == 1f0
         tab2 = Float32[0, 0.9, 1]
         @test isapprox(colour_position(0.25, 0.0, 1.0, tab2), 0.45f0)
+        # Limits that are not finite give the middle, with a table too; a value past them is clamped.
+        for t in (nothing, tab)
+            @test colour_position(1.0, -Inf, Inf, t) == 0.5f0 && colour_position(1.0, 0.0, Inf, t) == 0.5f0
+            @test colour_position(1.0, NaN, 3.0, t) == 0.5f0
+            @test colour_position(Inf, 0.0, 1.0, t) == 1f0 && colour_position(-Inf, 0.0, 1.0, t) == 0f0
+        end
+        # A table of one entry is that entry; an empty one is a linear stretch.
+        @test colour_position(0.3, 0.0, 1.0, Float32[0.7]) == 0.7f0
+        @test colour_position(0.3, 0.0, 1.0, Float32[]) == 0.3f0
     end
 
     @testset "effective style" begin

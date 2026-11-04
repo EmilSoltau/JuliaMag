@@ -276,9 +276,13 @@ step_excess(p, k) = abs((Int(p[k+1]) - Int(p[k])) - ((Int(p[k]) - Int(p[k-1])) +
         s = Scene(sc.camera, 4, 3, black, [grid_draw(g), line_draw(d)], 0)
         render_cpu!(img, s)
         @test rgba(img[1, 2]) == (0xff, 0x00, 0x00, 0xff) && rgba(img[1, 1]) == (0xb9, 0xb9, 0xb9, 0xff)
+        # The other order: the grid, drawn last, covers the line wherever it has a value, so
+        # the picture is the grid's own.
+        render_cpu!(img, Scene(sc.camera, 4, 3, black, [grid_draw(g)], 0))
+        grid_only = copy(img)
         s2 = Scene(sc.camera, 4, 3, black, [line_draw(d), grid_draw(g)], 0)
         render_cpu!(img, s2)
-        @test rgba(img[1, 2])[1] == rgba(img[1, 2])[2]
+        @test img == grid_only && rgba(img[1, 2]) != (0xff, 0x00, 0x00, 0xff)
     end
 
     @testset "threads give equal images" begin
@@ -343,5 +347,12 @@ step_excess(p, k) = abs((Int(p[k+1]) - Int(p[k])) - ((Int(p[k]) - Int(p[k-1])) +
         # The stored key does not count, and the layer order does
         @test scene_key(Scene(Camera(2.0, 1.5, 1.0), 4, 3, black, [grid_draw(g), line_draw(d)], 7)) == scene_key(mk())
         @test scene_key(Scene(Camera(2.0, 1.5, 1.0), 4, 3, black, [line_draw(d), grid_draw(g)], 0)) != scene_key(mk())
+        # Every build gets a version no other data has, so the key needs no object address,
+        # which a new object may reuse after a collection.
+        pts = line_points([[(0.0, 1.5, 0.5), (4.0, 1.5, 0.2)]])
+        d1, d2 = build_line_layer!(LineLayerData(), pts), build_line_layer!(LineLayerData(), pts)
+        @test d1.version != d2.version && g.version ∉ (d1.version, d2.version)
+        @test scene_key(mk(ll = line_draw(d1))) != scene_key(mk(ll = line_draw(d2)))
+        @test scene_key(mk(ll = line_draw(deepcopy(d1)))) == scene_key(mk(ll = line_draw(d1)))
     end
 end

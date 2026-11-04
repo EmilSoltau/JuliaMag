@@ -15,7 +15,7 @@ const PENDING_REDRAW = 0.25       # s between full pictures of a slow renderer w
 
 # Line levels
 const LOD_FACTOR = 8
-const LINE_LEVELS = (1, 8, 64, 512, 4096)   # points per bucket
+const LINE_LEVELS = 5             # levels at most: buckets of 1, 8, 64, 512 and 4096 points
 const POINT_BUDGET = 0.5          # drawn points per view pixel, at most
 const CULL_MARGIN = 0.5           # share of the view size kept on each side
 

@@ -37,7 +37,7 @@ const LEVEL_SHRINK = 0.75   # a level must keep under this share of the points o
 """
 The data of one line layer: the points, their levels, the box of each part, the value
 histogram, the pick index and the extent of the good points (`nothing` for none).
-`version` counts the builds.
+`version` is new for each build (`next_data_version`).
 """
 mutable struct LineLayerData
     points::Core.LinePoints
@@ -52,6 +52,17 @@ end
 
 LineLayerData() = LineLayerData(Core.LinePoints(), LineLevel[], NTuple{4,Float32}[], Core.ValueHistogram(),
                                 PointIndex(), nothing, 0, UInt8[])
+
+const DATA_VERSION = Threads.Atomic{Int}(0)
+
+"""
+    next_data_version() -> Int
+
+A version no layer data of this process had before. Each build and each swap into a layer
+takes one, so a version alone tells two builds apart: the scene key needs no object address,
+which a new object may reuse after a collection. Any thread may call it.
+"""
+next_data_version()::Int = Threads.atomic_add!(DATA_VERSION, 1) + 1
 
 """
     NearPoint
@@ -77,11 +88,11 @@ Fill `d` from `pts` in place, reusing its arrays. Level `k` keeps, per bucket of
 points of a part, the points with the lowest and the highest value in their order, and the
 first and last point of the part. A part with no values uses the coordinate across its
 longer side. Levels go up by `LOD_FACTOR` while a level has under 75 % of the points of
-the one before and the bucket is at most the longest part (and at most the last of `LINE_LEVELS`).
+the one before and the bucket is at most the longest part (and at most `LOD_FACTOR^(LINE_LEVELS - 1)`).
 """
 function build_line_layer!(d::LineLayerData, pts::Core.LinePoints)::LineLayerData
     d.points = pts
-    d.version += 1
+    d.version = next_data_version()
     fill_boxes!(d.part_box, d.part_key, pts.x, pts.y, pts.value, pts.part_first, pts.part_count)
     d.extent = lines_extent(pts.extents)
     fill_histogram!(d.hist, pts.value)
@@ -158,7 +169,7 @@ function build_levels!(d::LineLayerData, pts::Core.LinePoints)
     longest = Int(maximum(pts.part_count; init = Int32(0)))
     nkeep = 1
     bucket = 1
-    while bucket * LOD_FACTOR <= min(longest, last(LINE_LEVELS))
+    while bucket * LOD_FACTOR <= min(longest, LOD_FACTOR^(LINE_LEVELS - 1))
         bucket *= LOD_FACTOR
         k = nkeep + 1
         if k > length(levels) || levels[k].bucket != bucket

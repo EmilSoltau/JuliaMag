@@ -6,13 +6,13 @@
     Camera(cx, cy, res)
 
 The view centre `(cx, cy)` in world units and `res` world units per device pixel.
-`res` is clamped to `MIN_RES:MAX_RES`.
+`res` is clamped to `MIN_RES:MAX_RES`; a `NaN` res is 1.
 """
 struct Camera
     cx::Float64
     cy::Float64
     res::Float64
-    Camera(cx::Real, cy::Real, res::Real) = new(cx, cy, clamp(res, MIN_RES, MAX_RES))
+    Camera(cx::Real, cy::Real, res::Real) = new(cx, cy, isnan(res) ? 1.0 : clamp(res, MIN_RES, MAX_RES))
 end
 
 world_to_screen(c::Camera, w, h, x, y)::NTuple{2,Float64} =
@@ -119,10 +119,12 @@ function scale_bar(res, target_px, unit::AbstractString)::NamedTuple{(:world, :p
     return (world = world, px = world / res, label = label)
 end
 
-# Fill `out` with the multiples of the step in `[lo, hi]`. Returns the step.
+# Fill `out` with the multiples of the step in `[lo, hi]`; none when a limit is not finite.
+# Returns the step.
 function tick_values!(out::Vector{Float64}, lo, hi, min_px, res)::Float64
     step = nice_step(Float64(min_px * res))
     empty!(out)
+    (isfinite(lo) && isfinite(hi)) || return step
     i0 = ceil(Int, lo / step)
     i1 = floor(Int, hi / step)
     for i in i0:i1

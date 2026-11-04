@@ -164,6 +164,33 @@ window_testset("map view") do
             @test st.camera == full_camera(app, ids.m, w, h)
         end
 
+        @testset "the overlays of a steady pan allocate nothing" begin
+            # Every overlay on: ticks, line labels, the cursor's marker, the scale bar, two legends.
+            l1 = app.snap.databases[ids.db].lines[1].id
+            ctx.on_render(win -> UI.submit!(app, "cursor", s -> Core.set_cursor!(s, Core.Cursor(ids.db, l1, 3))))
+            ctx.wait_until(() -> app.snap.cursor !== nothing)
+            ctx.frames(2)
+            mv = app.snap.maps[ids.m]
+            c0 = st.camera
+            # Two cameras a few pixels apart; each is drawn once to warm, then again, in turn.
+            cams = (Camera(c0.cx + 3c0.res, c0.cy - 2c0.res, c0.res), Camera(c0.cx - 4c0.res, c0.cy + 3c0.res, c0.res))
+            bytes = Int[]
+            ctx.on_render(win -> begin
+                UI.ig.Begin("overlay allocations")
+                dl = UI.ig.GetWindowDrawList()
+                b = app.map.view
+                for k in 1:6
+                    st.camera = cams[isodd(k) ? 1 : 2]
+                    n = @allocated UI.draw_overlays(app, dl, b, mv, st)
+                    k > 2 && push!(bytes, n)
+                end
+                UI.ig.End()
+                st.camera = c0
+            end)
+            @test bytes == [0, 0, 0, 0]
+            @test isempty(app.draw_errors)
+        end
+
         @testset "Review Focus 4: the window resized during a drag" begin
             c0 = st.camera
             v0 = app.map.view

@@ -26,6 +26,7 @@ using JuliaMagUI: Camera, world_to_screen, screen_to_world, wheel_factor, zoom_a
         @test Camera(0, 0, 1e12).res == UI.MAX_RES
         @test zoom_at(Camera(0, 0, UI.MIN_RES), 10.0, 5, 5, 800, 600).res == UI.MIN_RES
         @test fit_extent((5.0, 5.0, 5.0, 5.0), 800, 600).res == UI.MIN_RES
+        @test Camera(0, 0, NaN).res == 1.0   # never NaN: every transform would be NaN
     end
     @testset "fit and union" begin
         f = fit_extent((0.0, 0.0, 1000.0, 500.0), 800, 600)
@@ -61,6 +62,13 @@ using JuliaMagUI: Camera, world_to_screen, screen_to_world, wheel_factor, zoom_a
         out = Float64[]; @test tick_values!(out, 500_000.0, 508_000.0, 90, 10.0) == 1000.0 && length(out) == 9
         @test out[1] == 500_000.0 && out[end] == 508_000.0
         @test (@allocated tick_values!(out, 500_000.0, 508_000.0, 90, 10.0)) == 0
+        # Limits that are not finite give no ticks; a step that is not positive is 1.
+        for (lo, hi) in ((NaN, 1.0), (0.0, Inf), (-Inf, Inf))
+            @test (tick_values!(out, lo, hi, 90, 10.0); isempty(out))
+        end
+        @test UI.nice_pick(0.0, true) == 1.0 && UI.nice_pick(-5.0, false) == 1.0 && UI.nice_pick(NaN, true) == 1.0
+        # The line levels follow from LOD_FACTOR: buckets 1, 8, 64, 512 and 4096.
+        @test UI.LOD_FACTOR .^ (0:UI.LINE_LEVELS-1) == [1, 8, 64, 512, 4096]
         @test coord_text(501_000.0, 1000.0) == "501,000" && coord_text(12.25, 0.05) == "12.25"
     end
     @testset "gl transform matches world_to_screen" begin

@@ -340,11 +340,9 @@ end
 """
     open_layer_style!(app)
 
-Show the Layer Style pane, the right pane's `:style` tab, for the selected layer. It does
-nothing until that pane is one of `RIGHT_TABS`.
+Show the Layer Style pane, the right pane's `:style` tab, for the selected layer.
 """
 function open_layer_style!(app)
-    lookup_tab(:style) === nothing && return nothing
     open_right_pane!(app, :style)
     return nothing
 end

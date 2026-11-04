@@ -91,10 +91,10 @@ function hash_all(v::Vector{T}, h::UInt)::UInt where {T}
     return h
 end
 
-# The hash of the style values of a layer, after its data's identity, version and level.
+# The hash of the style values of a layer, after its data's version and level. A version is
+# never given twice (`next_data_version`), so it stands for the data.
 function layer_key(l::LineDraw, h::UInt)::UInt
     h = hash(:line, h)
-    h = hash(objectid(l.data), h)
     h = hash(l.data.version, h)
     h = hash(l.level, h)
     h = hash_all(l.lut, h)
@@ -107,7 +107,6 @@ end
 
 function layer_key(l::GridDraw, h::UInt)::UInt
     h = hash(:grid, h)
-    h = hash(objectid(l.data), h)
     h = hash(l.data.version, h)
     h = hash(l.level, h)
     h = hash_all(l.lut, h)
@@ -124,7 +123,7 @@ end
 """
     scene_key(sc) -> UInt64
 
-A hash of the camera, the size, the background and, per layer in order, its data and
+A hash of the camera, the size, the background and, per layer in order, its data's
 `version`, its level and every style value. Equal keys mean equal pictures. Does not allocate.
 """
 function scene_key(sc::Scene)::UInt64
@@ -150,8 +149,9 @@ rgba_bytes(c::NTuple{4,Float32})::NTuple{4,UInt8} =
 
 What a layer of a map keeps between frames so that drawing it allocates nothing: its draw,
 changed in place (`line` or `grid`), its look-up table with the colour table and direction it
-was made for, its equalization table with the data build it was made for, and its line labels
-(the first point, name and direction of each line) with the build they were read from.
+was made for, its equalization table with the data build it was made for, its line labels
+(the first point, name and direction of each line) with the build they were read from, and
+the texts of its legend card with what they were made from (`legend_texts!`).
 """
 mutable struct LayerLook
     line::Union{Nothing,LineDraw}
@@ -167,10 +167,19 @@ mutable struct LayerLook
     label_points::Vector{Tuple{Int,Float64,Float64}}
     label_names::Vector{String}
     label_dirs::Vector{NTuple{2,Float64}}
+    legend_snap::Any
+    legend_data::Any
+    legend_version::Int
+    legend_scale::Float32
+    legend_stretch::Tuple{Symbol,Float64,Float64,Float64,Float64}
+    legend_title::String
+    legend_units::String
+    legend_values::NTuple{3,String}
 end
 
 LayerLook() = LayerLook(nothing, nothing, UInt8[], "", false, zeros(Float32, 1024), nothing, -1, nothing, -1,
-                        Tuple{Int,Float64,Float64}[], String[], NTuple{2,Float64}[])
+                        Tuple{Int,Float64,Float64}[], String[], NTuple{2,Float64}[],
+                        nothing, nothing, -1, 0f0, (:none, NaN, NaN, NaN, NaN), "", "", ("", "", ""))
 
 """
     build_scene!(sc, app, mv::MapView, st::MapViewState, w, h) -> sc

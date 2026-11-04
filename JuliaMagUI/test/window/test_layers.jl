@@ -217,6 +217,12 @@ window_testset("layers tab") do
             @test undo_depth(s) == n + 2                        # one undo step per press
             ctx.key("Right")
             ctx.wait_until(() -> app.snap.maps[ids.m].layers[2].opacity == 0.99)
+            # With Ctrl or Alt held, the arrows are not the slider's.
+            for chord in ("Ctrl+Left", "Alt+Left", "Ctrl+Right", "Alt+Right")
+                ctx.key(chord)
+            end
+            ctx.frames(3)
+            @test undo_depth(s) == n + 3 && app.snap.maps[ids.m].layers[2].opacity == 0.99
             te.MouseMoveToPos((700f0, 600f0))
             for _ in 1:3
                 ctx.key("Ctrl+Z")

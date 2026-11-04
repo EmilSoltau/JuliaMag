@@ -356,8 +356,9 @@ end
 crs_short(snap::Snapshot, code::AbstractString) = isempty(code) ? "no system" :
     (info = get(snap.crs, code, nothing); info === nothing || isempty(info.name) ? String(code) : info.name)
 
-crs_unit(snap::Snapshot, code::AbstractString) =
-    (info = get(snap.crs, code, nothing); info === nothing ? "" : info.unit)
+# The unit of a coordinate system, or `""`. No `Union` result, so the map's overlays can ask
+# for it each frame without an allocation.
+crs_unit(snap::Snapshot, code::AbstractString)::String = haskey(snap.crs, code) ? snap.crs[code].unit : ""
 
 """
     properties(snap, selected) -> Union{Nothing,PropsView}

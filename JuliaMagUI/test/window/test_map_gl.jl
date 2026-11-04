@@ -376,6 +376,23 @@ window_testset("map GL pass") do
             gl_run(w -> free_all!(r), ctx)
             @test isempty(r.layers) && isempty(r.pending)
         end
+
+        @testset "a map image texture that cannot be sized is deleted, not leaked" begin
+            names = 1:4096
+            alive() = [GL.glIsTexture(UInt32(i)) == GL.GL_TRUE for i in names]
+            before, after, failed = Ref{Vector{Bool}}(), Ref{Vector{Bool}}(), Ref(false)
+            gl_run(ctx) do w
+                before[] = alive()
+                huge = Int(gl_int(GL.GL_MAX_TEXTURE_SIZE)) + 1   # more than GL allows
+                try
+                    UI.sized_texture!(UInt32(0), (0, 0), huge, 4)
+                catch e
+                    failed[] = e isa ErrorException && occursin("could not be made", e.msg)
+                end
+                after[] = alive()
+            end
+            @test failed[] && after[] == before[]
+        end
     end
 end
 

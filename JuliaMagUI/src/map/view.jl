@@ -43,6 +43,30 @@ MapViewState(camera::Union{Nothing,Camera} = nothing) =
                  nothing, (0, 0), (0f0, 0f0))
 
 """
+    OverlayCache()
+
+What the overlays keep between frames so that a steady frame, such as a pan, allocates
+nothing (overlays.jl): the tick values of a band (`ticks`), the label of each tick value at
+its step (`tick_texts`, emptied when it grows past `TICK_TEXTS_MAX`), the boxes of the line
+labels placed so far (`placed`), and the scale bar (`scale`) with the resolution, length and
+unit it was worked out for.
+"""
+mutable struct OverlayCache
+    ticks::Vector{Float64}
+    tick_texts::Dict{Tuple{Float64,Float64},String}
+    placed::Vector{Box}
+    scale_res::Float64
+    scale_target::Float64
+    scale_unit::String
+    scale::NamedTuple{(:world, :px, :label),Tuple{Float64,Float64,String}}
+end
+
+OverlayCache() = OverlayCache(Float64[], Dict{Tuple{Float64,Float64},String}(), Box[], NaN, NaN, "",
+                              (world = 0.0, px = 0.0, label = ""))
+
+const TICK_TEXTS_MAX = 512
+
+"""
 The input of one frame: the `mouse` in view px, whether it is over the view (`hovered`), the
 buttons held for the view, `shift`, the `wheel` in notches (up is positive), the view `size`
 in device pixels and the time `now`.

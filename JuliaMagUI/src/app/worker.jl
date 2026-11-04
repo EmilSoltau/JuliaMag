@@ -167,8 +167,9 @@ end
 """
     stop_worker!(w)
 
-Take no more actions or map loads, let the queued ones finish, and wait for the worker
-task and the map loader task to end. Never throws: a task that failed is logged.
+Take no more actions or map loads, let the queued actions finish, and wait for the worker
+task and the map loader task to end. Queued map loads do not run (`run_load`); one that
+runs already finishes first. Never throws: a task that failed is logged.
 """
 function stop_worker!(w::Worker)
     close(w.inbox)

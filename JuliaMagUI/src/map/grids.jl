@@ -33,7 +33,7 @@ end
 The data of one grid layer. Level 0 is the grid, the last level is 1 by 1. `count` is the
 number of cells that are not `NaN`. `mean_gradient` is in value units per world unit (`NaN`
 when no cell has four good neighbours). `extent` is `(xmin, ymin, xmax, ymax)` of the
-corners. `version` counts the builds.
+corners. `version` is new for each build (`next_data_version`).
 """
 mutable struct GridLayerData
     geo::GridGeo
@@ -293,7 +293,7 @@ function build_grid_layer!(d::GridLayerData, read_band!::F, geo::GridGeo; tile::
     d.tile = tile
     d.count = total
     d.extent = grid_extent(geo)
-    d.version += 1
+    d.version = next_data_version()
     return d
 end
 

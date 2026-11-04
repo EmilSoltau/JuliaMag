@@ -83,7 +83,8 @@ function draw_coordinate_bands(app, dl, b::Box, cam::Camera)
     ig.AddRectFilled(dl, (b.x0, iy), (ix, b.y1), fill)
     ig.AddRectFilled(dl, (ix - hl, iy - hl), (b.x1, iy), u32(t.border))
     ig.AddRectFilled(dl, (ix - hl, iy), (ix, b.y1), u32(t.border))
-    ticks = Float64[]
+    oc = app.map.overlays
+    ticks = oc.ticks
     col = u32(t.text_dim)
     gap = px(s, TICK_GAP)
     label_mid = b.y0 + (band - tick) / 2   # the labels sit in the band outside the ticks
@@ -93,7 +94,7 @@ function draw_coordinate_bands(app, dl, b::Box, cam::Camera)
     step = tick_values!(ticks, lo, hi, gap, cam.res)
     for v in ticks
         x = rnd(b.x0 + world_to_screen(cam, w, h, v, 0.0)[1])
-        text = coord_text(v, step)
+        text = tick_text!(oc, v, step)
         tw = text_width(FONT_REGULAR, 10.5, text)
         x0 = x - tw / 2
         (x0 >= ix + room && x0 + tw <= b.x1 - room) || continue   # a tick only with its label
@@ -106,7 +107,7 @@ function draw_coordinate_bands(app, dl, b::Box, cam::Camera)
     step = tick_values!(ticks, lo, hi, gap, cam.res)
     for v in ticks
         y = rnd(b.y0 + world_to_screen(cam, w, h, 0.0, v)[2])
-        text = coord_text(v, step)
+        text = tick_text!(oc, v, step)
         tw = text_width(FONT_REGULAR, 10.5, text)
         (y - tw / 2 >= iy + room && y + tw / 2 <= b.y1 - room) || continue   # a tick only with its label
         ig.AddRectFilled(dl, (ix - hl - tick, y), (ix - hl, y + hl), col)
@@ -117,6 +118,15 @@ function draw_coordinate_bands(app, dl, b::Box, cam::Camera)
         turn_since!(dl, first, (x0 + tw / 2, y), (rnd(b.x0 + (band - tick) / 2), y))
     end
     return nothing
+end
+
+# The label of tick value `v` at `step` (`coord_text`), made once and kept in `oc`.
+function tick_text!(oc::OverlayCache, v::Float64, step::Float64)::String
+    texts = oc.tick_texts
+    text = get(texts, (v, step), nothing)
+    text === nothing || return text
+    length(texts) >= TICK_TEXTS_MAX && empty!(texts)
+    return texts[(v, step)] = coord_text(v, step)
 end
 
 # Turn the vertices added to `dl` since `first` a quarter turn about `from` and move them so
@@ -147,10 +157,11 @@ function draw_scale_bar(app, dl, b::Box, mv, cam::Camera)
     t = app.tokens
     f(v) = fpx(s, v)
     hl = hairline(s)
-    info = get(app.snap.crs, mv.crs, nothing)
-    sb = scale_bar(cam.res, px(s, SCALE_TARGET), info === nothing ? "" : info.unit)
-    bar_w = round(Float32(sb.px))
-    tw = text_width(FONT_REGULAR, 11, sb.label)
+    oc = app.map.overlays
+    scale_bar!(oc, cam.res, px(s, SCALE_TARGET), crs_unit(app.snap::Snapshot, mv.crs))
+    label = oc.scale.label
+    bar_w = round(Float32(oc.scale.px))
+    tw = text_width(FONT_REGULAR, 11, label)
     bottom = b.y1 - f(EDGE)
     left = inner_box(b, s).x0 + f(EDGE)
     # As a browser lays it out: borders in whole device pixels, the parts at fractions of a
@@ -160,7 +171,7 @@ function draw_scale_bar(app, dl, b::Box, mv, cam::Camera)
     push!(app.map.overlay_boxes, (:scale_bar, frame))
     ig.AddRectFilled(dl, (frame.x0, frame.y0), (frame.x1, frame.y1), u32(t.ribbon, OVERLAY_ALPHA), f(5))
     ig.AddRect(dl, (frame.x0, frame.y0), (frame.x1, frame.y1), u32(t.border), f(5), hl)
-    draw_text_mid(dl, FONT_REGULAR, 11, box.x0 + hl + f(8), box.y0 + hl + f(4) + f(13.75) / 2, u32(t.text), sb.label)
+    draw_text_mid(dl, FONT_REGULAR, 11, box.x0 + hl + f(8), box.y0 + hl + f(4) + f(13.75) / 2, u32(t.text), label)
     bt = max(1f0, floor(f(1.5)))   # a browser draws a 1.5 px border in whole device pixels
     bx = rnd(box.x0 + hl + f(8))
     by = rnd(box.y0 + hl + f(4 + 13.75 + 2))
@@ -169,6 +180,15 @@ function draw_scale_bar(app, dl, b::Box, mv, cam::Camera)
     ig.AddRectFilled(dl, (bx, by), (bx + bt, by1), col)
     ig.AddRectFilled(dl, (bx + bar_w - bt, by), (bx + bar_w, by1), col)
     ig.AddRectFilled(dl, (bx, by1 - bt), (bx + bar_w, by1), col)
+    return nothing
+end
+
+# Put `scale_bar` into `oc.scale`, worked out again only for another resolution, length or unit.
+function scale_bar!(oc::OverlayCache, res::Float64, target::Real, unit::String)
+    if oc.scale_res != res || oc.scale_target != target || oc.scale_unit != unit
+        oc.scale = scale_bar(res, target, unit)
+        oc.scale_res, oc.scale_target, oc.scale_unit = res, Float64(target), unit
+    end
     return nothing
 end
 
@@ -330,13 +350,12 @@ function draw_legends(app, dl, b::Box, mv)
     bottom = b.y1 - f(EDGE)
     x1 = b.x1 - f(EDGE)
     for p in app.map.plan
-        legend = legend_of(app, p)
-        legend === nothing && continue
-        title, units, d = legend
+        d = legend_data(p)
+        d === nothing && continue
         h = legend_height(s, d)
         card = Box(x1 - f(LEGEND_W), bottom - h, x1, bottom)
         push!(app.map.overlay_boxes, (:legend, snap(card)))
-        draw_legend(app, dl, card, p, title, units, d)
+        draw_legend(app, dl, card, p, d)
         bottom -= h + f(6)
     end
     return nothing
@@ -413,12 +432,43 @@ function legend_of(app, p)
     return name, units, d
 end
 
+"""
+    legend_texts!(app, p, d) -> LayerLook
+
+The texts of the legend card of plan entry `p`, whose data is `d`, in its look: the title
+(`legend_of`) elided to fit beside the units, the units, and the low, middle and high values
+of the stretch. Made again only when the snapshot, the data build, the UI scale or the stretch
+changed, so a steady frame allocates nothing.
+"""
+function legend_texts!(app, p, d)::LayerLook
+    look = p.look
+    style = plan_style(app, p)
+    s = Float32(app.window.scale)
+    stretch = (style.stretch, style.min, style.max, style.clip_low, style.clip_high)
+    (look.legend_snap === app.snap && look.legend_data === d && look.legend_version == d.version &&
+     look.legend_scale == s && isequal(look.legend_stretch, stretch)) && return look
+    title, units, _ = legend_of(app, p)
+    uw = text_width(FONT_REGULAR, 11, units)
+    gap = isempty(units) ? 0f0 : fpx(s, 8)
+    look.legend_title = elide(text_width, title, fpx(s, RAMP_W) - uw - gap; role = FONT_SEMIBOLD, size = 11)
+    look.legend_units = units
+    if d.hist.total > 0
+        lo, hi = Core.stretch_range(style, d.hist)
+        middle = style.stretch === :histeq ? Core.quantile_value(d.hist, 0.5) : (lo + hi) / 2
+        look.legend_values = (legend_number(lo), legend_number(middle), legend_number(hi))
+    end
+    look.legend_snap, look.legend_data, look.legend_version = app.snap, d, d.version
+    look.legend_scale, look.legend_stretch = s, stretch
+    return look
+end
+
 # One legend card in the unrounded box `card`, laid out as `draw_scale_bar` lays out its box.
-function draw_legend(app, dl, card::Box, p, title::String, units::String, d)
+function draw_legend(app, dl, card::Box, p, d)
     s = app.window.scale
     t = app.tokens
     f(v) = fpx(s, v)
     hl = hairline(s)
+    look = legend_texts!(app, p, d)
     frame = snap(card)
     ig.AddRectFilled(dl, (frame.x0, frame.y0), (frame.x1, frame.y1), u32(t.ribbon, CARD_ALPHA), f(6))
     ig.AddRect(dl, (frame.x0, frame.y0), (frame.x1, frame.y1), u32(t.border), f(6), hl)
@@ -426,10 +476,9 @@ function draw_legend(app, dl, card::Box, p, title::String, units::String, d)
     inner = f(RAMP_W)
     y = card.y0 + hl + f(6)
     mid = y + f(13.75) / 2
+    units = look.legend_units
     uw = text_width(FONT_REGULAR, 11, units)
-    gap = isempty(units) ? 0f0 : f(8)
-    name = elide(text_width, title, inner - uw - gap; role = FONT_SEMIBOLD, size = 11)
-    draw_text_mid(dl, FONT_SEMIBOLD, 11, x, mid, u32(t.text), name)
+    draw_text_mid(dl, FONT_SEMIBOLD, 11, x, mid, u32(t.text), look.legend_title)
     draw_text_mid(dl, FONT_REGULAR, 11, x + inner - uw, mid, u32(t.text_dim), units)
     y += f(13.75 + 4)
     if d.hist.total == 0
@@ -439,14 +488,10 @@ function draw_legend(app, dl, card::Box, p, title::String, units::String, d)
     ramp = snap(Box(x, y, x + inner, y + f(10)))
     draw_ramp(dl, Box(ramp.x0 + hl, ramp.y0 + hl, ramp.x1 - hl, ramp.y1 - hl), p.look.lut)
     ig.AddRect(dl, (ramp.x0, ramp.y0), (ramp.x1, ramp.y1), u32(t.border_strong), f(2), hl)
-    style = plan_style(app, p)
-    lo, hi = Core.stretch_range(style, d.hist)
-    middle = style.stretch === :histeq ? Core.quantile_value(d.hist, 0.5) : (lo + hi) / 2
     y += f(10 + 2)
     mid = y + f(13) / 2
     col = u32(t.text_dim)
-    for (k, v) in enumerate((lo, middle, hi))
-        text = legend_number(v)
+    for (k, text) in enumerate(look.legend_values)
         tw = text_width(FONT_REGULAR, 10.5, text)
         tx = k == 1 ? x : k == 2 ? x + inner / 2 - tw / 2 : x + inner - tw
         draw_text_mid(dl, FONT_REGULAR, 10.5, tx, mid, col, text)
@@ -484,7 +529,7 @@ function draw_line_labels(app, dl, b::Box, cam::Camera)
     t = app.tokens
     hl = hairline(s)
     w, h = width(b), height(b)
-    placed = Box[]
+    placed = empty!(app.map.overlays.placed)
     lh = fpx(s, 10.5 * 1.25)
     g = px(s, 4)
     halo = ((-hl, 0f0), (hl, 0f0), (0f0, -hl), (0f0, hl), (-hl, -hl), (hl, hl), (-hl, hl), (hl, -hl))

@@ -191,7 +191,8 @@ back to `value` (with `changed`), and the release then keeps it. `released` is t
 frame the mouse is let go after a drag, with the value of the drag.
 While the mouse is over the slider (and no drag, dialog, menu or text field takes the keys),
 Left and Right step the value by `step` (1 % of the range without one); each press returns
-the new value with `changed` and `released`, as a drag of its own.
+the new value with `changed` and `released`, as a drag of its own. With Ctrl or Alt held
+they do nothing here.
 """
 function slider!(app, id::AbstractString, b::Box, value::Real, lo::Real, hi::Real;
         format::Union{Nothing,Function} = nothing, step::Real = 0)::Tuple{Float64,Bool,Bool}
@@ -238,8 +239,9 @@ function slider!(app, id::AbstractString, b::Box, value::Real, lo::Real, hi::Rea
     end
     shown = d === nothing ? Float64(value) : d.value
     io = unsafe_load(ig.GetIO())
+    # The arrows step the hovered slider; with Ctrl or Alt held they are another command's.
     if d === nothing && hovered && isempty(ui.dialogs) && ui.menu === nothing && ui.search === nothing &&
-            !io.WantTextInput
+            !io.WantTextInput && !io.KeyCtrl && !io.KeyAlt
         dir = ig.IsKeyPressed(lib.ImGuiKey_RightArrow, true) ? 1 : ig.IsKeyPressed(lib.ImGuiKey_LeftArrow, true) ? -1 : 0
         v = snap_to(Float64(value) + dir * (step > 0 ? step : span / 100))
         if dir != 0 && v != value

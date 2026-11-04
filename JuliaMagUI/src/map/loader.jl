@@ -72,7 +72,7 @@ The map's layer data. Changed on the render thread only.
   last, in device pixels.
 - `overlay_boxes`: where the last frame drew the legend cards, the scale bar and the nav
   buttons (`(:legend, box)`, `(:scale_bar, box)`, `(:nav, box)`), so the mouse over them
-  neither reads nor picks the map.
+  neither reads nor picks the map. `overlays`: what the overlays keep between frames.
 - `scene`: the scene of the shown map, filled again each frame (`build_scene!`); `plan`,
   `plan_snap`, `plan_map`, `plan_colours`, `plan_complete`, `looks`: what it is built from (see
   `refresh_plan!`).
@@ -89,6 +89,7 @@ mutable struct MapState
     views::Dict{String,MapViewState}
     view::Box
     overlay_boxes::Vector{Tuple{Symbol,Box}}
+    overlays::OverlayCache
     scene::Scene
     plan::Vector{LayerPlan}
     plan_snap::Any
@@ -100,7 +101,7 @@ end
 
 MapState(session::Union{Nothing,Core.Session}) =
     MapState(Dict{LayerKey,LayerEntry}(), MapRenderer(), session, LayerKey[], nothing, 0, 0, nothing,
-             Dict{String,MapViewState}(), Box(0, 0, 0, 0), Tuple{Symbol,Box}[], Scene(Camera(0, 0, 1), 1, 1, (0x00, 0x00, 0x00, 0xff), LineDraw[], 0),
+             Dict{String,MapViewState}(), Box(0, 0, 0, 0), Tuple{Symbol,Box}[], OverlayCache(), Scene(Camera(0, 0, 1), 1, 1, (0x00, 0x00, 0x00, 0xff), LineDraw[], 0),
              LayerPlan[], nothing, "", "", false, Dict{String,LayerLook}())
 
 "What a layer whose item is not in the project says, in the map's hint and the Layers tab."
@@ -136,14 +137,17 @@ end
 # Run the loads one at a time until the inbox closes. Never throws.
 function run_loader(inbox::Channel{Any}, results::Channel{Any}, cb::ConvertBuffer)
     for req in inbox
-        req isa LayerLoad && run_load(req, results, cb)
+        req isa LayerLoad && run_load(req, inbox, results, cb)
     end
     return nothing
 end
 
-function run_load(req::LayerLoad, results::Channel{Any}, cb::ConvertBuffer)
+# A load runs only while it is still wanted: not after a quit (the inbox is closed) nor for a
+# project that was closed, such as at a switch to another one. Then the app keeps nothing of it.
+function run_load(req::LayerLoad, inbox::Channel{Any}, results::Channel{Any}, cb::ConvertBuffer)
     try
         req.hold === nothing || take!(req.hold)
+        (isopen(inbox) && isopen(req.session)) || return nothing
         msg = with_bug_reports(results) do
             load_layer(req, cb)
         end
@@ -360,7 +364,7 @@ function set_data!(ms::MapState, e::LayerEntry, d::Union{Nothing,LineLayerData,G
     if d === nothing
         gl === nothing || free_layer!(gl, e.key)
     else
-        d.version += 1
+        d.version = next_data_version()
         gl === nothing || queue_uploads!(gl, e.key, d)
     end
     return nothing
@@ -380,6 +384,8 @@ function queue_all_uploads!(ms::MapState)
     return nothing
 end
 
+# A load that failed (no data) on a layer that has data from before keeps that data and gets
+# only the error: the layer goes on drawing, and its row shows the warning.
 function handle_result!(app, m::LayerLoaded)
     ms = app.map
     if m.session !== ms.session
@@ -394,6 +400,7 @@ function handle_result!(app, m::LayerLoaded)
     e.revision = m.revision
     e.error = m.error
     e.seconds = m.seconds
+    (m.data === nothing && e.data !== nothing) && return nothing
     set_data!(ms, e, m.data)
     return nothing
 end

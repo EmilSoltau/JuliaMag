@@ -90,8 +90,9 @@ entry_of(app, id) = only(e for e in values(app.map.entries) if e.key.item == id)
             edit_now!(app, s -> Core.delete_channel!(s, db3, "MAG"))
             wait_layers(app)
             e3 = entry_of(app, db3)
-            @test e3.error == "Channel MAG is not in North block." && e3.data === nothing
-            @test e3.revision == app.snap.item_revisions[db3]
+            # The failed load keeps the build from before, with the error as the row's warning.
+            @test e3.error == "Channel MAG is not in North block." && e3.data isa LineLayerData
+            @test e3.revision == app.snap.data_revisions[db3]
             @test entry_of(app, db1).data isa LineLayerData
             @test isempty(app.draw_errors)
         end
@@ -241,6 +242,88 @@ entry_of(app, id) = only(e for e in values(app.map.entries) if e.key.item == id)
             hold === nothing || close(hold)   # a held load ends, so the stop cannot hang
             stop_app!(app)
             isopen(s1) && Core.close_session!(s1)
+        end
+    end
+
+    @testset "a load that fails keeps the data the layer had" begin
+        s = fresh_session(); db = survey_database!(s); m = Core.new_map!(s); Core.add_layer!(s, m, db)
+        with_app(test_app_state(s)) do app
+            refresh_now!(app); app.ui.current_map = m
+            wait_layers(app)
+            e = only(values(app.map.entries))
+            good = e.data
+            @test good isa LineLayerData && e.error == ""
+            # A value changes, so the layer loads again; before that load runs, the colour
+            # channel's file goes, as a channel delete in another app might do.
+            hold = app.map.hold = Channel{Nothing}(Inf)
+            edit_now!(app, s -> Core.set_cell!(s, db, Core.LineId(Core.LINE, 1001, 0), "MAG", 1, 9.0))
+            update_layers!(app)
+            @test e.loading
+            folder = joinpath(s.project.folder, "databases", db, "channels")
+            foreach(f -> startswith(f, "MAG.") && rm(joinpath(folder, f)), readdir(folder))
+            app.map.hold = nothing
+            put!(hold, nothing)
+            wait_layers(app)
+            @test e.revision == app.snap.data_revisions[db] && !isempty(e.error)
+            @test e.data === good   # still drawn
+            mv = app.snap.maps[m]
+            st = UI.layer_status(app.snap, mv, only(mv.layers), app.map.entries)
+            @test st.error == e.error && !st.failed && !st.loading   # the row's warning, not a failed layer
+        end
+    end
+
+    @testset "a load of a closed project does not run" begin
+        s1 = fresh_session(); db1 = survey_database!(s1); m1 = Core.new_map!(s1); Core.add_layer!(s1, m1, db1)
+        s2 = fresh_session(); db2 = survey_database!(s2); m2 = Core.new_map!(s2); Core.add_layer!(s2, m2, db2)
+        app = test_app_state(s1)
+        hold = Channel{Nothing}(Inf)
+        try
+            app.map.hold = hold
+            refresh_now!(app); app.ui.current_map = m1
+            update_layers!(app)                # the first project's load waits for the hold
+            @test only(values(app.map.entries)).loading
+            Core.close_session!(s1)            # as a switch to another project does
+            set_session!(app, s2)
+            refresh_now!(app); app.ui.current_map = m2
+            update_layers!(app)                # the new load queues behind the held one
+            app.map.hold = nothing
+            put!(hold, nothing); put!(hold, nothing)
+            wait_layers(app)                   # the loader runs in order: the old one is done too
+            @test app.map.dropped == 0         # it did not run, so nothing came back to drop
+            e = only(values(app.map.entries))
+            @test e.data isa LineLayerData && e.error == ""
+            @test isempty(app.draw_errors)
+        finally
+            close(hold)
+            stop_app!(app)
+            isopen(s1) && Core.close_session!(s1)
+        end
+    end
+
+    @testset "a quit does not wait for the loads still queued" begin
+        s = fresh_session()
+        dbs = [survey_database!(s; lines = 200, rows = 500) for _ in 1:4]
+        m = Core.new_map!(s)
+        foreach(db -> Core.add_layer!(s, m, db), dbs)
+        app = test_app_state(s)
+        hold = Channel{Nothing}(Inf)
+        try
+            app.map.hold = hold
+            refresh_now!(app); app.ui.current_map = m
+            update_layers!(app)                # four loads; the first waits for the hold
+            @test count(e -> e.loading, values(app.map.entries)) == 4
+            stopping = Threads.@spawn UI.stop_worker!(app.queue)
+            @test timedwait(() -> !isopen(app.queue.map_inbox), 10) === :ok
+            foreach(_ -> put!(hold, nothing), 1:4)
+            wait(stopping)
+            msgs = Any[]
+            while isready(app.queue.results)
+                push!(msgs, take!(app.queue.results))
+            end
+            @test !any(x -> x isa UI.LayerLoaded, msgs)   # none of them ran
+        finally
+            close(hold)
+            stop_app!(app)
         end
     end
 end

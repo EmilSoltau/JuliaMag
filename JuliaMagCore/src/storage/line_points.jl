@@ -14,6 +14,8 @@ Positions of the good points of all lines of a database, as Float32 offsets from
 `origin` (see `read_line_points`). The points of a line come in parts, one per
 run of good points. Part `k` holds points `part_first[k] + 1` to
 `part_first[k] + part_count[k]`.
+It keeps its block buffers between reads: about 2 MB of scratch, and up to 1.5 MB of
+reader buffers for Float64 channels, once a line has $(LINE_POINTS_BLOCK) rows or more.
 """
 mutable struct LinePoints
     origin::NTuple{2,Float64}
@@ -161,6 +163,7 @@ Read channels `x` and `y` (and `value`, which may be missing) of every line of `
 into `into`, which is filled and returned. A point is good when X and Y are not
 missing and, after `reproject`, finite. A line still being appended is skipped.
 Throws `ArgumentError` for a channel that is missing, or not numeric with one value per row.
+After any throw, `into` may be half filled: read into it again before using it.
 """
 function read_line_points(db::LineDatabase, x::AbstractString, y::AbstractString,
                           value::Union{Nothing,AbstractString} = nothing;
@@ -171,6 +174,7 @@ function read_line_points(db::LineDatabase, x::AbstractString, y::AbstractString
     return read_snapshot!(into, db, line_snapshot(db), x, y, value, reproject)
 end
 
+# Fill `p` with the lines of `snap`. After a throw, `p` may be half filled.
 function read_snapshot!(p::LinePoints, db::LineDatabase, snap::LineSnapshot, x::AbstractString,
                         y::AbstractString, value::Union{Nothing,AbstractString},
                         reproject::Union{Nothing,Reprojector})::LinePoints

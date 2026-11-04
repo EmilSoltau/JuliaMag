@@ -289,19 +289,6 @@ end
 slider_dragging(app) = (d = app.ui.drag; d isa SliderDrag && lib.igGetActiveID() == d.id)
 
 """
-    settle_drags!(app)
-
-End a layer row drag or a slider drag whose item is no longer ImGui's active item: its row
-or slider went away while the mouse was down (an undo took the layer out), so no release
-ever comes. Call it once per frame, before drawing.
-"""
-function settle_drags!(app)
-    d = app.ui.drag
-    (d isa LayerDrag || d isa SliderDrag) && lib.igGetActiveID() != d.id && (app.ui.drag = nothing)
-    return nothing
-end
-
-"""
     settle_previews!(app)
 
 End the live opacity and the live style once nothing needs them: each when the snapshot has
