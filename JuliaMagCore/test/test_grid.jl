@@ -59,7 +59,7 @@ include("support/grids.jl")
             @test h.eltype === Float32 && h.crs == "EPSG:32633" && h.units == "nT"
             @test (h.nx, h.ny, h.dx, h.dy, h.x0, h.y0, h.rotation) == (3, 2, 10.0, 20.0, 100.0, 200.0, 0.0)
             d = GridStyle()
-            @test d.colours == "rainbow" && d.method === :histeq && isnan(d.min) && isnan(d.max)
+            @test d.colours == "geosoft" && d.method === :histeq && isnan(d.min) && isnan(d.max)
             @test !d.reverse && !d.shade
             @test (d.azimuth, d.altitude, d.zfactor) == (45.0, 45.0, 1.0)
             @test first(first(colour_tables())) == d.colours

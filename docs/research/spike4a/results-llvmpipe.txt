@@ -1,0 +1,56 @@
+== CPU side (would run on the worker) ==
+threads: 8 (+1 interactive)
+read 20M points X,Y,MAG (read_channel, mmap, warm page cache) + pack Float32 + bbox: 185.61 ms  points=20000000 lines=2000
+  LOD bucket    8:   5004000 points (25.0%), build 148.51 ms
+  LOD bucket   64:    632000 points (3.2%), build 69.72 ms
+  LOD bucket  512:     84000 points (0.4%), build 39.65 ms
+grid 8000x8000 Float32: tiles (4, 4) total 362.67 ms (read_rows 87.39 ms, cut tiles + histogram 223.78 ms, NaN-aware mips 51.45 ms)
+
+== GL ==
+GL_RENDERER: llvmpipe (LLVM 15.0.7, 256 bits)
+GL_VERSION: 4.5 (Core Profile) Mesa 23.2.1-1ubuntu3.1~22.04.4
+GL_MAX_TEXTURE_SIZE: 16384  GL_MAX_SAMPLES: 4
+line width range: Float32[1.0, 255.0]
+GPU memory info: (0, "NVX current available")
+
+== uploads (each with glFinish) ==
+lines level 1: 240.0 MB in 139.85 ms (1716 MB/s)
+lines level 2: 60.0 MB in 35.28 ms (1702 MB/s)
+lines level 3: 7.6 MB in 4.83 ms (1570 MB/s)
+lines level 4: 1.0 MB in 0.56 ms (1794 MB/s)
+chunked xy upload glBufferSubData  1 MB: 153 chunks, median 0.10 ms, max 0.16 ms per chunk
+chunked xy upload glBufferSubData  4 MB: 39 chunks, median 0.22 ms, max 0.30 ms per chunk
+chunked xy upload glBufferSubData  8 MB: 20 chunks, median 0.36 ms, max 0.45 ms per chunk
+chunked xy upload glBufferSubData 32 MB: 5 chunks, median 1.44 ms, max 1.58 ms per chunk
+new buffer per chunk glBufferData  1 MB: 152 chunks, median 0.30 ms, max 0.44 ms (3444 MB/s)
+new buffer per chunk glBufferData  4 MB: 38 chunks, median 1.18 ms, max 2.18 ms (3541 MB/s)
+new buffer per chunk glBufferData  8 MB: 19 chunks, median 2.43 ms, max 2.65 ms (3451 MB/s)
+new buffer per chunk glBufferData 32 MB: 4 chunks, median 10.04 ms, max 10.36 ms (3343 MB/s)
+grid: 16 tiles of 2050^2 R32F + mips, 358.6 MB, total 335.59 ms, per tile median 22.20 ms max 23.21 ms
+glGenerateMipmap one tile: 58.85 ms (spreads NaN, so CPU NaN-aware mips used instead)
+GPU bytes allocated by the spike: lines 309 MB (all 4 levels), grid 359 MB
+GPU memory info after upload: (0, "NVX current available")
+
+== frames (30 per scenario, first 20 dropped; pan on an ellipse, about 20 px per frame; FBO = map window content) ==
+scenario                                  wall med  wall p95   cpu map   gpu med   gpu p95     points
+lines full, whole survey                 541.05 ms 592.28 ms 538.84 ms 536.41 ms 543.74 ms   13440000
+lines LOD auto, whole survey             261.32 ms 264.89 ms 259.14 ms 256.46 ms 261.04 ms    3362688
+lines full, whole survey, MSAA 4x        433.12 ms 488.22 ms 430.78 ms 426.36 ms 477.05 ms   13440000
+lines full, zoom 10x, bbox cull          105.07 ms 105.89 ms 102.82 ms 100.82 ms 101.65 ms    1350000
+lines full, zoom 10x, no cull            1446.70 ms 1452.42 ms 1444.40 ms 1442.81 ms 1447.07 ms   20000000
+lines full, zoom 100x, bbox cull          14.10 ms  14.93 ms  12.28 ms  10.51 ms  10.78 ms     140000
+grid only, whole, histeq+shade             6.07 ms   6.23 ms   4.02 ms   2.39 ms   2.49 ms          0
+grid only, zoom 20x, histeq+shade          5.85 ms   6.09 ms   0.64 ms   2.79 ms   2.95 ms          0
+grid only, whole, linear no shade          5.57 ms   6.18 ms   0.71 ms   2.42 ms   2.50 ms          0
+grid + lines LOD, whole                  260.14 ms 263.08 ms 258.07 ms 255.05 ms 257.62 ms    3362688
+grid + lines full, whole                 545.77 ms 550.78 ms 543.63 ms 542.00 ms 547.22 ms   13440000
+grid + lines, stream 1 tile/frame        262.74 ms 265.14 ms 260.67 ms 258.04 ms 259.94 ms    3362688
+grid + lines, stream 8 MB lines/frame    260.70 ms 266.73 ms 258.50 ms 258.61 ms 262.62 ms    3362688
+ImDrawList 200k points                     8.64 ms   9.09 ms   6.58 ms   1.65 ms   1.72 ms     200000
+ImDrawList 1M points                      29.43 ms  30.02 ms  27.00 ms   7.13 ms   7.34 ms    1000000
+  worker rounds during the scenario: 15, wall max 307.3 ms
+lines LOD, worker reads 20M meanwhile    275.95 ms 304.78 ms 273.48 ms 276.90 ms 301.58 ms    3362688
+  worker rounds during the scenario: 15, wall max 318.9 ms
+grid+lines LOD, worker reads 20M         294.17 ms 315.24 ms 291.73 ms 292.22 ms 312.35 ms    3362688
+GPU memory info at end: (0, "NVX current available")
+total 145.4 s

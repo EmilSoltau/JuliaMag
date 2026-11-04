@@ -26,8 +26,8 @@ UI.handle_request!(app, ::SwitchProjectRequest) = (UI.set_session!(app, nothing)
             @test length(ids) == length(cmds)
             cm = only(filter(c -> c.id == "database.channel_math", cmds))
             @test cm.enabled(app) == "Import line data first."
-            @test UI.tab_order(cmds, String[]) == ["Database", "Database Tools", "Coordinates", "Grid and Image"]
-            @test UI.tab_order(cmds, ["Coordinates"]) == ["Database", "Database Tools", "Grid and Image"]
+            @test UI.tab_order(cmds, String[]) == ["Database", "Database Tools", "Coordinates", "Grid and Image", "Map"]
+            @test UI.tab_order(cmds, ["Coordinates"]) == ["Database", "Database Tools", "Grid and Image", "Map"]
             @test UI.location(cm) == "Database Tools > Channels"
             @test UI.location(only(filter(c -> c.id == "session.undo", cmds))) == "Quick Access"   # its `where`
             @test UI.commands(app) === cmds   # cached
@@ -86,7 +86,7 @@ UI.handle_request!(app, ::SwitchProjectRequest) = (UI.set_session!(app, nothing)
                 cmds2 = UI.commands(app)
                 @test cmds2 !== cmds && any(c -> c.id == "magnetics.test", cmds2)
                 @test UI.tab_order(cmds2, String[]) ==
-                      ["Database", "Database Tools", "Coordinates", "Grid and Image", "Magnetics"]
+                      ["Database", "Database Tools", "Coordinates", "Grid and Image", "Map", "Magnetics"]
                 t = only(filter(c -> c.id == "magnetics.test", cmds2))
                 @test t.name == "Lag Correction..."
                 t.run(app)
@@ -259,6 +259,22 @@ UI.handle_request!(app, ::SwitchProjectRequest) = (UI.set_session!(app, nothing)
             @test UI.shortcut_command(mine, UI.parse_chord("Escape"), true, false) === esc
             @test UI.shortcut_command(mine, UI.parse_chord("Ctrl+N"), true, false) === nothing
             @test UI.shortcut_command(mine, UI.parse_chord("Ctrl+N"), false, false) === ctrl_n
+            # An open drop-down menu takes the plain keys: Home moves its highlight and never
+            # also runs Full Extent (T12 review). Chords with Ctrl or Alt still pass.
+            in_menu(text) = (c = UI.shortcut_command(cmds, UI.parse_chord(text), false, false; menu_open = true);
+                c === nothing ? nothing : c.id)
+            @test route("Home") == "map.full_extent" && in_menu("Home") === nothing
+            @test in_menu("Ctrl+Z") == "session.undo"
+            plain = [UI.Command("test.k$k", "Key $k", a -> nothing; shortcut = k)
+                     for k in ("End", "Up", "Down", "PageUp", "PageDown", "Enter", "Escape")]
+            alt = UI.Command("test.alt", "Alt Test", a -> nothing; shortcut = "Alt+Left")
+            for c in plain
+                @test UI.shortcut_command([plain; alt], UI.parse_chord(c.shortcut), false, false) === c
+                @test UI.shortcut_command([plain; alt], UI.parse_chord(c.shortcut), false, false; menu_open = true) === nothing
+            end
+            @test UI.shortcut_command([plain; alt], UI.parse_chord("Alt+Left"), false, false; menu_open = true) === alt
+            # Today Home is the only command key without Ctrl or Alt.
+            @test [c.shortcut for c in cmds if !isempty(c.shortcut) && !occursin(r"Ctrl|Alt", c.shortcut)] == ["Home"]
             # The chords are parsed once with the command list.
             @test UI.command_chords(app) === UI.command_chords(app)
             @test (UI.parse_chord("Ctrl+K") => "ui.command_search") in UI.command_chords(app)

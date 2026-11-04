@@ -19,13 +19,15 @@ struct ItemRow
     busy::String
 end
 
-"A line of a database."
+"A line of a database. Row `r` has the fiducial `fid_start + (r - 1) * fid_step`."
 struct LineRow
     id::Core.LineId
     name::String
     selected::Bool
     flight::Int
     nrows::Int
+    fid_start::Float64
+    fid_step::Float64
 end
 
 "A channel of a database. `eltype` is the element type's name, such as `\"Float64\"`."
@@ -62,7 +64,7 @@ DatabaseView(id::String, error::String) =
 
 """
 A grid item, read once per snapshot. When it cannot be read, `error` holds the
-message and the numbers are 0.
+message and the numbers are 0. `style` is a copy of the grid's default style.
 """
 struct GridView
     id::String
@@ -79,11 +81,26 @@ struct GridView
     vmin::Float64
     vmax::Float64
     count::Int
+    style::Core.GridStyle
     error::String
 end
 
 GridView(id::String, error::String) =
-    GridView(id, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, "", "", "", NaN, NaN, 0, error)
+    GridView(id, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, "", "", "", NaN, NaN, 0, Core.GridStyle(), error)
+
+"""
+A map item, read once per snapshot: its name, coordinate system and layers (copies), in
+draw order. When it cannot be read, `error` holds the message and it has no layers.
+"""
+struct MapView
+    id::String
+    name::String
+    crs::String
+    layers::Vector{Core.MapLayer}
+    error::String
+end
+
+MapView(id::String, name::String, error::String) = MapView(id, name, "", Core.MapLayer[], error)
 
 """
 A job of the session, as the Jobs tab shows it.
@@ -132,11 +149,13 @@ What the UI shows of a session at one revision. Never changed after it is built.
 
 - `revision`: `Core.revision(s)` when the build started. A change during the build
   makes the next `refresh!` build again.
-- `items`: in project order. `databases` and `grids`: by item id.
+- `items`: in project order. `databases`, `grids` and `maps`: by item id.
 - `jobs`: newest first.
 - `undo_label`, `redo_label`: the label of the step `undo!` or `redo!` would run, or `nothing`.
 - `cursor`: a copy of the session cursor, or `nothing`; `marked`: `(first, last)` or `nothing`.
 - `crs`: a `CrsInfo` for every coordinate system code of the pairs and grids.
+- `data_revisions`: `Core.data_revision` of every item (0 for one never changed); a map
+  layer loads again when it differs from the revision its data was read at.
 """
 struct Snapshot
     revision::Int
@@ -145,6 +164,7 @@ struct Snapshot
     items::Vector{ItemRow}
     databases::Dict{String,DatabaseView}
     grids::Dict{String,GridView}
+    maps::Dict{String,MapView}
     jobs::Vector{JobRow}
     undo_label::Union{Nothing,String}
     redo_label::Union{Nothing,String}
@@ -152,6 +172,7 @@ struct Snapshot
     cursor::Union{Nothing,Core.Cursor}
     marked::Union{Nothing,Tuple{Int,Int}}
     crs::Dict{String,CrsInfo}
+    data_revisions::Dict{String,Int}
 end
 
 copy_item(it::Core.ProjectItem) =
@@ -174,14 +195,14 @@ core writes the rows before `database.json` names them.
 function snapshot(s::Core.Session)::Snapshot
     rev = Core.revision(s)   # first, so a change during the build is seen as new
     p = s.project
-    name, items, busy, undo_label, redo_label, cursor, marked, jobs = lock(s.lock) do
+    name, items, busy, undo_label, redo_label, cursor, marked, jobs, revs = lock(s.lock) do
         busy = Dict{String,String}(id => Core.busy_reason(m) for (id, m) in s.busy)
         c = s.cursor
         (p.name, map(copy_item, p.items), busy,
             isempty(s.undo_stack) ? nothing : last(s.undo_stack).label,
             isempty(s.redo_stack) ? nothing : last(s.redo_stack).label,
             c === nothing ? nothing : Core.Cursor(c.item, c.line, c.row),
-            s.marked, [(j, deepcopy(j.args)) for j in Core.jobs(s)])
+            s.marked, [(j, deepcopy(j.args)) for j in Core.jobs(s)], Core.data_revisions(s))
     end
     warns = Core.warnings(s)
 
@@ -190,7 +211,9 @@ function snapshot(s::Core.Session)::Snapshot
     rows = ItemRow[]
     databases = Dict{String,DatabaseView}()
     grids = Dict{String,GridView}()
+    maps = Dict{String,MapView}()
     for it in items
+        get!(revs, it.id, 0)
         gone = Core.item_missing(p, it)
         push!(rows, ItemRow(it.id, it.kind, it.name, it.path, gone, it.made_by, get(busy, it.id, "")))
         if it.kind == Core.ITEM_DATABASE
@@ -201,6 +224,12 @@ function snapshot(s::Core.Session)::Snapshot
             grids[it.id] = cached_view(cache, p, it, gone, Core.GRID_META_FILE) do
                 grid_view(p, it, gone, relock)
             end
+        elseif it.kind == Core.ITEM_MAP
+            v = cached_view(cache, p, it, gone, Core.MAP_FILE) do
+                map_view(p, it, gone, relock)
+            end
+            # The name is the item's: a rename changes the project file, not map.json.
+            maps[it.id] = v.name == it.name ? v : MapView(v.id, it.name, v.crs, v.layers, v.error)
         end
     end
     ids = Set(it.id for it in items)
@@ -208,8 +237,8 @@ function snapshot(s::Core.Session)::Snapshot
     names = Dict{String,String}(it.id => it.name for it in items)
     infos = command_infos()
     job_rows = JobRow[job_row(j, args, infos, names) for (j, args) in jobs]
-    return Snapshot(rev, name, p.folder, rows, databases, grids, job_rows, undo_label,
-        redo_label, warns, cursor, marked, crs_infos(databases, grids))
+    return Snapshot(rev, name, p.folder, rows, databases, grids, maps, job_rows, undo_label,
+        redo_label, warns, cursor, marked, crs_infos(databases, grids), revs)
 end
 
 # The name and unit of every coordinate system the pairs and grids use.
@@ -244,7 +273,7 @@ function crs_info(code::String)::CrsInfo
     end
 end
 
-missing_text(it::Core.ProjectItem) = "The folder of $(it.name) is missing."
+missing_text(it::Union{Core.ProjectItem,ItemRow}) = "The folder of $(it.name) is missing."
 
 # The message for an item that cannot be read. Unlike `user_message` it does not log:
 # a broken item stays broken, and the snapshot is built again after every change.
@@ -322,8 +351,8 @@ function database_view(p::Core.Project, it::Core.ProjectItem, gone::Bool,
     gone && return DatabaseView(it.id, missing_text(it))
     db = open_item(Core.open_database, p, it, relock)
     db isa Core.LineDatabase || return DatabaseView(it.id, read_error(db))
-    lines = LineRow[LineRow(l.id, Core.line_name(l.id), l.selected, l.flight, l.nrows)
-                    for l in db.lines]
+    lines = LineRow[LineRow(l.id, Core.line_name(l.id), l.selected, l.flight, l.nrows, l.fid_start,
+        l.fid_step) for l in db.lines]
     channels = ChannelRow[ChannelRow(c.name, c.label, c.units, c.role, string(c.eltype),
         c.protected, c.arraylen, c.decimals, c.format, c.width) for c in db.channels]
     pairs = Core.PositionPair[Core.PositionPair(q.x, q.y, q.crs) for q in db.pairs]
@@ -335,7 +364,16 @@ function grid_view(p::Core.Project, it::Core.ProjectItem, gone::Bool, relock::Fu
     g = open_item(Core.open_grid, p, it, relock)
     g isa Core.Grid || return GridView(it.id, read_error(g))
     return GridView(it.id, g.nx, g.ny, g.dx, g.dy, g.x0, g.y0, g.rotation, g.crs, g.units,
-        string(g.eltype), g.vmin, g.vmax, g.count, "")
+        string(g.eltype), g.vmin, g.vmax, g.count, copy_grid_style(g.style), "")
+end
+
+copy_grid_style(st::Core.GridStyle) = Core.GridStyle((getfield(st, f) for f in fieldnames(Core.GridStyle))...)
+
+function map_view(p::Core.Project, it::Core.ProjectItem, gone::Bool, relock::Function)::MapView
+    gone && return MapView(it.id, it.name, missing_text(it))
+    m = open_item(Core.open_map, p, it, relock)
+    m isa Core.MapItem || return MapView(it.id, it.name, read_error(m))
+    return MapView(it.id, it.name, m.crs, Core.MapLayer[copy(l) for l in m.layers], "")
 end
 
 """
@@ -433,6 +471,62 @@ Base.@kwdef mutable struct BackstageState
 end
 
 """
+A layer edit on its way that the map already draws live: its `token` (one per edit), the
+`layer` and the `value` drawn (an opacity, or the style the layer will be drawn with), the
+project `revision` it was done at (-1 while it is on the worker), and the layer as it will be
+once the edit is in (`after`; `nothing` for an opacity), so a quick next edit builds on it.
+The live value stays until a snapshot of that revision is in (see `commit_layer_edit!`).
+"""
+mutable struct LayerEdit{T}
+    token::Int
+    layer::String
+    value::T
+    revision::Int
+    after::Union{Nothing,Core.MapLayer}
+end
+
+"""
+What the Layer Style pane (style.jl) keeps between frames.
+
+- `buffers`, `focus`, `caret`, `field_ids`: what `field!` keeps of the number fields, by key.
+- `active`: the key of the number field being typed in, or `""`; `errors`: why a typed
+  value was not taken, by key.
+- `scroll`: how far the pane is scrolled; `content_h`: the height of its content in the
+  last frame, in device pixels.
+- `boxes`: where the last frame drew the sliders and hints, by key, in device pixels (tests
+  read them). `cache`: the pane's numbers and texts for the last key (a `StyleCache`).
+"""
+mutable struct StylePane
+    buffers::Dict{String,Vector{UInt8}}
+    focus::String
+    caret::Union{Nothing,Tuple{String,Int}}
+    field_ids::Dict{String,UInt32}
+    active::String
+    errors::Dict{String,String}
+    scroll::Float32
+    content_h::Float32
+    boxes::Dict{String,Box}
+    cache::Any
+end
+
+StylePane() = StylePane(Dict{String,Vector{UInt8}}(), "", nothing, Dict{String,UInt32}(), "",
+    Dict{String,String}(), 0f0, 0f0, Dict{String,Box}(), nothing)
+
+"Forget what the Layer Style pane kept: its typed texts, errors, scroll and cache."
+function reset_style_pane!(p::StylePane)
+    empty!(p.buffers)
+    p.focus = ""
+    p.caret = nothing
+    p.active = ""
+    empty!(p.errors)
+    p.scroll = 0f0
+    p.content_h = 0f0
+    empty!(p.boxes)
+    p.cache = nothing
+    return nothing
+end
+
+"""
     UiState
 
 What the UI shows and where, apart from the project data. Changed on the render thread only.
@@ -440,9 +534,32 @@ What the UI shows and where, apart from the project data. Changed on the render 
 - `tab`: the ribbon tab; `backstage`, `backstage_page`: the Project page and its page;
   `bs`: what its pages keep (a `BackstageState`);
   `ribbon_peek`: a collapsed ribbon shown for a moment.
-- `left_tab`: `:data` or `:jobs`; `right_tabs`, `right_active`: the open right panes (such
+- `left_tab`: `:data`, `:layers` or `:jobs`; `right_tabs`, `right_active`: the open right panes (such
   as `:tools`) in the order they opened, and the one shown (`:none` when none is open).
 - `current_db`: the database item the Database tab acts on, or `""`.
+- `current_map`: the map item shown in the central area, or `""`. `first_map`: the next
+  snapshot of the project shows its first map (`sync_current_map!`); set when a project opens.
+- `layer_selected`: the id of the selected layer of the shown map, or `""`. The map commands
+  act on it (map_commands.jl).
+- `colour_bars`: the shown map draws a colour bar (legend) for each coloured layer.
+- `hover`: what the shown map has under the pointer (a `MapHover`, see readout.jl), or
+  `nothing` while the pointer is not over the map. `hover_buf`: the one `MapHover` that
+  `map_hover` fills again in place. `map_status`: the map's status texts made last (see
+  `map_status`). `status_cache`: the status bar's texts and layout made last (a
+  `StatusCache`, see statusbar.jl), or `nothing`.
+- `opacity_preview`: a live opacity `(layer id, opacity)` for one layer of the shown map,
+  drawn before it is set on the layer (an opacity slider sets it while it moves), or `nothing`.
+  `opacity_edit`: the last release's edit (a `LayerEdit{Float64}`) until a snapshot has it, so
+  the map never shows the old opacity for a frame (see `settle_previews!`), or `nothing`.
+- `style_preview`: a live style `(layer id, style)` for one layer of the shown map: the style
+  it is drawn with (its effective style) while a Layer Style slider moves or an edit is on its
+  way, or `nothing`. `style_pending`: that edit (a `LayerEdit{Core.LayerStyle}`), as `opacity_edit`.
+  `layer_edits` counts the edits of both, for their tokens.
+- `style_pane`: what the Layer Style pane keeps between frames (a `StylePane`, see style.jl).
+- `layers_scroll`: how far the Layers tab's list is scrolled, in device pixels.
+  `layer_boxes`: where the last frame drew each layer row of the Layers tab, by layer id, and
+  the selected layer's opacity slider (`"opacity"`), in device pixels (tests read it).
+  `layers_cache`: the Layers tab's rows and layout for the last key (a `LayersCache`, see layers.jl).
 - `selected`: `(kind, item id, sub key)` of the selection in the Data tree, where the sub
   key is a line or channel name or `""`; or `nothing`.
 - `expanded`: the keys of expanded tree nodes (see `row_key`); `filter`: the Data tree
@@ -474,6 +591,8 @@ What the UI shows and where, apart from the project data. Changed on the render 
 - `ribbon_scroll`: how far the ribbon is scrolled to the left, in device pixels, on tab
   `ribbon_scroll_tab`; another tab starts at 0.
 - `menu`: the open drop-down menu (an `OpenMenu`, see menu.jl), or `nothing`.
+- `menu_request`: the id of a ribbon command whose menu opens at its button in the next
+  frame that draws it (a menu command run from the search), or `""`.
 - `ribbon_cache`: the ribbon's layout and widths for the last key (a `RibbonModel`, see
   ribbon.jl), or `nothing`.
 - `jobs_shown`: a job started from a dialog has switched the left pane to Jobs in this
@@ -500,6 +619,23 @@ Base.@kwdef mutable struct UiState
     right_tabs::Vector{Symbol} = Symbol[]
     right_active::Symbol = :none
     current_db::String = ""
+    current_map::String = ""
+    first_map::Bool = false
+    layer_selected::String = ""
+    colour_bars::Bool = true
+    hover::Union{Nothing,MapHover} = nothing
+    hover_buf::MapHover = MapHover()
+    map_status::MapStatusCache = MapStatusCache()
+    status_cache::Any = nothing
+    opacity_preview::Union{Nothing,Tuple{String,Float64}} = nothing
+    opacity_edit::Union{Nothing,LayerEdit{Float64}} = nothing
+    style_preview::Union{Nothing,Tuple{String,Core.LayerStyle}} = nothing
+    style_pending::Union{Nothing,LayerEdit{Core.LayerStyle}} = nothing
+    layer_edits::Int = 0
+    style_pane::StylePane = StylePane()
+    layers_cache::Any = nothing
+    layers_scroll::Float32 = 0f0
+    layer_boxes::Dict{String,Box} = Dict{String,Box}()
     selected::Union{Nothing,Tuple{Symbol,String,String}} = nothing
     expanded::Set{String} = Set{String}()
     filter::String = ""
@@ -534,6 +670,7 @@ Base.@kwdef mutable struct UiState
     ribbon_scroll::Float32 = 0f0
     ribbon_scroll_tab::String = ""
     menu::Any = nothing
+    menu_request::String = ""
     ribbon_cache::Any = nothing
     jobs_shown::Bool = false
     dialog_places::Vector{Any} = Any[]
@@ -594,6 +731,7 @@ and the worker hands results back through `drain!`.
   (see `advance_quit!`). An app-level flag, so a project switch never drops it.
 - `quit_hook`: called once to end the app, as `quit_hook(app)`. By default it ends the
   render loop; tests record the call instead.
+- `map`: the map's layer data (a `MapState`, see loader.jl).
 
 The constructor starts the worker. Stop it with `stop_worker!(app.queue)`.
 """
@@ -617,13 +755,14 @@ mutable struct AppState
     switching::Union{Nothing,String}
     quit_pending::Bool
     quit_hook::Function
+    map::MapState
 end
 
 AppState(config::AppConfig, tokens::Tokens; session::Union{Nothing,Core.Session} = nothing,
         config_dir::AbstractString = JuliaMagUI.config_dir()) =
     AppState(config, tokens, session, nothing, false, Worker(), UiState(), Toast[], nothing, 0,
         nothing, String(config_dir), nothing, 0, DrawError[], native_pick_file, nothing, false,
-        end_loop)
+        end_loop, MapState(session))
 
 # The default quit hook: end the render loop after this frame.
 function end_loop(app)
@@ -640,7 +779,10 @@ Make `s` (a session or `nothing`) the app's project. This is the only way to cha
 build of the old session that comes back later is dropped too), the count of shown
 warnings, a failed build, the Data tree's current database, selection, expanded
 nodes, filter, scroll and cached rows, the open dialogs and menu, the requests not
-handled yet (they were made for the old project), whether a job has shown the Jobs pane,
+handled yet (they were made for the old project), the shown map (a project shows its
+first map once its first snapshot is in), the selected layer, the colour bars (on again),
+its layer data (their GL objects are freed on the next frame), the map picture, the map
+views, a live opacity or style and what the Layer Style pane kept, whether a job has shown the Jobs pane,
 what the Jobs tab knew of the old jobs (so the new project's finished jobs make no
 toasts), and the old project's script on the Run Script page. Call it on the render
 thread. It does not close the old session.
@@ -654,6 +796,27 @@ function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     app.queue.failed = nothing
     ui = app.ui
     ui.current_db = ""
+    ui.current_map = ""
+    ui.first_map = s !== nothing
+    ui.layer_selected = ""
+    ui.colour_bars = true
+    ms = app.map
+    ms.renderer.gl === nothing || append!(ms.freed, keys(ms.entries))
+    empty!(ms.entries)
+    ms.version += 1
+    ms.session = s
+    ms.seen = nothing
+    empty!(ms.views)
+    empty!(ms.plan)
+    empty!(ms.looks)
+    ms.plan_snap = nothing
+    ms.plan_complete = false
+    clear_image!(ms.renderer)
+    clear_previews!(ui)
+    reset_style_pane!(ui.style_pane)
+    ui.layers_cache = nothing
+    ui.layers_scroll = 0f0
+    empty!(ui.layer_boxes)
     ui.selected = nothing
     empty!(ui.expanded)
     ui.filter = ""
@@ -666,6 +829,7 @@ function set_session!(app::AppState, s::Union{Nothing,Core.Session})
     empty!(ui.dialogs)   # the next frame also closes their ImGui popups
     empty!(ui.requests)
     ui.menu = nothing
+    ui.menu_request = ""
     ui.jobs_shown = false
     empty!(ui.opening)
     ui.jobs_scroll = 0f0

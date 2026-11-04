@@ -2,14 +2,14 @@
 # (line databases now; grids and maps later). Item paths are relative to the
 # project folder, so the folder can be moved.
 #
-# Layout: project.jmag.json, databases/<folder>/, grids/, jobs/, templates/.
+# Layout: project.jmag.json, databases/<folder>/, grids/, maps/, jobs/, templates/.
 
 using JSON3, StructTypes
 
 "The file in a project folder that makes it a project: it lists the items."
 const PROJECT_FILE = "project.jmag.json"
 const PROJECT_VERSION = 1
-const PROJECT_SUBFOLDERS = ("databases", "grids", "jobs", "templates")
+const PROJECT_SUBFOLDERS = ("databases", "grids", "maps", "jobs", "templates")
 
 "An error in a project: a missing or broken file, or an unknown item."
 struct ProjectError <: Exception

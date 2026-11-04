@@ -52,6 +52,15 @@ The width of `text` in device pixels, in font `role` at `size` logical pixels.
 text_width(role::FontRole, size::Real, text::AbstractString)::Float32 =
     with_font(() -> Float32(ig.CalcTextSize(text).x), role, size)
 
+"The width of the text in a text field's zero-ended byte `buffer`, as `text_width`; makes no string."
+function buffer_width(role::FontRole, size::Real, buf::Vector{UInt8})::Float32
+    n = something(findfirst(iszero, buf), length(buf) + 1) - 1
+    return GC.@preserve buf with_font(role, size) do
+        p = pointer(buf)
+        Float32(lib.igCalcTextSize(p, p + n, false, -1f0).x)
+    end
+end
+
 """
     draw_text(dl, role, size, x, y, col, text)
 
@@ -118,13 +127,20 @@ spaced_width(role::FontRole, size::Real, text::AbstractString, spacing::Real)::F
 """
 function draw_spaced_text(dl, role::FontRole, size::Real, x::Real, mid_y::Real, col::UInt32,
         text::AbstractString, spacing::Real)
+    s = String(text)
     with_font(role, size) do
         y = text_y(role, size, mid_y)
         cx = Float32(x)
-        for c in text
-            ch = string(c)
-            ig.AddText(dl, (round(cx), y), col, ch)
-            cx += Float32(ig.CalcTextSize(ch).x) + Float32(spacing)
+        # Each character as a slice of `s`, so no string is made per character.
+        GC.@preserve s begin
+            i = firstindex(s)
+            while i <= ncodeunits(s)
+                j = nextind(s, i)
+                a, b = pointer(s, i), pointer(s, j)
+                lib.ImDrawList_AddText_Vec2(dl, ig.ImVec2(round(cx), y), col, a, b)
+                cx += Float32(lib.igCalcTextSize(a, b, false, -1f0).x) + Float32(spacing)
+                i = j
+            end
         end
     end
     return nothing
@@ -351,7 +367,7 @@ end
 
 """
     button(app, id, label, x, y; primary = false, small = false, link = false, enabled = true,
-           busy = false, alpha = 1, dl = window draw list) -> Bool
+           busy = false, dim = false, alpha = 1, dl = window draw list) -> Bool
 
 A prototype `.btn` at `(x, y)`: 26 high (22 when `small`), radius 6 (5), 1 px
 `input_border` on `input`; `hover` and `border_strong` on hover, `pressed` when held.
@@ -359,11 +375,12 @@ A `primary` button is `accent` with semibold `on_accent` text; it is lighter on 
 half transparent when disabled. A `link` button (`.btn.link`) has no frame and no fill,
 `accent_text` text and 6 px padding; it shows `hover` (`pressed` when held) under the mouse.
 A `busy` button keeps its width, shows a spinner in place of its label and takes no clicks.
+A `dim` button has `text_dim` text, as a button in the prototype's `.empty` state.
 Returns true when clicked while enabled.
 """
 function button(app, id::AbstractString, label::AbstractString, x::Real, y::Real;
         primary::Bool = false, small::Bool = false, link::Bool = false, enabled::Bool = true,
-        busy::Bool = false, alpha::Real = 1, dl = ig.GetWindowDrawList())::Bool
+        busy::Bool = false, dim::Bool = false, alpha::Real = 1, dl = ig.GetWindowDrawList())::Bool
     w = app.window::Window
     t = app.tokens
     s = w.scale
@@ -388,7 +405,7 @@ function button(app, id::AbstractString, label::AbstractString, x::Real, y::Real
     end
     size = small ? 11.5 : BODY_FONT_SIZE
     role = primary ? FONT_SEMIBOLD : FONT_REGULAR
-    col = primary ? t.on_accent : !enabled ? t.text_disabled : link ? t.accent_text : t.text
+    col = primary ? t.on_accent : !enabled ? t.text_disabled : link ? t.accent_text : dim ? t.text_dim : t.text
     if busy
         draw_spinner(app, dl, (b.x0 + b.x1) / 2, centre_y(b); col = primary ? t.on_accent : t.accent)
         request_frames!(w)   # the spinner turns
@@ -420,7 +437,7 @@ function icon_button(app, id::AbstractString, icon::AbstractString, b::Box; size
             u32(held ? app.tokens.pressed : app.tokens.hover, alpha), px(s, radius))
     end
     d = px(s, size)
-    draw_icon(dl, icon, (b.x0 + (width(b) - d) / 2, b.y0 + (height(b) - d) / 2), size;
+    draw_icon(dl, icon, (rnd(b.x0 + (width(b) - d) / 2), rnd(b.y0 + (height(b) - d) / 2)), size;
         style = enabled ? style : :disabled, alpha)
     return clicked && enabled, hovered
 end

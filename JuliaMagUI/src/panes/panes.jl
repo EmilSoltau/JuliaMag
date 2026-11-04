@@ -1,6 +1,7 @@
 # The side panes: their widths, the frames of the left and right pane with their header
 # bands of text tabs, the splitters that resize them, and the search box they share. The
-# Data tab body is in data.jl, the Jobs tab body in jobs.jl, the Tools pane in tools.jl.
+# Data tab body is in data.jl, the Layers tab body in layers.jl, the Jobs tab body in jobs.jl,
+# the Tools pane in tools.jl, the Layer Style pane in style.jl.
 
 # Sizes in logical pixels (prototype CSS).
 const PANE_HEAD_H = 34
@@ -154,7 +155,7 @@ end
 "The number of jobs that run now. Reads the live job status."
 running_jobs(snap) = snap === nothing ? 0 : count(j -> Core.status(j.job) == Core.JOB_RUNNING, snap.jobs)
 
-const LEFT_TABS = (:data => "Data", :jobs => "Jobs")
+const LEFT_TABS = (:data => "Data", :layers => "Layers", :jobs => "Jobs")
 const BADGE_FONT_SIZE = 10.5f0
 
 # The width of the prototype's `.badge` with `text`: 16 high, at least 16 wide, padding 5.
@@ -165,7 +166,7 @@ badge_width(scale::Real, text::AbstractString) =
     draw_left_pane(app, dl, b) -> Bool
 
 The left pane: `pane` fill, a 1 px `border` on the right, the 34 px header band
-(`pane_header`, 1 px `border` at the bottom) with the text tabs Data and Jobs, and the body
+(`pane_header`, 1 px `border` at the bottom) with the text tabs Data, Layers and Jobs, and the body
 of the open tab. The Jobs tab has a round `accent` badge with the number of running jobs.
 The splitter on the right edge is submitted first. Returns true when the splitter is hot:
 then call `paint_splitter` after the central area.
@@ -196,7 +197,9 @@ function draw_left_pane(app, dl, b::Box)::Bool
         x = tab.x1 + p(2)
     end
     body = Box(b.x0, head.y1, b.x1 - hl, b.y1)
-    app.ui.left_tab === :data ? draw_data_tab(app, dl, body) : draw_jobs_tab(app, dl, body)
+    tab = app.ui.left_tab
+    tab === :data ? draw_data_tab(app, dl, body) : tab === :layers ? draw_layers_tab(app, dl, body) :
+        draw_jobs_tab(app, dl, body)
     ig.PopID()
     return hot
 end
@@ -229,9 +232,9 @@ end
 
 # --- The right pane ---
 
-const RIGHT_TABS = (:tools => "Tools",)
+const RIGHT_TABS = (:tools => "Tools", :style => "Layer Style")
 
-"Show the right pane `which` (`:tools`), opening its tab when it is not open."
+"Show the right pane `which` (`:tools` or `:style`), opening its tab when it is not open."
 function open_right_pane!(app, which::Symbol)
     ui = app.ui
     which in ui.right_tabs || push!(ui.right_tabs, which)
@@ -313,6 +316,7 @@ function draw_right_pane(app, dl, b::Box)::Bool
     all_hot && item_tip!(app, "Close all panes")
     body = Box(head.x0, head.y1, b.x1, b.y1)
     ui.right_active === :tools && draw_tools_pane(app, dl, body)
+    ui.right_active === :style && draw_style_pane(app, dl, body)
     ig.PopID()
     closing === nothing || close_right_pane!(app, closing)
     close_all && (empty!(ui.right_tabs); ui.right_active = :none)

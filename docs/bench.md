@@ -376,3 +376,119 @@ julia -t auto,1 --project=JuliaMagUI bench/ui_icons.jl
 
 - The optional argument is the number of runs (default 5).
 - The window part needs a display; without one, only the build is timed.
+
+## Map view
+
+`bench/map_frame.jl` measures the map view with a survey-sized project.
+It writes a temp project with a survey database of 2000 lines of 10,000 points (20 M points, 10 m apart, lines 50 m apart, a MAG channel) and an 8000 by 8000 Float32 grid with a NaN edge, as the spike's `gen.jl` did.
+It shows them on three maps (grid and lines, lines only, grid only) in a map view of 1584 by 955 device pixels.
+It uses the app's own code paths: the loader, the uploads, the scene, the GL pass, the adaptive path and the CPU renderer.
+
+- "Load" runs from showing the map until the first full picture with both layers: read and build on the loader, then the uploads, one per frame.
+- "Full frames" move the camera by one pixel each frame, so each of the 120 frames draws a full picture.
+- "Frame" is the time from one app frame to the next, with ImGui, the test engine and the buffer swap.
+- "GPU" is the map pass's `GL_TIME_ELAPSED` query.
+- "Pan" drags the map with the mouse, 120 moves of (6, 3) px; the frames while it moves.
+- "CPU renderer" is Map Drawing: CPU. "Draw" is `render_cpu!` on the worker threads; "shown" runs from the camera change until the picture shows.
+
+### Machine
+
+The machine of the import benchmark above: Intel Core i9-13900, 32 logical CPUs, Linux 6.18 on WSL2, Julia 1.12.7, `-t auto,1` (32 worker threads and 1 interactive).
+Both runs are on a virtual display (Xvfb, 1920 by 1080):
+
+- Intel GPU: `GL_RENDERER` "D3D12 (Intel(R) UHD Graphics 770)", Mesa's D3D12 driver on WSL2.
+- llvmpipe: `GL_RENDERER` "llvmpipe (LLVM 15.0.7, 256 bits)", with `LIBGL_ALWAYS_SOFTWARE=1`.
+
+`GL_MAX_TEXTURE_SIZE` is 16384 on both.
+
+### Results
+
+Run of 2026-11-04, the second of two runs on each renderer. Times in ms unless marked.
+A slow renderer redraws at most every 0.25 s while uploads wait (`PENDING_REDRAW`), and once when they are done.
+
+| Case | Intel GPU, median | Intel GPU, p95 | llvmpipe, median | llvmpipe, p95 |
+|---|---|---|---|---|
+| Load: read and build the grid | 0.84 s | | 0.76 s | |
+| Load: read and build the lines | 0.92 s | | 1.21 s | |
+| Load: all layers in | 1.78 s | | 1.98 s | |
+| Load: first full picture (40 uploads) | 2.50 s | | 2.82 s | |
+| Whole survey, frame | 11.9 | 12.3 | 58.5 | 66.2 |
+| Whole survey, GPU | 2.9 | 3.0 | 49.9 | 55.5 |
+| Zoom 10x, frame | 9.3 | 9.7 | 14.9 | 19.8 |
+| Zoom 10x, GPU | 0.6 | 0.6 | 9.1 | 9.4 |
+| Zoom 100x, frame | 9.6 | 14.6 | 43.0 | 47.6 |
+| Zoom 100x, GPU | 1.2 | 1.2 | 37.0 | 39.4 |
+| Grid only, frame | 9.0 | 9.5 | 9.4 | 15.1 |
+| Grid only, GPU | 0.7 | 0.7 | 2.7 | 2.8 |
+| Grid and lines, frame | 13.9 | 19.1 | 59.3 | 66.3 |
+| Grid and lines, GPU | 4.0 | 4.0 | 51.0 | 55.6 |
+| Pan, grid and lines, frame | 11.4 | 14.3 | 9.9 | 10.6 |
+| CPU renderer, whole survey, draw | 49.7 | 50.4 | 67.5 | 72.7 |
+| CPU renderer, whole survey, shown | 68.0 | 69.2 | 84.1 | 93.8 |
+| CPU renderer, grid, draw | 10.8 | 13.5 | 8.7 | 10.2 |
+| CPU renderer, grid, shown | 28.0 | 29.8 | 21.3 | 30.7 |
+
+On the Intel GPU every pan frame drew a full picture (120 of 120).
+On llvmpipe none did: a full picture costs more than a frame, so the last picture moved, and the full one came when the pan settled.
+The CPU renderer draws without OpenGL, but its whole survey draw is about 35 % slower in the llvmpipe run (67.5 ms against 49.7 ms).
+Most likely llvmpipe's own threads compete with the CPU renderer's threads for the cores.
+
+The first run on each renderer gave the first full picture in 2.40 s (Intel GPU) and 2.45 s (llvmpipe).
+Its other numbers were within about 15 % of these, with a few p95 spikes on the Intel GPU (zoom 10x 18.6 ms, grid only 15.9 ms, grid and lines 21.3 ms) from the app frame, not the map pass.
+Before the redraw limit, the first full picture on llvmpipe took 3.97 s and 4.15 s, because the map drew a 45 ms picture after each of the 40 uploads.
+
+### Targets
+
+| Target | Number | Met |
+|---|---|---|
+| First full picture of the 20 M points and the grid under 3 s | 2.50 s and 2.40 s on the Intel GPU; 2.82 s and 2.45 s on llvmpipe | Yes |
+| Whole survey full frame on the Intel GPU under 16 ms | 11.9 ms median, 12.3 ms p95; GPU 2.9 ms | Yes |
+| Pan frames p95 under 33 ms on llvmpipe, through the adaptive path | 10.6 ms | Yes |
+| Grid only full frame on llvmpipe under 16 ms | 9.4 ms median, 15.1 ms p95 | Yes |
+
+### Findings
+
+- On llvmpipe a whole-survey picture costs about 50 ms.
+  While the 40 uploads run, the map redraws at most every 0.25 s, so the uploads get the frames and the first full picture comes in under 3 s.
+- Zoom 100x costs more than zoom 10x: 37 ms against 9 ms on llvmpipe, and 1.2 ms against 0.6 ms on the GPU.
+  Culling is by the box of a whole line part, and these lines are 100 km long.
+  At 100x, about 28 lines of 10,000 points pass the cull and draw at the finest level, almost all of them outside the view.
+  At 10x, the point budget picks a coarser level.
+  Cutting long parts into pieces with their own boxes would fix it; it is not needed for the targets.
+- The frame time on the Intel GPU is mostly the app frame itself (about 8 to 9 ms with an empty map here, with the test engine and Xvfb); the map pass adds 1 to 4 ms of GPU time.
+- The spike measured 15.6 ms of GPU time for all points of the whole survey; the point budget levels bring it to 2.9 ms.
+
+### GL and CPU parity on the Intel GPU
+
+The parity window test (`JuliaMagUI/test/window/test_map_gl.jl`) ran once on the Intel GPU (D3D12) as well as on llvmpipe.
+It compares the GL pass with the CPU renderer pixel by pixel; the bounds are a mean error under 1.5 (0-255 units) and no outliers.
+All 97 tests passed on both.
+
+| Case | Intel GPU, mean error | llvmpipe, mean error | Outliers (both) |
+|---|---|---|---|
+| bilinear-shade | 0.110 | 0.114 | 0 |
+| nearest | 0.112 | 0.115 | 0 |
+| level-2 | 0.112 | 0.089 | 0 |
+| bilinear-shade-3px | 0.002 | 0.024 | 0 |
+| bilinear-shade-24px | 0.00001 | 0.033 | 0 |
+| nearest-shade-24px | 0.0 | 0.034 | 0 |
+| rotated | 0.003 | 0.014 | 0 |
+
+The tile seam test (11 levels at 3 and 24 px per cell) found no pixel off at the tile edges on the Intel GPU.
+On llvmpipe, one case had 2 pixels off by 2 there (the bound is 5 pixels).
+Away from the edges, a lone pixel may take the next colour entry: 3 of 22 cases had 1 such pixel on the Intel GPU; on llvmpipe 3 cases had 1, 3 and 5.
+
+### How to re-run
+
+From the repo root, on a virtual display:
+
+```
+julia --project=JuliaMagUI/tools -e 'using Pkg; Pkg.instantiate()'
+xvfb-run -a -s "-screen 0 1920x1080x24" env -u WAYLAND_DISPLAY julia -t auto,1 --project=JuliaMagUI bench/map_frame.jl
+xvfb-run -a -s "-screen 0 1920x1080x24" env -u WAYLAND_DISPLAY julia -t auto,1 --project=JuliaMagUI bench/map_frame.jl --software
+```
+
+- The first command is needed once: the script uses the window test harness, which needs ImGuiTestEngine.
+- Without `--software`, check the printed `GL_RENDERER`: on WSL2 it is the D3D12 driver when the GPU is used.
+- The temp project takes about 650 MB on disk and is deleted at the end.
+- One run takes under a minute.

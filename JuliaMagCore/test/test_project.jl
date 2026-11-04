@@ -21,7 +21,7 @@ using JuliaMagCore
     @testset "layout, ids, settings, errors" begin
         mktempdir() do tmp
             p = create_project(joinpath(tmp, "p"), "P")
-            for d in ("databases", "grids", "jobs", "templates")
+            for d in ("databases", "grids", "maps", "jobs", "templates")
                 @test isdir(joinpath(p.folder, d))
             end
             @test isfile(joinpath(p.folder, "project.jmag.json"))

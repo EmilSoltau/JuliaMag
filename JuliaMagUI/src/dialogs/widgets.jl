@@ -86,21 +86,22 @@ setting_hint!(app, d, g, st::Core.SettingSpec, text::AbstractString = st.help) =
 # --- Text fields ---
 
 """
-    field!(app, d, key, b, text; kwargs...) -> Union{Nothing,String}
+    field!(app, d, key, b, text; id = "##" * key, kwargs...) -> Union{Nothing,String}
 
 A text field for `key` in box `b` (see `text_field!`), its buffer kept by the dialog and
-filled from `text` when the dialog has none. Returns the new text when it changed.
+filled from `text` when the dialog has none. `id` is its ImGui id; a caller that draws it each
+frame can pass a constant, so no string is made. Returns the new text when it changed.
 """
-function field!(app, d, key::AbstractString, b::Box, text::AbstractString; kwargs...)
+function field!(app, d, key::AbstractString, b::Box, text::AbstractString; id::AbstractString = "##" * key, kwargs...)
     buf = get!(() -> set_field!(zeros(UInt8, FIELD_BYTES), text), d.buffers, key)
     focus = d.focus == key
     focus && (d.focus = "")
-    changed = text_field!(app, "##" * key, buf, snap(b); focus, kwargs...)
-    id = ig.GetItemID()
-    d.field_ids[String(key)] = id
+    changed = text_field!(app, id, buf, snap(b); focus, kwargs...)
+    item = ig.GetItemID()
+    d.field_ids[String(key)] = item
     c = d.caret
     if c !== nothing && first(c) == key && ig.IsItemActive()   # after a chip put a name in
-        st = lib.igGetInputTextState(id)
+        st = lib.igGetInputTextState(item)
         st == C_NULL || lib.ImGuiInputTextState_SetSelection(st, last(c), last(c))
         d.caret = nothing
     end
@@ -110,22 +111,26 @@ end
 # --- Buttons ---
 
 """
-    combo!(app, id, b, text; icon = "", items, error = false) -> Bool
+    combo!(app, id, b, text; icon = "", items, error = false, owner = "dialog/" * id,
+           size = 12.5, min_width = width of b) -> Bool
 
 A prototype `.combo` in box `b`: `input` fill, 1 px `input_border` (`border_strong` and
 `hover` on hover), the value `text` (with a 14 px `icon`) elided before the caret. A click
-opens its menu of `items()` as wide as the combo, over the dialog; while it is open the
-frame has the `accent` ring (an `error` makes it red). Returns whether its menu is open.
+opens its menu of `items()`, at least `min_width` logical px wide (the combo's width), over
+the dialog; while it is open the frame has the `accent` ring (an `error` makes it red).
+`owner` names the menu; a combo outside a dialog passes its own. `size` is the text size:
+11.5 for a `.combo.small`. Returns whether its menu is open.
 """
 function combo!(app, id::AbstractString, b::Box, text::AbstractString; icon::AbstractString = "",
-        items::Function, error::Bool = false)
+        items::Function, error::Bool = false, owner::AbstractString = "dialog/" * id,
+        size::Real = BODY_FONT_SIZE, min_width::Union{Nothing,Real} = nothing)
     s = app.window.scale
     t = app.tokens
     f(v) = fpx(s, v)
     hl = hairline(s)
     dl = ig.GetWindowDrawList()
+    text_mid = centre_y(b)   # the text centres on the unrounded box, as Chrome's does
     b = snap(b)
-    owner = "dialog/" * id
     open = menu_open(app, owner)
     clicked, hovered, _ = hit(id, b)
     open && keep_menu!(app, owner, b; items = items())
@@ -145,10 +150,126 @@ function combo!(app, id::AbstractString, b::Box, text::AbstractString; icon::Abs
     end
     caret_x = b.x1 - hl - f(7 + 8)
     draw_caret(dl, caret_x, mid - f(5) / 2, s, u32(t.text_dim))
-    draw_text_mid(dl, FONT_REGULAR, BODY_FONT_SIZE, x, mid, u32(t.text),
-        elide(text_width, text, caret_x - f(6) - x))
-    clicked && toggle_menu!(app, owner, b, items; min_width = width(b) / s)
+    draw_text_mid(dl, FONT_REGULAR, size, x, text_mid, u32(t.text),
+        elide(text_width, text, caret_x - f(6) - x; size))
+    clicked && toggle_menu!(app, owner, b, items; min_width = something(min_width, width(b) / s))
     return menu_open(app, owner)
+end
+
+"""
+A drag of a `slider!`: its ImGui `id`, the value it is at, whether Esc `cancelled` it, the
+`grab` offset of the mouse from the thumb's centre (a press on the thumb keeps it there), the
+mouse x at the press, and whether the mouse has `moved` since: a press alone changes nothing.
+"""
+mutable struct SliderDrag
+    id::UInt32
+    value::Float64
+    cancelled::Bool
+    grab::Float32
+    start_x::Float32
+    moved::Bool
+end
+
+const SLIDER_THUMB = 12   # the prototype's range thumb; its track is 4 px high
+const SLIDER_VALUE_W = 34 # `.opac .v`, 8 px after the track
+
+"""
+    slider!(app, id, b, value, lo, hi; format = nothing, step = 0) -> (value, changed, released)
+
+A prototype `input[type=range]` across box `b`: a 4 px track with radius 2, `accent` up to
+the value and `well` after it, and a 12 px round thumb (`input`, a 1 px `border_strong` ring
+and a small shadow) whose centre runs from 6 px in to 6 px before the end. With `format`, the
+text `format(value)` sits at the right of `b` in a $(SLIDER_VALUE_W) px column (`text`,
+right-aligned), and the track ends 8 px before it, as the prototype's `.opac`.
+
+A press on the track puts the thumb there; a press on the thumb keeps the mouse where it
+took it, as a native slider does. A drag then moves it; a press without a move changes
+nothing. The value goes from `lo` to `hi`, rounded to `step` when it is above 0. Pass the
+stored value as `value`: it is drawn while no drag runs. During a drag the dragged value is
+returned, with `changed` in each frame it changes. Esc ends a drag at once: the value goes
+back to `value` (with `changed`), and the release then keeps it. `released` is true in the
+frame the mouse is let go after a drag, with the value of the drag.
+While the mouse is over the slider (and no drag, dialog, menu or text field takes the keys),
+Left and Right step the value by `step` (1 % of the range without one); each press returns
+the new value with `changed` and `released`, as a drag of its own. With Ctrl or Alt held
+they do nothing here.
+"""
+function slider!(app, id::AbstractString, b::Box, value::Real, lo::Real, hi::Real;
+        format::Union{Nothing,Function} = nothing, step::Real = 0)::Tuple{Float64,Bool,Bool}
+    s = app.window.scale
+    t = app.tokens
+    f(v) = fpx(s, v)
+    hl = hairline(s)
+    dl = ig.GetWindowDrawList()
+    ui = app.ui
+    track_x1 = format === nothing ? b.x1 : b.x1 - f(SLIDER_VALUE_W + 8)
+    area = Box(b.x0, b.y0, track_x1, b.y1)
+    _, hovered, held = hit(id, area)
+    key = ig.GetItemID()
+    span = Float64(hi) - Float64(lo)
+    run = max(width(area) - f(SLIDER_THUMB), 1f0)   # the thumb centre's travel
+    snap_to(u) = step > 0 ? clamp(round(u / step) * step, Float64(lo), Float64(hi)) : clamp(u, Float64(lo), Float64(hi))
+    at(x) = snap_to(Float64(lo) + clamp((x - area.x0 - f(SLIDER_THUMB / 2)) / run, 0, 1) * span)
+    centre(v) = area.x0 + f(SLIDER_THUMB / 2) + (span == 0 ? 0f0 : Float32(clamp((v - lo) / span, 0, 1))) * run
+    mouse_x = unsafe_load(ig.GetIO().MousePos).x
+    if ig.IsItemActivated()
+        on_thumb = abs(mouse_x - centre(value)) <= f(SLIDER_THUMB / 2)
+        ui.drag = SliderDrag(key, Float64(value), false, on_thumb ? mouse_x - centre(value) : 0f0, mouse_x, !on_thumb)
+    end
+    cur = ui.drag
+    d = cur isa SliderDrag && cur.id == key ? cur : nothing   # this slider's drag, or `nothing`
+    changed = released = false
+    if held && d !== nothing && !d.cancelled
+        if ig.IsKeyPressed(lib.ImGuiKey_Escape, false)
+            d.cancelled = true
+            changed = d.value != value
+            d.value = Float64(value)
+        else
+            d.moved |= mouse_x != d.start_x
+            if d.moved
+                v = at(mouse_x - d.grab)
+                changed = v != d.value
+                d.value = v
+            end
+        end
+    end
+    if ig.IsItemDeactivated() && d !== nothing
+        released = true
+        ui.drag = nothing
+    end
+    shown = d === nothing ? Float64(value) : d.value
+    io = unsafe_load(ig.GetIO())
+    # The arrows step the hovered slider; with Ctrl or Alt held they are another command's.
+    if d === nothing && hovered && isempty(ui.dialogs) && ui.menu === nothing && ui.search === nothing &&
+            !io.WantTextInput && !io.KeyCtrl && !io.KeyAlt
+        dir = ig.IsKeyPressed(lib.ImGuiKey_RightArrow, true) ? 1 : ig.IsKeyPressed(lib.ImGuiKey_LeftArrow, true) ? -1 : 0
+        v = snap_to(Float64(value) + dir * (step > 0 ? step : span / 100))
+        if dir != 0 && v != value
+            shown = v
+            changed = released = true
+        end
+    end
+
+    frac = span == 0 ? 0f0 : Float32(clamp((shown - lo) / span, 0, 1))
+    mid = centre_y(area)
+    track = snap(Box(area.x0, mid - f(2), area.x1, mid + f(2)))
+    ig.AddRectFilled(dl, (track.x0, track.y0), (track.x1, track.y1), u32(t.well), f(2))
+    fill_x = rnd(track.x0 + frac * width(track))
+    fill_x > track.x0 && ig.AddRectFilled(dl, (track.x0, track.y0), (fill_x, track.y1), u32(t.accent), f(2),
+        Int(fill_x >= track.x1 ? lib.ImDrawFlags_RoundAll : lib.ImDrawFlags_RoundLeft))
+    cx = area.x0 + f(SLIDER_THUMB / 2) + frac * run
+    r = f(SLIDER_THUMB / 2)
+    thumb = Box(cx - r, mid - r, cx + r, mid + r)
+    draw_shadow(dl, thumb, r, f(1), f(2), t.shadow)
+    ig.AddCircleFilled(dl, (cx, mid), r, u32(t.input), 32)
+    # Stroked on its centre line, so the ring is the outer 1 px of the thumb, as a CSS border.
+    ig.AddCircle(dl, (cx, mid), r - hl / 2, u32(t.border_strong), 32, hl, Int(lib.ImDrawFlags_StrokeCenter))
+    if format !== nothing
+        text = format(shown)
+        tw = text_width(FONT_REGULAR, 11.5, text)
+        draw_text_mid(dl, FONT_REGULAR, 11.5, b.x1 - tw, mid, u32(t.text), text)
+    end
+    return shown, changed, released
 end
 
 """
@@ -166,16 +287,17 @@ function segmented!(app, id::AbstractString, x::Real, b::Box, options, current)
     dl = ig.GetWindowDrawList()
     r = fpx(s, 5)
     role(v) = v == current ? FONT_SEMIBOLD : FONT_REGULAR
-    widths = [text_width(role(v), BODY_FONT_SIZE, l) + fpx(s, 20) for (v, l, _) in options]
+    seg_w(v, l) = text_width(role(v), BODY_FONT_SIZE, l) + fpx(s, 20)
     n = length(options)
-    outer = snap(Box(x, b.y0, x + 2 * hl + sum(widths) + (n - 1) * hl, b.y1))
+    total = sum(o -> seg_w(o[1], o[2]), options)
+    outer = snap(Box(x, b.y0, x + 2 * hl + total + (n - 1) * hl, b.y1))
     ig.AddRectFilled(dl, (outer.x0, outer.y0), (outer.x1, outer.y1), u32(t.input), r)
     cx = outer.x0 + hl
     picked = nothing
     ig.PushID(id)
     for (k, (v, label, enabled)) in enumerate(options)
         k > 1 && (ig.AddRectFilled(dl, (cx, outer.y0), (cx + hl, outer.y1), u32(t.input_border)); cx += hl)
-        seg = Box(cx, outer.y0 + hl, k == n ? outer.x1 - hl : rnd(cx + widths[k]), outer.y1 - hl)
+        seg = Box(cx, outer.y0 + hl, k == n ? outer.x1 - hl : rnd(cx + seg_w(v, label)), outer.y1 - hl)
         clicked, hovered, _ = hit(string(v), seg)
         on = v == current
         corners = Int(n == 1 ? lib.ImDrawFlags_RoundAll : k == 1 ? lib.ImDrawFlags_RoundLeft :

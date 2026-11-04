@@ -1,0 +1,406 @@
+# The map's layer data and its loader.
+#
+# A second task of the worker (`run_loader`) reads and builds layer data, one load at a time.
+# It opens its own database or grid from the item's folder and touches no `Session`, so a big
+# load never holds up the worker's actions, such as an undo. The render thread starts loads
+# (`update_layers!`) and swaps the results in (`handle_result!`).
+#
+# Each layer keeps two buffers: `data`, the one drawn, and `spare`, which the next load builds
+# into. The spare goes to the loader only when nothing draws from it any more (`spare_free`).
+
+"""
+What a layer's data is built from: the item, its `kind` (`:lines` or `:grid`), the colour
+`channel` (`\"\"` for none), the database's current pair `x`, `y` (`\"\"` for a grid or none)
+and the map's coordinate system `crs`.
+"""
+struct LayerKey
+    item::String
+    kind::Symbol
+    channel::String
+    x::String
+    y::String
+    crs::String
+end
+
+"""
+The data of one layer key.
+
+- `data`: the build drawn now, or `nothing`; a load that fails keeps the build from before.
+  `revision`: the item's data revision it was read at (-1 before the first load).
+- `wanted`: the data revision of the last load started (-1 for none).
+- `spare`: the build the next load builds into, or `nothing`. Out on loan while `loading`.
+- `error`: why the last load failed, or a note on the data, such as a grid drawn without
+  reprojection; `\"\"` for none. `seconds`: how long the last load took.
+"""
+mutable struct LayerEntry
+    key::LayerKey
+    revision::Int
+    wanted::Int
+    data::Union{Nothing,LineLayerData,GridLayerData}
+    spare::Union{Nothing,LineLayerData,GridLayerData}
+    loading::Bool
+    error::String
+    seconds::Float64
+end
+
+LayerEntry(key::LayerKey) = LayerEntry(key, -1, -1, nothing, nothing, false, "", 0.0)
+
+"A visible layer of the shown map: the layer, its entry (`nothing` until made), its look and its effective style."
+struct LayerPlan
+    layer::Core.MapLayer
+    entry::Union{Nothing,LayerEntry}
+    look::LayerLook
+    style::Core.LayerStyle
+end
+
+"""
+    MapState(session)
+
+The map's layer data. Changed on the render thread only.
+
+- `entries`: the data of each layer key that a map of the snapshot uses.
+- `renderer`: what draws the map (a `MapRenderer`, frame.jl). Uploads are queued only while
+  its GL objects exist (see `queue_all_uploads!`).
+- `session`: the session the entries belong to; a load of another session is dropped.
+- `freed`: keys whose GL objects the next `update_layers!` frees (set by `set_session!`).
+- `seen`: the snapshot whose maps `update_layers!` last checked for unused entries.
+- `dropped`: how many loads of another session came back and were dropped (tests read it).
+- `version`: counts the changes of the entries (a load started or came back, an entry
+  dropped), so what is built from their state can be kept until it changes (the Layers tab).
+- `hold`: a test hook. While it is set, each load started waits for a `put!` on it.
+- `views`: the view of each map by id (a `MapViewState`); `view`: where the map view was drawn
+  last, in device pixels.
+- `overlay_boxes`: where the last frame drew the legend cards, the scale bar and the nav
+  buttons (`(:legend, box)`, `(:scale_bar, box)`, `(:nav, box)`), so the mouse over them
+  neither reads nor picks the map. `overlays`: what the overlays keep between frames.
+- `scene`: the scene of the shown map, filled again each frame (`build_scene!`); `plan`,
+  `plan_snap`, `plan_map`, `plan_colours`, `plan_complete`, `looks`: what it is built from (see
+  `refresh_plan!`).
+"""
+mutable struct MapState
+    entries::Dict{LayerKey,LayerEntry}
+    renderer::MapRenderer
+    session::Union{Nothing,Core.Session}
+    freed::Vector{LayerKey}
+    seen::Any
+    dropped::Int
+    version::Int
+    hold::Union{Nothing,Channel{Nothing}}
+    views::Dict{String,MapViewState}
+    view::Box
+    overlay_boxes::Vector{Tuple{Symbol,Box}}
+    overlays::OverlayCache
+    scene::Scene
+    plan::Vector{LayerPlan}
+    plan_snap::Any
+    plan_map::String
+    plan_colours::String
+    plan_complete::Bool
+    looks::Dict{String,LayerLook}
+end
+
+MapState(session::Union{Nothing,Core.Session}) =
+    MapState(Dict{LayerKey,LayerEntry}(), MapRenderer(), session, LayerKey[], nothing, 0, 0, nothing,
+             Dict{String,MapViewState}(), Box(0, 0, 0, 0), Tuple{Symbol,Box}[], OverlayCache(), Scene(Camera(0, 0, 1), 1, 1, (0x00, 0x00, 0x00, 0xff), LineDraw[], 0),
+             LayerPlan[], nothing, "", "", false, Dict{String,LayerLook}())
+
+"What a layer whose item is not in the project says, in the map's hint and the Layers tab."
+const LAYER_ITEM_GONE = "The layer's item is not in the project."
+
+# A load for the loader task. `folder` is the item's absolute folder; `name` its name.
+struct LayerLoad
+    session::Core.Session
+    key::LayerKey
+    revision::Int
+    folder::String
+    name::String
+    spare::Union{Nothing,LineLayerData,GridLayerData}
+    hold::Union{Nothing,Channel{Nothing}}
+    window::Any
+end
+
+"""
+A load that came back: the data built (`nothing` when it failed), the error or note
+(`\"\"` for none) and how long it took.
+"""
+struct LayerLoaded
+    session::Core.Session
+    key::LayerKey
+    revision::Int
+    data::Union{Nothing,LineLayerData,GridLayerData}
+    error::String
+    seconds::Float64
+end
+
+# --- The loader task ---
+
+# Run the loads one at a time until the inbox closes. Never throws.
+function run_loader(inbox::Channel{Any}, results::Channel{Any}, cb::ConvertBuffer)
+    for req in inbox
+        req isa LayerLoad && run_load(req, inbox, results, cb)
+    end
+    return nothing
+end
+
+# A load runs only while it is still wanted: not after a quit (the inbox is closed) nor for a
+# project that was closed, such as at a switch to another one. Then the app keeps nothing of it.
+function run_load(req::LayerLoad, inbox::Channel{Any}, results::Channel{Any}, cb::ConvertBuffer)
+    try
+        req.hold === nothing || take!(req.hold)
+        (isopen(inbox) && isopen(req.session)) || return nothing
+        msg = with_bug_reports(results) do
+            load_layer(req, cb)
+        end
+        put!(results, msg)
+    catch e
+        report_problem(results, "The map loader failed", e, catch_backtrace())
+    end
+    notify_window(req.window, results)
+    return nothing
+end
+
+# Build the layer. An error becomes the message's text, as `user_message` gives it.
+function load_layer(req::LayerLoad, cb::ConvertBuffer)::LayerLoaded
+    t = time()
+    data, note = try
+        build_layer(req, cb)
+    catch e
+        e isa InterruptException && rethrow()
+        nothing, safe_user_message(e, catch_backtrace())
+    end
+    return LayerLoaded(req.session, req.key, req.revision, data, note, time() - t)
+end
+
+function build_layer(req::LayerLoad, cb::ConvertBuffer)
+    isdir(req.folder) || throw(ArgumentError("The folder of $(req.name) is missing."))
+    k = req.key
+    if k.kind == :lines
+        d = req.spare isa LineLayerData ? req.spare : LineLayerData()
+        return build_lines!(d, Core.open_database(req.folder), k, req.name), ""
+    end
+    d = req.spare isa GridLayerData ? req.spare : GridLayerData()
+    g = Core.open_grid(req.folder)
+    build_grid!(d, g, cb)
+    note = (isempty(g.crs) || isempty(k.crs) || g.crs == k.crs) ? "" :
+        "This grid is in $(g.crs), not in the map's $(k.crs). It is drawn without reprojection."
+    return d, note
+end
+
+function build_lines!(d::LineLayerData, db::Core.LineDatabase, k::LayerKey, name::String)::LineLayerData
+    (isempty(k.x) || isempty(k.y)) && throw(ArgumentError("$name has no current X, Y pair."))
+    for c in (k.x, k.y, k.channel)
+        (isempty(c) || Core.channel_position(db, c) != 0) || throw(ArgumentError("Channel $c is not in $name."))
+    end
+    q = findfirst(p -> p.x == k.x && p.y == k.y, db.pairs)
+    from = q === nothing ? "" : db.pairs[q].crs
+    r = (isempty(from) || isempty(k.crs) || from == k.crs) ? nothing : Core.Reprojector(from, k.crs)
+    try
+        value = isempty(k.channel) ? nothing : k.channel
+        pts = Core.read_line_points(db, k.x, k.y, value; into = d.points, reproject = r)
+        return build_line_layer!(d, pts)
+    finally
+        r === nothing || close(r)
+    end
+end
+
+function build_grid!(d::GridLayerData, g::Core.Grid, cb::ConvertBuffer)
+    geo = GridGeo(g)
+    if g.eltype === Float32
+        build_grid_layer!(d, (buf, j1) -> Core.read_rows!(buf, g, j1), geo)
+    else
+        build_grid_layer!(d, (buf, j1) -> read_converted!(buf, g, j1, cb), geo)
+    end
+    return d
+end
+
+# Read rows `j1` on of a Float64 grid into the Float32 band `buf`, a chunk of rows at a
+# time through the loader's one buffer. A short chunk reads into the front of that buffer.
+function read_converted!(buf::Matrix{Float32}, g::Core.Grid, j1::Int, cb::ConvertBuffer)
+    nx, n = size(buf)
+    rows = clamp(cb.limit ÷ nx, 1, TILE + 2TILE_BORDER)
+    size(cb.block) == (nx, rows) || (cb.block = Matrix{Float64}(undef, nx, rows))
+    block = cb.block
+    r = 0
+    while r < n
+        m = min(rows, n - r)
+        GC.@preserve block begin
+            src = m == rows ? block : unsafe_wrap(Matrix{Float64}, pointer(block), (nx, m))
+            Core.read_rows!(src, g, j1 + r)
+            copy_rows!(buf, r, src)
+        end
+        r += m
+    end
+    return buf
+end
+
+# Put the rows of `src` into `dst` from row `r + 1` on, as Float32.
+function copy_rows!(dst::Matrix{Float32}, r::Int, src::Matrix{Float64})
+    @inbounds for j in axes(src, 2), i in axes(src, 1)
+        dst[i, r+j] = Float32(src[i, j])
+    end
+    return dst
+end
+
+# --- The render thread ---
+
+"""
+    layer_key(snap, mv, layer) -> LayerKey
+
+The key of a layer of map view `mv`: for lines, with the database's current pair from the snapshot.
+"""
+function layer_key(snap, mv, l::Core.MapLayer)::LayerKey
+    l.kind == :grid && return LayerKey(l.item, :grid, "", "", "", mv.crs)
+    x = y = ""
+    v = get(snap.databases, l.item, nothing)
+    if v !== nothing && 1 <= v.current_pair <= length(v.pairs)
+        q = v.pairs[v.current_pair]
+        x, y = q.x, q.y
+    end
+    return LayerKey(l.item, l.kind, l.channel, x, y, mv.crs)
+end
+
+"""
+    spare_free(ms, e) -> Bool
+
+May entry `e`'s spare be built into? Only when nothing draws from it: neither the GPU
+(`gpu_uses`) nor a CPU frame in flight (`cpu_uses`). An entry with no spare is free: the
+load makes a new one.
+"""
+function spare_free(ms::MapState, e::LayerEntry)::Bool
+    sp = e.spare
+    sp === nothing && return true
+    r = ms.renderer
+    gl = r.gl
+    (gl !== nothing && gpu_uses(gl, sp)) && return false
+    return !cpu_uses(r, sp)
+end
+
+"""
+    update_layers!(app)
+
+Start the loads the shown map needs. Call it on the render thread each frame, after
+`drain!` and `refresh!`.
+
+Every visible layer of the map `app.ui.current_map` gets an entry. One whose data was read
+at another data revision (`Core.data_revision`) than the snapshot's gets a load, when none
+runs for it and its spare is free (`spare_free`); else it waits for a later frame.
+Meanwhile it keeps drawing its old data. When the snapshot changes, entries no map uses
+are dropped and their GL objects freed.
+"""
+function update_layers!(app)
+    ms = app.map
+    if !isempty(ms.freed)
+        gl = ms.renderer.gl
+        gl === nothing || foreach(k -> free_layer!(gl, k), ms.freed)
+        empty!(ms.freed)
+    end
+    snap = app.snap
+    snap === nothing && return nothing
+    if ms.seen !== snap
+        ms.seen = snap
+        drop_unused!(ms, snap)
+    end
+    ms.session === nothing && return nothing
+    mv = get(snap.maps, app.ui.current_map, nothing)
+    mv === nothing && return nothing
+    for l in mv.layers
+        l.visible || continue
+        key = layer_key(snap, mv, l)
+        e = get(ms.entries, key, nothing)
+        e === nothing && (e = ms.entries[key] = LayerEntry(key); ms.version += 1)
+        rev = get(snap.data_revisions, l.item, 0)
+        (e.loading || e.wanted == rev || !spare_free(ms, e)) && continue
+        start_load!(app, e, rev)
+    end
+    return nothing
+end
+
+# Drop the entries no map of the snapshot uses, and free their GL objects, and the views of
+# maps the snapshot does not have.
+function drop_unused!(ms::MapState, snap)
+    used = Set{LayerKey}()
+    for mv in values(snap.maps), l in mv.layers
+        push!(used, layer_key(snap, mv, l))
+    end
+    filter!(kv -> haskey(snap.maps, first(kv)), ms.views)   # the views of maps that went
+    gl = ms.renderer.gl
+    for k in collect(keys(ms.entries))
+        k in used && continue
+        delete!(ms.entries, k)
+        ms.version += 1
+        gl === nothing || free_layer!(gl, k)
+    end
+    return nothing
+end
+
+function start_load!(app, e::LayerEntry, rev::Int)
+    ms = app.map
+    snap = app.snap
+    k = findfirst(it -> it.id == e.key.item, snap.items)
+    e.wanted = rev
+    ms.version += 1
+    if k === nothing
+        set_data!(ms, e, nothing)
+        e.revision = rev
+        e.error = LAYER_ITEM_GONE
+        return nothing
+    end
+    row = snap.items[k]
+    spare = e.spare
+    e.spare = nothing   # on loan until the load comes back
+    e.loading = true
+    put!(app.queue.map_inbox, LayerLoad(ms.session, e.key, rev, joinpath(snap.folder, row.path), row.name,
+        spare, ms.hold, app.window))
+    return nothing
+end
+
+# Make `d` the entry's data and the old data its spare, and queue the uploads (or free the
+# GPU layer when there is no data). One step, so the GPU never draws a build being rebuilt.
+function set_data!(ms::MapState, e::LayerEntry, d::Union{Nothing,LineLayerData,GridLayerData})
+    old = e.data
+    e.data = d
+    old === nothing || (e.spare = old)
+    gl = ms.renderer.gl
+    if d === nothing
+        gl === nothing || free_layer!(gl, e.key)
+    else
+        d.version = next_data_version()
+        gl === nothing || queue_uploads!(gl, e.key, d)
+    end
+    return nothing
+end
+
+"""
+    queue_all_uploads!(ms)
+
+Queue the uploads of every entry that has data. Call it when the GL objects are made, or made again.
+"""
+function queue_all_uploads!(ms::MapState)
+    gl = ms.renderer.gl::GlMap
+    for e in values(ms.entries)
+        d = e.data
+        d === nothing || queue_uploads!(gl, e.key, d)
+    end
+    return nothing
+end
+
+# A load that failed (no data) on a layer that has data from before keeps that data and gets
+# only the error: the layer goes on drawing, and its row shows the warning.
+function handle_result!(app, m::LayerLoaded)
+    ms = app.map
+    if m.session !== ms.session
+        ms.dropped += 1
+        return nothing
+    end
+    e = get(ms.entries, m.key, nothing)
+    # No map uses it any more, or it is a load of an entry that was dropped and made again.
+    (e === nothing || !e.loading || m.revision != e.wanted) && return nothing
+    e.loading = false
+    ms.version += 1
+    e.revision = m.revision
+    e.error = m.error
+    e.seconds = m.seconds
+    (m.data === nothing && e.data !== nothing) && return nothing
+    set_data!(ms, e, m.data)
+    return nothing
+end

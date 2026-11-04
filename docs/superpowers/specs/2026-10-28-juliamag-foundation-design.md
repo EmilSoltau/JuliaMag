@@ -136,7 +136,9 @@ Research: [`oasis-project.md`](../../research/oasis-project.md), [`oasis-databas
 Claude's call: data is written at once, and every change can be undone.
 There is no Oasis-style "unsaved changes / discard" state for data.
 This is how RustGIS works, and it is safer with large files: a crash never loses an import.
-Project-level settings (open views, layer lists) are saved with a normal Save, with autosave, as in RustGIS.
+Maps and their layer lists are written at once too, and every change to them can be undone.
+The app has no Save command.
+View state that is not project data, such as a map's camera, is not saved.
 
 ### 5.3 Line database
 
@@ -213,6 +215,9 @@ Values are stored as a raw array, memory-mapped.
 Claude's call on colour: the grid has a default colour style.
 A map layer uses that style unless the layer sets its own.
 This keeps Oasis's "the grid remembers its colours" and still lets one grid look different on two maps.
+The shading belongs to the map layer: hillshade, the sun, the vertical scale and the cells (nearest or bilinear).
+A new layer starts with its grid's shading, and from then on it keeps its own.
+So "Save as grid default" changes the colours of layers that use the grid's colours, but not their shading.
 
 ### 5.5 Map
 
@@ -484,12 +489,15 @@ These views exist so the user can check an import by eye.
 They are linked through the shared selection and cursor (section 5.3).
 
 - **Map view:**
-  - Line paths in plan, coloured by a chosen channel.
-  - Grids with a colour style: linear stretch and histogram equalization, colour tables, and hillshade with sun angles.
+  - Line paths in plan, coloured by a chosen channel, with a colour legend bar and line labels.
+  - Grids with a colour style: linear stretch, percent clip and histogram equalization, colour tables, and hillshade with sun angles.
     RustGIS's raster styles (stretch, shaded relief, blend) are the model.
   - Pan and zoom stay smooth with millions of points.
     Zoomed out it draws a thinned version; zoomed in, full detail.
+  - Previous and next extent, one step per finished pan or zoom.
+  - A scale bar and coordinate ticks on the map edge.
   - Point readout: the value of every visible grid and the nearest line point under the cursor, in the status bar.
+  - The map draws on the graphics card when it can, and on the CPU when it cannot (section 13.2).
   - Bookmarks (Oasis "Snapshots"): later.
 - **Database view:** a spreadsheet of one line at a time, like the Oasis database window.
   - It scrolls smoothly through millions of rows by reading only the rows on screen.
@@ -598,6 +606,17 @@ Also, following from the above:
 - Cells in the database view can be edited by hand.
 - No sample files are supplied; readers follow the format documentation and public data.
 - The ribbon follows the user's list of Oasis tab headers, top ones first.
+- The map draws on the graphics card when one is available, and on the CPU when not (2026-11-03).
+  It uses OpenGL whenever the map's OpenGL pass can start, also on a software OpenGL driver.
+  A pure Julia renderer takes over when that pass cannot start or fails.
+  A setting "Map drawing: Auto, Graphics card, CPU" can force one.
+- The default look of a grid is the Geosoft-style rainbow (the "colour.tbl" look) with histogram equalization (2026-11-03).
+  Claude proposed it with the 4a scope, and the user approved that scope without changing it.
+  Viridis and Turbo are one click away.
+- The scope of plan 4 is split into three plans (2026-11-03).
+  Plan 4a is the map view (agreed on 2026-11-03).
+  Plan 4b is the database view, the profile view and the statistics pane.
+  Plan 4c is the CSV import wizard and the coordinate system picker.
 
 ### 13.3 Claude's calls (the user handed library choices over)
 

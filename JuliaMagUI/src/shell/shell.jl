@@ -102,6 +102,7 @@ function draw_app(app)
     watch_jobs!(app)
     prune_toasts!(app)
     sync_current_db!(app)
+    sync_current_map!(app)
     begin_menu_frame!(app)
     ui.tip = nothing
     ui.tip_hovered = false
@@ -191,6 +192,23 @@ function sync_current_db!(app)
     haskey(snap.databases, app.ui.current_db) && return nothing
     i = findfirst(it -> it.kind == Core.ITEM_DATABASE, snap.items)
     app.ui.current_db = i === nothing ? "" : snap.items[i].id
+    return nothing
+end
+
+"""
+    sync_current_map!(app)
+
+Show the first map of a project that just opened, once its first snapshot is in
+(`app.ui.first_map`). A project with no map shows none.
+"""
+function sync_current_map!(app)
+    ui = app.ui
+    snap = app.snap
+    (ui.first_map && snap !== nothing) || return nothing
+    ui.first_map = false
+    isempty(ui.current_map) || return nothing
+    i = findfirst(it -> it.kind == Core.ITEM_MAP, snap.items)
+    i === nothing || (ui.current_map = snap.items[i].id)
     return nothing
 end
 
@@ -387,5 +405,18 @@ function draw_tooltip(app)
         y += h
         gap_after(i) && (y += p(2))
     end
+    return nothing
+end
+
+"""
+    settle_drags!(app)
+
+End a drag of the shell whose item is no longer ImGui's active item: a layer row drag or a
+slider drag whose row or slider went away while the mouse was down (an undo took the layer
+out), so no release ever comes. Call it once per frame, before drawing.
+"""
+function settle_drags!(app)
+    d = app.ui.drag
+    (d isa LayerDrag || d isa SliderDrag) && lib.igGetActiveID() != d.id && (app.ui.drag = nothing)
     return nothing
 end

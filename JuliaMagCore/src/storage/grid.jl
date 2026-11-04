@@ -34,16 +34,16 @@ mutable struct GridStyle
     zfactor::Float64
 end
 
-GridStyle() = GridStyle("rainbow", :histeq, NaN, NaN, false, false, 45.0, 45.0, 1.0)
+GridStyle() = GridStyle("geosoft", :histeq, NaN, NaN, false, false, 45.0, 45.0, 1.0)
 
 """
     colour_tables() -> Vector{Pair{String,String}}
 
 The colour tables a grid can be drawn with (`GridStyle.colours`), as name => label, such
-as `"rainbow" => "Rainbow"`. The first is the default of `GridStyle()`.
+as `"geosoft" => "Geosoft (colour.tbl)"`. The first is the default of `GridStyle()`.
 """
-colour_tables()::Vector{Pair{String,String}} = ["rainbow" => "Rainbow", "geosoft" => "Geosoft",
-    "viridis" => "Viridis", "turbo" => "Turbo", "blue-red" => "Blue-Red", "grey" => "Grey"]
+colour_tables()::Vector{Pair{String,String}} = ["geosoft" => "Geosoft (colour.tbl)",
+    "viridis" => "Viridis", "turbo" => "Turbo", "rainbow" => "Rainbow", "blue-red" => "Blue-Red", "grey" => "Grey"]
 
 "Where a grid came from."
 mutable struct GridSource

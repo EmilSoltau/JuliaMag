@@ -29,21 +29,24 @@ function text_field!(app, id::AbstractString, buf::Vector{UInt8}, b::Box; focus:
     dl = ig.GetWindowDrawList()
     r = fpx(s, 5)
     ig.AddRectFilled(dl, (b.x0, b.y0), (b.x1, b.y1), u32(t.input), r)
-    inner = Box(b.x0 + hl + fpx(s, 7), b.y0 + hl, b.x1 - hl - fpx(s, 7), b.y1 - hl)
+    # Each box is set once: a name a closure takes that is set twice is boxed, which allocates.
+    pad = Box(b.x0 + hl + fpx(s, 7), b.y0 + hl, b.x1 - hl - fpx(s, 7), b.y1 - hl)
     if !isempty(prefix)
         with_font(FONT_REGULAR, 11.5) do
-            ig.AddText(dl, (round(inner.x0), input_text_y(FONT_REGULAR, 11.5, centre_y(inner))),
+            ig.AddText(dl, (round(pad.x0), input_text_y(FONT_REGULAR, 11.5, centre_y(pad))),
                 u32(t.text_dim), String(prefix))
         end
-        inner = Box(inner.x0 + text_width(FONT_REGULAR, 11.5, prefix) + fpx(s, 6), inner.y0, inner.x1, inner.y1)
     end
-    field = inner
+    lead = isempty(prefix) ? 0f0 : text_width(FONT_REGULAR, 11.5, prefix) + fpx(s, 6)
+    inner = Box(pad.x0 + lead, pad.y0, pad.x1, pad.y1)
+    # ImGui has no right-aligned field: the field starts where the text starts, and a
+    # click on the empty part left of it gives it the focus.
+    field = right ? Box(max(inner.x0, inner.x1 - buffer_width(role, size, buf) - fpx(s, 2)), inner.y0, inner.x1, inner.y1) :
+        inner
     if right
-        # ImGui has no right-aligned field: the field starts where the text starts, and a
-        # click on the empty part left of it gives it the focus.
-        tw = text_width(role, size, field_text(buf))
-        field = Box(max(inner.x0, inner.x1 - tw - fpx(s, 2)), inner.y0, inner.x1, inner.y1)
-        first(hit(id * "##area", Box(b.x0, b.y0, field.x0, b.y1); overlap = true)) && (focus = true)
+        ig.PushID(id)
+        first(hit("##area", Box(b.x0, b.y0, field.x0, b.y1); overlap = true)) && (focus = true)
+        ig.PopID()
     end
     changed, active = text_input!(app, id, buf, field; flags, focus, role, size, input = true)
     if buf[1] == 0x00 && !isempty(placeholder)   # where the text would be

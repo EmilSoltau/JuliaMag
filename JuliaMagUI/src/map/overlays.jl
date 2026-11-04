@@ -1,0 +1,663 @@
+# What the map view draws over the map image with the ImDrawList: the coordinate ticks, the
+# nav buttons, the scale bar, the legends, the line labels, the box of a box zoom and the
+# hint, as the prototype's `.mapnav`, `.scalebar`, `.legends` and `.maphint`. Device pixels;
+# sizes in logical pixels through `px`; colours from the tokens.
+
+const BAND = 20          # the coordinate bands along the top and left edges
+const TICK = 6           # tick length
+const TICK_GAP = 90      # the least space between ticks
+const LABEL_END = 6      # tick labels keep this far from the ends of their band
+const EDGE = 10          # overlays sit this far in from the edges (and the bands)
+const NAV_SIZE = 26
+const NAV_GAP = 4
+const SCALE_TARGET = 130 # the scale bar's longest length
+const LEGEND_W = 228
+const RAMP_W = 210
+const OVERLAY_ALPHA = 0.88   # the bands and the scale bar
+const CARD_ALPHA = 0.92      # the legends and the hint
+const MARKER_SIZE = 12       # the shared cursor's ring, across
+const MARKER_RING = 2
+
+const EMPTY_MAP_LINES = ["This map has no layers.", "Show a database or grid on it from the Data tab."]
+
+"""
+    draw_overlays(app, dl, b, mv, st)
+
+Draw the overlays of map view `mv` in box `b`: with a camera, the line labels, the shared
+cursor's marker, the box of a box zoom, the coordinate bands, the scale bar, the legends (while Colour Bars is on) and the nav
+buttons; and always the hint.
+"""
+function draw_overlays(app, dl, b::Box, mv, st::MapViewState)
+    empty!(app.map.overlay_boxes)
+    cam = st.camera
+    if cam !== nothing
+        draw_line_labels(app, dl, b, cam)
+        draw_cursor_marker(app, dl, b, mv, cam)
+        draw_zoom_box(app, dl, b, st)
+        draw_coordinate_bands(app, dl, b, cam)
+        draw_scale_bar(app, dl, b, mv, cam)
+        app.ui.colour_bars && draw_legends(app, dl, b, mv)
+        draw_nav_buttons(app, b, mv, st)
+    end
+    draw_map_hint(app, dl, b, mv, st)
+    return nothing
+end
+
+# The part of `b` inside the coordinate bands.
+inner_box(b::Box, s::Real) = Box(b.x0 + px(s, BAND), b.y0 + px(s, BAND), b.x1, b.y1)
+
+"The empty map: two lines in `text_dim`, centred, 1.6 times the font size apart, as `.empty`."
+function draw_empty_map(app, dl, b::Box)
+    s = app.window.scale
+    line_h = px(s, BODY_FONT_SIZE * 1.6)
+    cx = (b.x0 + b.x1) / 2
+    y = round((b.y0 + b.y1 - line_h * length(EMPTY_MAP_LINES)) / 2)
+    for line in EMPTY_MAP_LINES
+        lw = text_width(FONT_REGULAR, BODY_FONT_SIZE, line)
+        draw_text_mid(dl, FONT_REGULAR, BODY_FONT_SIZE, cx - lw / 2, y + line_h / 2, u32(app.tokens.text_dim), line;
+            line = 1.6)
+        y += line_h
+    end
+    return nothing
+end
+
+# --- Coordinate bands ---
+
+"""
+    draw_coordinate_bands(app, dl, b, cam)
+
+X along the top edge and Y along the left edge: a `ribbon` band at $(OVERLAY_ALPHA) alpha with a
+1 px `border` on its inner side, ticks $(TICK) px long at its inner side at `tick_values!`
+spaced at least $(TICK_GAP) px, and labels (`coord_text`) in 10.5 `text_dim`, the Y labels
+turned to read upwards.
+"""
+function draw_coordinate_bands(app, dl, b::Box, cam::Camera)
+    s = app.window.scale
+    t = app.tokens
+    hl = hairline(s)
+    band, tick, room = px(s, BAND), px(s, TICK), px(s, LABEL_END)
+    w, h = width(b), height(b)
+    ix, iy = b.x0 + band, b.y0 + band
+    fill = u32(t.ribbon, OVERLAY_ALPHA)
+    ig.AddRectFilled(dl, (b.x0, b.y0), (b.x1, iy), fill)
+    ig.AddRectFilled(dl, (b.x0, iy), (ix, b.y1), fill)
+    ig.AddRectFilled(dl, (ix - hl, iy - hl), (b.x1, iy), u32(t.border))
+    ig.AddRectFilled(dl, (ix - hl, iy), (ix, b.y1), u32(t.border))
+    oc = app.map.overlays
+    ticks = oc.ticks
+    col = u32(t.text_dim)
+    gap = px(s, TICK_GAP)
+    label_mid = b.y0 + (band - tick) / 2   # the labels sit in the band outside the ticks
+    # X along the top.
+    lo = screen_to_world(cam, w, h, band, 0)[1]
+    hi = screen_to_world(cam, w, h, w, 0)[1]
+    step = tick_values!(ticks, lo, hi, gap, cam.res)
+    for v in ticks
+        x = rnd(b.x0 + world_to_screen(cam, w, h, v, 0.0)[1])
+        text = tick_text!(oc, v, step)
+        tw = text_width(FONT_REGULAR, 10.5, text)
+        x0 = x - tw / 2
+        (x0 >= ix + room && x0 + tw <= b.x1 - room) || continue   # a tick only with its label
+        ig.AddRectFilled(dl, (x, iy - hl - tick), (x + hl, iy - hl), col)
+        draw_text_mid(dl, FONT_REGULAR, 10.5, x0, label_mid, col, text)
+    end
+    # Y along the left, read upwards.
+    lo = screen_to_world(cam, w, h, 0, h)[2]
+    hi = screen_to_world(cam, w, h, 0, band)[2]
+    step = tick_values!(ticks, lo, hi, gap, cam.res)
+    for v in ticks
+        y = rnd(b.y0 + world_to_screen(cam, w, h, 0.0, v)[2])
+        text = tick_text!(oc, v, step)
+        tw = text_width(FONT_REGULAR, 10.5, text)
+        (y - tw / 2 >= iy + room && y + tw / 2 <= b.y1 - room) || continue   # a tick only with its label
+        ig.AddRectFilled(dl, (ix - hl - tick, y), (ix - hl, y + hl), col)
+        # Drawn inside the view, where the clip rectangle keeps every glyph, then turned into the band.
+        x0 = rnd(ix + px(s, 1))
+        first = vertex_count(dl)
+        draw_text_mid(dl, FONT_REGULAR, 10.5, x0, y, col, text)
+        turn_since!(dl, first, (x0 + tw / 2, y), (rnd(b.x0 + (band - tick) / 2), y))
+    end
+    return nothing
+end
+
+# The label of tick value `v` at `step` (`coord_text`), made once and kept in `oc`.
+function tick_text!(oc::OverlayCache, v::Float64, step::Float64)::String
+    texts = oc.tick_texts
+    text = get(texts, (v, step), nothing)
+    text === nothing || return text
+    length(texts) >= TICK_TEXTS_MAX && empty!(texts)
+    return texts[(v, step)] = coord_text(v, step)
+end
+
+# Turn the vertices added to `dl` since `first` a quarter turn about `from` and move them so
+# that `from` lands on `to`: text that read to the right reads upwards.
+function turn_since!(dl, first::Int, from::NTuple{2,Real}, to::NTuple{2,Real})
+    buf = unsafe_load(dl.VtxBuffer)
+    data = Ptr{ig.lib.ImDrawVert}(buf.Data)
+    fx, fy, tx, ty = Float32(from[1]), Float32(from[2]), Float32(to[1]), Float32(to[2])
+    for i in first+1:Int(buf.Size)
+        v = unsafe_load(data, i)
+        pos = ig.ImVec2(tx + (v.pos.y - fy), ty - (v.pos.x - fx))
+        unsafe_store!(data, ig.lib.ImDrawVert(pos, v.uv, v.col), i)
+    end
+    return nothing
+end
+
+# --- Scale bar ---
+
+"""
+    draw_scale_bar(app, dl, b, mv, cam)
+
+The prototype's `.scalebar` at the bottom left, $(EDGE) px in: on `ribbon` at $(OVERLAY_ALPHA) alpha with
+a 1 px `border`, radius 5, padding 4 8 3; the length (`scale_bar`, at most $(SCALE_TARGET) px) in 11
+`text`, 2 px above the bar: 6 px high, a 1.5 px `text` line on its left, right and bottom.
+"""
+function draw_scale_bar(app, dl, b::Box, mv, cam::Camera)
+    s = app.window.scale
+    t = app.tokens
+    f(v) = fpx(s, v)
+    hl = hairline(s)
+    oc = app.map.overlays
+    scale_bar!(oc, cam.res, px(s, SCALE_TARGET), crs_unit(app.snap::Snapshot, mv.crs))
+    label = oc.scale.label
+    bar_w = round(Float32(oc.scale.px))
+    tw = text_width(FONT_REGULAR, 11, label)
+    bottom = b.y1 - f(EDGE)
+    left = inner_box(b, s).x0 + f(EDGE)
+    # As a browser lays it out: borders in whole device pixels, the parts at fractions of a
+    # pixel from the box's own (unrounded) top, each part's edges rounded.
+    box = Box(left, bottom - 2hl - f(4 + 13.75 + 2 + 6 + 3), left + max(tw, bar_w) + 2hl + f(16), bottom)
+    frame = snap(box)
+    push!(app.map.overlay_boxes, (:scale_bar, frame))
+    ig.AddRectFilled(dl, (frame.x0, frame.y0), (frame.x1, frame.y1), u32(t.ribbon, OVERLAY_ALPHA), f(5))
+    ig.AddRect(dl, (frame.x0, frame.y0), (frame.x1, frame.y1), u32(t.border), f(5), hl)
+    draw_text_mid(dl, FONT_REGULAR, 11, box.x0 + hl + f(8), box.y0 + hl + f(4) + f(13.75) / 2, u32(t.text), label)
+    bt = max(1f0, floor(f(1.5)))   # a browser draws a 1.5 px border in whole device pixels
+    bx = rnd(box.x0 + hl + f(8))
+    by = rnd(box.y0 + hl + f(4 + 13.75 + 2))
+    by1 = rnd(box.y0 + hl + f(4 + 13.75 + 2 + 6))
+    col = u32(t.text)
+    ig.AddRectFilled(dl, (bx, by), (bx + bt, by1), col)
+    ig.AddRectFilled(dl, (bx + bar_w - bt, by), (bx + bar_w, by1), col)
+    ig.AddRectFilled(dl, (bx, by1 - bt), (bx + bar_w, by1), col)
+    return nothing
+end
+
+# Put `scale_bar` into `oc.scale`, worked out again only for another resolution, length or unit.
+function scale_bar!(oc::OverlayCache, res::Float64, target::Real, unit::String)
+    if oc.scale_res != res || oc.scale_target != target || oc.scale_unit != unit
+        oc.scale = scale_bar(res, target, unit)
+        oc.scale_res, oc.scale_target, oc.scale_unit = res, Float64(target), unit
+    end
+    return nothing
+end
+
+# --- Nav buttons ---
+
+const NAV_BUTTONS = (("zoom_in", "zoomIn", "Zoom In"), ("zoom_out", "zoomOut", "Zoom Out"),
+    ("full_extent", "fullExtent", "Full Extent"), ("go_cursor", "crosshair", "Go To Cursor"))
+
+const NOT_ON_MAP_TEXT = "The current point is not on this map."
+const CURSOR_HIDDEN_TEXT = "The current point's layer is hidden."
+const CURSOR_LOADING_TEXT = "The current point's line is still loading."
+
+"""
+    draw_nav_buttons(app, b, mv, st)
+
+The prototype's `.mapnav`: at the top right, $(EDGE) px in, a column of $(NAV_SIZE) by $(NAV_SIZE)
+buttons $(NAV_GAP) px apart: `ribbon` with a 1 px `border`, radius 5 and a shadow, `hover` under
+the mouse, a 16 px icon. Zoom In and Zoom Out zoom by $(ZOOM_STEP) about the centre, Full
+Extent fits all layers, Go To Cursor centres the shared cursor.
+"""
+function draw_nav_buttons(app, b::Box, mv, st::MapViewState)
+    s = app.window.scale
+    t = app.tokens
+    dl = ig.GetWindowDrawList()
+    hl = hairline(s)
+    size, gap = px(s, NAV_SIZE), px(s, NAV_GAP)
+    x1 = b.x1 - px(s, EDGE)
+    y = inner_box(b, s).y0 + px(s, EDGE)
+    vw, vh = round(Int, width(b)), round(Int, height(b))
+    push!(app.map.overlay_boxes, (:nav, Box(x1 - size, y, x1, y + length(NAV_BUTTONS) * size + (length(NAV_BUTTONS) - 1) * gap)))
+    ig.PushID("mapnav")
+    for (id, icon, title) in NAV_BUTTONS
+        nb = Box(x1 - size, y, x1, y + size)
+        target = id == "go_cursor" ? cursor_target(app, mv) : nothing
+        enabled = id != "go_cursor" || target !== nothing
+        clicked, hovered, held = hit(id, nb)
+        draw_shadow(dl, nb, px(s, 5), px(s, 1), px(s, 2), t.shadow)
+        fill = enabled && hovered ? (held ? t.pressed : t.hover) : t.ribbon
+        ig.AddRectFilled(dl, (nb.x0, nb.y0), (nb.x1, nb.y1), u32(fill), px(s, 5))
+        ig.AddRect(dl, (nb.x0, nb.y0), (nb.x1, nb.y1), u32(t.border), px(s, 5), hl)
+        d = px(s, 16)
+        draw_icon(dl, icon, (nb.x0 + (size - d) / 2, nb.y0 + (size - d) / 2), 16; style = enabled ? :normal : :disabled)
+        item_tip!(app, title; reason = enabled ? nothing : cursor_why(app, mv))
+        hovered && request_frames!(app.window::Window)
+        if clicked && enabled
+            if id == "zoom_in"
+                zoom_by!(st, ZOOM_STEP)
+            elseif id == "zoom_out"
+                zoom_by!(st, 1 / ZOOM_STEP)
+            elseif id == "full_extent"
+                ext = map_extent(app, mv)
+                ext === nothing || full_extent!(st, ext, vw, vh; inset = px(s, BAND), corners = overlay_corners(app, mv))
+            elseif target !== nothing
+                go_to!(st, target)
+            end
+        end
+        y += size + gap
+    end
+    ig.PopID()
+    return nothing
+end
+
+"""
+    cursor_target(app, mv) -> Union{Nothing,NTuple{2,Float64}}
+
+The world position of the shared cursor when its database is a loaded line layer of the map
+and its row is a good point; else `nothing`.
+"""
+function cursor_target(app, mv)::Union{Nothing,NTuple{2,Float64}}
+    c = app.snap.cursor
+    c === nothing && return nothing
+    for p in app.map.plan
+        e = p.entry
+        (p.layer.item == c.item && p.layer.kind == :lines && e !== nothing) || continue
+        d = e.data
+        d isa LineLayerData || continue
+        k = findfirst(==(c.line), d.points.lines)
+        k === nothing && continue
+        pt = cursor_point(d, k, c.row)
+        pt === nothing || return pt
+    end
+    return nothing
+end
+
+"""
+    cursor_why(app, mv) -> Union{Nothing,String}
+
+Why the shared cursor has no point on map `mv` (`cursor_target`), or `nothing` when it has one:
+its database's line layer is hidden, or still loading; else it is not on this map.
+"""
+function cursor_why(app, mv)::Union{Nothing,String}
+    cursor_target(app, mv) === nothing || return nothing
+    snap = app.snap
+    c = snap.cursor
+    c === nothing && return NOT_ON_MAP_TEXT
+    hidden = false
+    for l in mv.layers
+        (l.item == c.item && l.kind == :lines) || continue
+        if !l.visible
+            hidden = true
+            continue
+        end
+        e = get(app.map.entries, layer_key(snap, mv, l), nothing)
+        (e === nothing || e.loading || (e.data === nothing && isempty(e.error))) && return CURSOR_LOADING_TEXT
+    end
+    return hidden ? CURSOR_HIDDEN_TEXT : NOT_ON_MAP_TEXT
+end
+
+"""
+    draw_cursor_marker(app, dl, b, mv, cam)
+
+The shared cursor on map `mv` when it is a point of a line layer (`cursor_target`): a ring
+$(MARKER_SIZE) px across, $(MARKER_RING) px of `accent` with a 1 px `on_accent` halo on each side. Its centre
+and sizes are whole pixels, so the ring is sharp at any scale.
+"""
+function draw_cursor_marker(app, dl, b::Box, mv, cam::Camera)
+    p = cursor_target(app, mv)
+    p === nothing && return nothing
+    s = app.window.scale
+    t = app.tokens
+    r, ring, halo = px(s, MARKER_SIZE / 2), px(s, MARKER_RING), hairline(s)
+    sx, sy = world_to_screen(cam, width(b), height(b), p[1], p[2])
+    x, y = rnd(b.x0 + sx), rnd(b.y0 + sy)
+    out = r + halo
+    (b.x0 - out <= x <= b.x1 + out && b.y0 - out <= y <= b.y1 + out) || return nothing
+    # Both stroked on their centre line, at r - ring / 2: the halo from r - ring - halo to
+    # r + halo, the ring from r - ring to r.
+    mid = r - ring / 2
+    centre = Int(lib.ImDrawFlags_StrokeCenter)
+    ig.AddCircle(dl, (x, y), mid, u32(t.on_accent), 32, ring + 2halo, centre)
+    ig.AddCircle(dl, (x, y), mid, u32(t.accent), 32, ring, centre)
+    return nothing
+end
+
+"Centre the view on world point `p`. Records one extent."
+function go_to!(st::MapViewState, p::NTuple{2,Float64})
+    cam = st.camera
+    cam === nothing && return nothing
+    record_command!(st)
+    st.camera = Camera(p[1], p[2], cam.res)
+    return nothing
+end
+
+# --- Legends ---
+
+"""
+    draw_legends(app, dl, b, mv)
+
+The prototype's `.legends` at the bottom right, $(EDGE) px in: one $(LEGEND_W) px card per coloured
+visible layer with data (a grid, or lines with a colour channel), $(6) px apart, the top layer on top.
+A card is `ribbon` at $(CARD_ALPHA) alpha with a 1 px `border`, radius 6, padding 6 8 5: the layer's
+name (and channel) in semibold 11 with its units and stretch in `text_dim` at the right, the
+colour table in a $(RAMP_W) by 10 strip with a 1 px `border_strong`, and its low, middle and high
+values in 10.5 `text_dim`. A layer with no values says "No values".
+"""
+function draw_legends(app, dl, b::Box, mv)
+    s = app.window.scale
+    f(v) = fpx(s, v)
+    bottom = b.y1 - f(EDGE)
+    x1 = b.x1 - f(EDGE)
+    for p in app.map.plan
+        d = legend_data(p)
+        d === nothing && continue
+        h = legend_height(s, d)
+        card = Box(x1 - f(LEGEND_W), bottom - h, x1, bottom)
+        push!(app.map.overlay_boxes, (:legend, snap(card)))
+        draw_legend(app, dl, card, p, d)
+        bottom -= h + f(6)
+    end
+    return nothing
+end
+
+# The height of a legend card of the data `d`: a line less when it has no values.
+legend_height(s::Real, d)::Float32 = 2hairline(s) + fpx(s, 6 + 13.75 + 4 + (d.hist.total == 0 ? 13 : 10 + 2 + 13) + 5)
+
+# The data of a layer that has a legend card (a coloured layer with data), or `nothing`.
+function legend_data(p)
+    e = p.entry
+    (e === nothing || e.data === nothing) && return nothing
+    d = e.data
+    isempty(d.levels) && return nothing
+    p.layer.kind == :lines && isempty(p.layer.channel) && return nothing
+    return d
+end
+
+"""
+    overlay_corners(app, mv) -> NTuple{2,NTuple{2,Float64}}
+
+The room of the overlays at the bottom corners of map view `mv`, for `fit_clear`: the scale bar
+at the left, from the band, as wide as its longest bar; the legend cards at the right
+(`legend_room`). Device pixels.
+"""
+function overlay_corners(app, mv)::NTuple{2,NTuple{2,Float64}}
+    s = app.window === nothing ? 1 : app.window.scale
+    hl = hairline(s)
+    bar = (Float64(fpx(s, EDGE + SCALE_TARGET + 16) + 2hl), Float64(fpx(s, EDGE + 4 + 13.75 + 2 + 6 + 3) + 2hl))
+    return (bar, legend_room(app, mv))
+end
+
+"""
+    legend_room(app, mv) -> NTuple{2,Float64}
+
+The width and height in device pixels that the legend cards of map view `mv` take at the
+bottom right of the view, from its edges; `(0.0, 0.0)` when it has none or Colour Bars is off.
+`fit_clear` keeps the full extent out of it (`overlay_corners`).
+"""
+function legend_room(app, mv)::NTuple{2,Float64}
+    app.ui.colour_bars || return (0.0, 0.0)
+    refresh_plan!(app.map, app, mv)
+    s = app.window === nothing ? 1 : app.window.scale
+    h = 0.0
+    for p in app.map.plan
+        d = legend_data(p)
+        d === nothing && continue
+        h += legend_height(s, d) + fpx(s, 6)
+    end
+    h == 0 && return (0.0, 0.0)
+    return (Float64(fpx(s, LEGEND_W + EDGE)), h - fpx(s, 6) + fpx(s, EDGE))
+end
+
+# The title, the units text and the data of a coloured layer's legend, or `nothing`.
+function legend_of(app, p)
+    d = legend_data(p)
+    d === nothing && return nothing
+    snap = app.snap
+    k = findfirst(it -> it.id == p.layer.item, snap.items)
+    name = k === nothing ? p.layer.item : snap.items[k].name
+    units = ""
+    if p.layer.kind == :lines
+        name = string(name, ": ", p.layer.channel)
+        v = get(snap.databases, p.layer.item, nothing)
+        if v !== nothing
+            c = findfirst(ch -> ch.name == p.layer.channel, v.channels)
+            c === nothing || (units = v.channels[c].units)
+        end
+    else
+        g = get(snap.grids, p.layer.item, nothing)
+        g === nothing || (units = g.units)
+    end
+    plan_style(app, p).stretch === :histeq && (units = isempty(units) ? "hist. eq." : units * ", hist. eq.")
+    return name, units, d
+end
+
+"""
+    legend_texts!(app, p, d) -> LayerLook
+
+The texts of the legend card of plan entry `p`, whose data is `d`, in its look: the title
+(`legend_of`) elided to fit beside the units, the units, and the low, middle and high values
+of the stretch. Made again only when the snapshot, the data build, the UI scale or the stretch
+changed, so a steady frame allocates nothing.
+"""
+function legend_texts!(app, p, d)::LayerLook
+    look = p.look
+    style = plan_style(app, p)
+    s = Float32(app.window.scale)
+    stretch = (style.stretch, style.min, style.max, style.clip_low, style.clip_high)
+    (look.legend_snap === app.snap && look.legend_data === d && look.legend_version == d.version &&
+     look.legend_scale == s && isequal(look.legend_stretch, stretch)) && return look
+    title, units, _ = legend_of(app, p)
+    uw = text_width(FONT_REGULAR, 11, units)
+    gap = isempty(units) ? 0f0 : fpx(s, 8)
+    look.legend_title = elide(text_width, title, fpx(s, RAMP_W) - uw - gap; role = FONT_SEMIBOLD, size = 11)
+    look.legend_units = units
+    if d.hist.total > 0
+        lo, hi = Core.stretch_range(style, d.hist)
+        middle = style.stretch === :histeq ? Core.quantile_value(d.hist, 0.5) : (lo + hi) / 2
+        look.legend_values = (legend_number(lo), legend_number(middle), legend_number(hi))
+    end
+    look.legend_snap, look.legend_data, look.legend_version = app.snap, d, d.version
+    look.legend_scale, look.legend_stretch = s, stretch
+    return look
+end
+
+# One legend card in the unrounded box `card`, laid out as `draw_scale_bar` lays out its box.
+function draw_legend(app, dl, card::Box, p, d)
+    s = app.window.scale
+    t = app.tokens
+    f(v) = fpx(s, v)
+    hl = hairline(s)
+    look = legend_texts!(app, p, d)
+    frame = snap(card)
+    ig.AddRectFilled(dl, (frame.x0, frame.y0), (frame.x1, frame.y1), u32(t.ribbon, CARD_ALPHA), f(6))
+    ig.AddRect(dl, (frame.x0, frame.y0), (frame.x1, frame.y1), u32(t.border), f(6), hl)
+    x = card.x0 + hl + f(8)
+    inner = f(RAMP_W)
+    y = card.y0 + hl + f(6)
+    mid = y + f(13.75) / 2
+    units = look.legend_units
+    uw = text_width(FONT_REGULAR, 11, units)
+    draw_text_mid(dl, FONT_SEMIBOLD, 11, x, mid, u32(t.text), look.legend_title)
+    draw_text_mid(dl, FONT_REGULAR, 11, x + inner - uw, mid, u32(t.text_dim), units)
+    y += f(13.75 + 4)
+    if d.hist.total == 0
+        draw_text_mid(dl, FONT_REGULAR, 10.5, x, y + f(13) / 2, u32(t.text_dim), "No values")
+        return nothing
+    end
+    ramp = snap(Box(x, y, x + inner, y + f(10)))
+    draw_ramp(dl, Box(ramp.x0 + hl, ramp.y0 + hl, ramp.x1 - hl, ramp.y1 - hl), p.look.lut)
+    ig.AddRect(dl, (ramp.x0, ramp.y0), (ramp.x1, ramp.y1), u32(t.border_strong), f(2), hl)
+    y += f(10 + 2)
+    mid = y + f(13) / 2
+    col = u32(t.text_dim)
+    for (k, text) in enumerate(look.legend_values)
+        tw = text_width(FONT_REGULAR, 10.5, text)
+        tx = k == 1 ? x : k == 2 ? x + inner / 2 - tw / 2 : x + inner - tw
+        draw_text_mid(dl, FONT_REGULAR, 10.5, tx, mid, col, text)
+    end
+    return nothing
+end
+
+# A legend value as the prototype writes it: 2 decimals under 10, else none.
+legend_number(v::Real)::String = fmt_num(v, abs(v) < 10 ? 2 : 0)
+
+# The look-up table `lut` (RGBA bytes) across box `b`, one device pixel column at a time.
+function draw_ramp(dl, b::Box, lut::Vector{UInt8})
+    n = round(Int, width(b))
+    (n > 0 && length(lut) >= 1024) || return nothing
+    for i in 0:n-1
+        k = n == 1 ? 0 : round(Int, i / (n - 1) * 255)
+        c = UInt32(lut[4k+1]) | UInt32(lut[4k+2]) << 8 | UInt32(lut[4k+3]) << 16 | 0xff000000
+        ig.AddRectFilled(dl, (b.x0 + i, b.y0), (b.x0 + i + 1, b.y1), c)
+    end
+    return nothing
+end
+
+# --- Line labels ---
+
+"""
+    draw_line_labels(app, dl, b, cam)
+
+The name of each line at its first point, for the visible line layers with labels on: semibold
+10.5 `text` with a `canvas` halo, 4 px before the line's start along its direction (left of a line
+that runs to the right, under a line that runs up). A label that would overlap one already placed
+is left out, and at most $(LABEL_LIMIT) are drawn.
+"""
+function draw_line_labels(app, dl, b::Box, cam::Camera)
+    s = app.window.scale
+    t = app.tokens
+    hl = hairline(s)
+    w, h = width(b), height(b)
+    placed = empty!(app.map.overlays.placed)
+    lh = fpx(s, 10.5 * 1.25)
+    g = px(s, 4)
+    halo = ((-hl, 0f0), (hl, 0f0), (0f0, -hl), (0f0, hl), (-hl, -hl), (hl, hl), (-hl, hl), (hl, -hl))
+    for p in app.map.plan
+        e = p.entry
+        (p.layer.kind == :lines && p.layer.labels && e !== nothing) || continue
+        d = e.data
+        d isa LineLayerData || continue
+        look = line_labels!(p.look, d)
+        for (k, (_, x, y)) in enumerate(look.label_points)
+            length(placed) >= LABEL_LIMIT && return nothing
+            sx, sy = world_to_screen(cam, w, h, x, y)
+            (0 <= sx <= w && 0 <= sy <= h) || continue
+            text = look.label_names[k]
+            tw = text_width(FONT_SEMIBOLD, 10.5, text)
+            dx, dy = look.label_dirs[k]
+            if abs(dx) >= abs(dy)
+                x0 = dx >= 0 ? sx - g - tw : sx + g
+                mid = sy
+            else
+                x0 = sx - tw / 2
+                mid = dy >= 0 ? sy + g + lh / 2 : sy - g - lh / 2
+            end
+            x0, mid = rnd(b.x0 + x0), b.y0 + mid
+            lb = Box(x0 - hl, mid - lh / 2 - hl, x0 + tw + hl, mid + lh / 2 + hl)
+            any(q -> overlaps(q, lb), placed) && continue
+            push!(placed, lb)
+            for (ox, oy) in halo
+                draw_text_mid(dl, FONT_SEMIBOLD, 10.5, x0 + ox, mid + oy, u32(t.canvas), text)
+            end
+            draw_text_mid(dl, FONT_SEMIBOLD, 10.5, x0, mid, u32(t.text), text)
+        end
+    end
+    return nothing
+end
+
+# The label points, names and directions (the last point less the first) of the lines of
+# `d`, read again only for a new build of the data.
+function line_labels!(look::LayerLook, d::LineLayerData)::LayerLook
+    (look.label_data === d && look.label_version == d.version) && return look
+    pts = d.points
+    label_points!(look.label_points, d)
+    empty!(look.label_names)
+    for (li, _, _) in look.label_points
+        push!(look.label_names, Core.line_name(pts.lines[li]))
+    end
+    # A line's parts follow each other, as `label_points!` reads them.
+    resize!(look.label_dirs, length(look.label_points))
+    j = 0
+    last_line = 0
+    for k in eachindex(pts.part_line)
+        li = Int(pts.part_line[k])
+        li == last_line || (j += 1; last_line = li)
+        i = Int(pts.part_first[k]) + Int(pts.part_count[k])
+        _, x0, y0 = look.label_points[j]
+        look.label_dirs[j] = (pts.origin[1] + pts.x[i] - x0, pts.origin[2] + pts.y[i] - y0)
+    end
+    look.label_data = d
+    look.label_version = d.version
+    return look
+end
+
+# --- Box zoom and hint ---
+
+"The box of a box zoom: `accent` at 12 % with a 1 px `accent` border."
+function draw_zoom_box(app, dl, b::Box, st::MapViewState)
+    z = st.box
+    z === nothing && return nothing
+    t = app.tokens
+    r = snap(Box(b.x0 + min(z[1], z[3]), b.y0 + min(z[2], z[4]), b.x0 + max(z[1], z[3]), b.y0 + max(z[2], z[4])))
+    ig.AddRectFilled(dl, (r.x0, r.y0), (r.x1, r.y1), u32(t.accent, 0.12))
+    ig.AddRect(dl, (r.x0, r.y0), (r.x1, r.y1), u32(t.accent), 0, hairline(app.window.scale))
+    return nothing
+end
+
+"""
+    map_hint(app, mv) -> String
+
+What the hint at the top left says: the map's own error, "Loading <name>..." while a visible
+layer loads, the first layer error (or note); else `""`. Why the map draws on the CPU is in
+the status bar.
+"""
+function map_hint(app, mv)::String
+    isempty(mv.error) || return mv.error
+    ms = app.map
+    refresh_plan!(ms, app, mv)
+    snap = app.snap
+    for p in ms.plan
+        e = p.entry
+        if e === nothing || e.loading || (e.data === nothing && isempty(e.error))
+            k = findfirst(it -> it.id == p.layer.item, snap.items)
+            return string("Loading ", k === nothing ? p.layer.item : snap.items[k].name, "...")
+        end
+    end
+    gl = ms.renderer.gl
+    for p in ms.plan
+        e = p.entry::LayerEntry
+        isempty(e.error) || return e.error
+        if gl !== nothing
+            err = layer_error(gl, e.key)
+            isempty(err) || return err
+        end
+    end
+    return ""
+end
+
+"""
+    draw_map_hint(app, dl, b, mv, st)
+
+The prototype's `.maphint` at the top left, $(EDGE) px in: `ribbon` at $(CARD_ALPHA) alpha with a 1 px
+`border`, radius 5, padding 3 8, the text of `map_hint` in 11 `text_dim`.
+"""
+function draw_map_hint(app, dl, b::Box, mv, st::MapViewState)
+    text = map_hint(app, mv)
+    isempty(text) && return nothing
+    s = app.window.scale
+    t = app.tokens
+    f(v) = fpx(s, v)
+    hl = hairline(s)
+    inner = st.camera === nothing ? b : inner_box(b, s)   # inside the coordinate bands
+    x0, y0 = inner.x0 + f(EDGE), inner.y0 + f(EDGE)
+    room = b.x1 - f(EDGE) - x0 - 2hl - f(16)
+    text = elide(text_width, text, room; size = 11)
+    tw = text_width(FONT_REGULAR, 11, text)
+    hb = Box(x0, y0, x0 + tw + 2hl + f(16), y0 + 2hl + f(3 + 13.75 + 3))
+    frame = snap(hb)
+    ig.AddRectFilled(dl, (frame.x0, frame.y0), (frame.x1, frame.y1), u32(t.ribbon, CARD_ALPHA), f(5))
+    ig.AddRect(dl, (frame.x0, frame.y0), (frame.x1, frame.y1), u32(t.border), f(5), hl)
+    draw_text_mid(dl, FONT_REGULAR, 11, hb.x0 + hl + f(8), hb.y0 + hl + f(3) + f(13.75) / 2, u32(t.text_dim), text)
+    return nothing
+end

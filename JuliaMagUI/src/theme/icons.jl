@@ -33,14 +33,15 @@ const ICON_STYLES = (:normal, :disabled, :nav, :on_accent, :dim, :danger)
     ICON_STYLE_SIZES
 
 The sizes the atlas holds for each style, as the prototype uses them:
-`:normal` at every size but 44, `:disabled` for buttons and menus, `:nav` for the backstage
+`:normal` at every size but 44, `:disabled` for buttons and menus and the Layers tab's
+12 px drag grip, `:nav` for the backstage
 nav (18), its Back arrow (22) and the 44 px logo of its pages (the logo has no ink colour,
 so the nav colours draw it as the normal ones do), `:on_accent` for selected rows (16) and dialog heads (22),
 `:dim` for the search pill, the ribbon chevron and the Data tree chevrons (14), the Data
 filter box (15) and the ribbon scroll arrows (16), `:danger` for the red rows of a menu (16).
 Another size is drawn scaled from the next bigger size of its style.
 """
-const ICON_STYLE_SIZES = ((10, 12, 14, 15, 16, 18, 20, 22, 24, 32, 48), (16, 18, 32), (18, 22, 44),
+const ICON_STYLE_SIZES = ((10, 12, 14, 15, 16, 18, 20, 22, 24, 32, 48), (12, 16, 18, 32), (18, 22, 44),
     (16, 22), (14, 15, 16), (16,))
 
 # The placeholder colour of each prototype colour variable in the SVG files.
@@ -391,10 +392,19 @@ end
 # The atlas size to draw a `size` icon of style `s` from, as an index of `ICON_SIZES`:
 # that size, else the next bigger of the style, else the style's biggest.
 function icon_size_index(s::Int, size::Integer)::Int
+    1 <= size <= Base.size(ICON_SIZE_INDEX, 2) && return ICON_SIZE_INDEX[s, size]
+    return find_icon_size(s, size)
+end
+
+function find_icon_size(s::Int, size::Integer)::Int
     sizes = ICON_STYLE_SIZES[s]
     j = findfirst(>=(size), sizes)
     return findfirst(==(sizes[j === nothing ? lastindex(sizes) : j]), ICON_SIZES)::Int
 end
+
+# `icon_size_index` of each style and size up to 64, worked out once: the styles' size lists
+# differ in length, so a search allocates each time it runs.
+const ICON_SIZE_INDEX = [find_icon_size(s, n) for s in eachindex(ICON_STYLES), n in 1:64]
 
 """
     draw_icon(dl, name, pos, size; style = :normal, alpha = 1)

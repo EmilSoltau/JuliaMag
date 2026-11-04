@@ -23,10 +23,24 @@ include("theme/icons.jl")
 include("shell/draw.jl")
 include("app/toasts.jl")
 include("app/worker.jl")
+include("map/constants.jl")
+include("map/camera.jl")
+include("map/view.jl")
+include("map/lines.jl")
+include("map/grids.jl")
+include("map/scene.jl")
+include("map/cpu.jl")
+include("map/shaders.jl")
+include("map/gl.jl")
+include("map/frame.jl")
+include("map/loader.jl")
+include("map/overlays.jl")
+include("map/readout.jl")
 include("app/state.jl")
 include("commands/commands.jl")
 include("commands/keys.jl")
 include("commands/search.jl")
+include("commands/map_commands.jl")
 include("app/modal.jl")
 include("app/projects.jl")
 include("panes/panes.jl")
@@ -43,6 +57,8 @@ include("dialogs/form.jl")
 include("dialogs/widgets.jl")
 include("dialogs/tool_dialog.jl")
 include("panes/jobs.jl")
+include("panes/layers.jl")
+include("panes/style.jl")
 include("panes/tools.jl")
 include("backstage/backstage.jl")
 include("ribbon_tabs/settings_tab.jl")
@@ -183,6 +199,9 @@ struct AppFrame
     extra_ui::Any
 end
 
+# The GL pass of the app frame draws the shown map into its texture.
+gl_pass(a::AppFrame, w::Window) = map_gl_pass!(a.app, w)
+
 function (a::AppFrame)(w::Window)
     app = a.app
     app.window = w
@@ -190,6 +209,9 @@ function (a::AppFrame)(w::Window)
     w.handle.handle == C_NULL || note_focus!(app, GLFW.GetWindowAttrib(w.handle, GLFW.FOCUSED) != 0)
     drain!(app)
     refresh!(app)
+    update_layers!(app)
+    settle_drags!(app)
+    settle_previews!(app)
     settle_draw_errors!(app)
     # A bug that `user_message` meets in this frame is noted at the next `drain!`.
     with_bug_reports(app.queue.results) do

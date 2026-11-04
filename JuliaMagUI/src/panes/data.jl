@@ -13,9 +13,9 @@
 One row of the Data tree.
 
 - `key`: unique and stable, see `row_key`; it also names the row's expanded state.
-- `depth`: 0 for the folders Databases and Grids, then one more per level.
+- `depth`: 0 for the folders Databases, Grids and Maps, then one more per level.
 - `kind`: `:databases`, `:database`, `:lines`, `:line`, `:channels`, `:channel`, `:pair`,
-  `:grids` or `:grid`.
+  `:grids`, `:grid`, `:maps` or `:map`.
 - `label`: the name; `right`: the dim text at the right (a count, units, a size).
 - `icon`: a prototype icon name; `bold`: folders and the current database.
 - `dim` and `italic`: an item whose folder is missing (or that cannot be read).
@@ -41,21 +41,24 @@ TreeRow(key, depth, kind, label; right = "", icon = "", bold = false, dim = fals
     TreeRow(String(key), depth, kind, String(label), String(right), String(icon), bold, dim,
         italic, checkbox, String(tag))
 
-const FOLDER_KEYS = (databases = "databases", grids = "grids")
+const FOLDER_KEYS = (databases = "databases", grids = "grids", maps = "maps")
+# The kinds of the folder rows: bold, and a click opens or closes them.
+const FOLDER_KINDS = (:databases, :grids, :maps, :lines, :channels)
 # The kinds of rows that belong to a database: selecting one makes that database current.
 const DATABASE_KINDS = (:database, :lines, :line, :channels, :channel, :pair)
 
 """
     row_key(kind, item, sub) -> String
 
-The key of a tree row: `"databases"`, `"grids"`, the item id for a database or grid,
+The key of a tree row: `"databases"`, `"grids"`, `"maps"`, the item id for a database, grid or map,
 `"<id>/lines"`, `"<id>/channels"`, `"<id>/lines/<line>"`, `"<id>/channels/<channel>"` and
 `"<id>/pairs/<x>,<y>"`. `row_target` reads it back.
 """
 function row_key(kind::Symbol, item::AbstractString, sub::AbstractString)::String
     kind === :databases && return FOLDER_KEYS.databases
     kind === :grids && return FOLDER_KEYS.grids
-    kind in (:database, :grid) && return String(item)
+    kind === :maps && return FOLDER_KEYS.maps
+    kind in (:database, :grid, :map) && return String(item)
     kind === :lines && return string(item, "/lines")
     kind === :channels && return string(item, "/channels")
     kind === :line && return string(item, "/lines/", sub)
@@ -72,14 +75,14 @@ channel or pair (`"X,Y"`) name, or `""`. This is what `app.ui.selected` holds.
 """
 function row_target(row::TreeRow)::Tuple{Symbol,String,String}
     k = row.kind
-    k in (:databases, :grids) && return (k, "", "")
-    k in (:database, :grid) && return (k, row.key, "")
+    k in (:databases, :grids, :maps) && return (k, "", "")
+    k in (:database, :grid, :map) && return (k, row.key, "")
     parts = split(row.key, '/'; limit = 3)
     return (k, String(parts[1]), length(parts) == 3 ? String(parts[3]) : "")
 end
 
 "Can the row open to show rows under it?"
-has_children(row::TreeRow) = row.kind in (:databases, :grids, :lines, :channels) ||
+has_children(row::TreeRow) = row.kind in FOLDER_KINDS ||
     (row.kind === :database && !row.dim)
 
 "The text of a position pair row, such as `\"X, Y\"`; `pair_sub` is its key part, `\"X,Y\"`."
@@ -154,10 +157,11 @@ const BROKEN_TEXT = "cannot be read"
     tree_rows(snap, expanded, filter; current = "") -> Vector{TreeRow}
 
 The rows of the Data tree, top to bottom: `Databases` > each database > `Lines` > line
-rows and `Channels` > position pairs and channel rows; then `Grids` > grid rows. A folder
+rows and `Channels` > position pairs and channel rows; then `Grids` > grid rows; then `Maps`
+> map rows, with the number of layers at the right ("2 layers"). A folder
 shows its rows when its key is in `expanded`. The database `current` is bold.
 
-A `filter` (case-insensitive, blank for none) keeps the database, grid, line, channel and
+A `filter` (case-insensitive, blank for none) keeps the database, grid, map, line, channel and
 pair rows whose name holds it, with their parents, all open. A database that matches by
 name shows itself; a folder (top folders too) shows only when it holds a match.
 """
@@ -169,6 +173,7 @@ function tree_rows(snap::Snapshot, expanded::AbstractSet{String}, filter::Abstra
     rows = TreeRow[]
     dbs = [it for it in snap.items if it.kind == Core.ITEM_DATABASE]
     grids = [it for it in snap.items if it.kind == Core.ITEM_GRID]
+    maps = [it for it in snap.items if it.kind == Core.ITEM_MAP]
 
     folder = TreeRow(FOLDER_KEYS.databases, 0, :databases, "Databases"; right = string(length(dbs)),
         icon = "folder", bold = true)
@@ -186,15 +191,31 @@ function tree_rows(snap::Snapshot, expanded::AbstractSet{String}, filter::Abstra
     if filtering || FOLDER_KEYS.grids in expanded
         for it in grids
             filtering && !hit(it.name) && continue
-            v = get(snap.grids, it.id, nothing)
-            broken = !it.missing && (v === nothing || !isempty(v.error))
-            right = it.missing ? MISSING_TEXT : broken ? BROKEN_TEXT : string(v.nx, " x ", v.ny)
-            push!(rows, TreeRow(it.id, 1, :grid, it.name; right, icon = it.missing ? "missing" : "grid",
-                dim = it.missing || broken, italic = it.missing || broken))
+            push!(rows, item_row(it, :grid, "grid", get(snap.grids, it.id, nothing), v -> string(v.nx, " x ", v.ny)))
+        end
+    end
+    filtering && last(rows) === folder && pop!(rows)
+
+    folder = TreeRow(FOLDER_KEYS.maps, 0, :maps, "Maps"; right = string(length(maps)),
+        icon = "folder", bold = true)
+    push!(rows, folder)
+    if filtering || FOLDER_KEYS.maps in expanded
+        for it in maps
+            filtering && !hit(it.name) && continue
+            push!(rows, item_row(it, :map, "map", get(snap.maps, it.id, nothing), v -> plural(length(v.layers), "layer")))
         end
     end
     filtering && last(rows) === folder && pop!(rows)
     return rows
+end
+
+# The row of a grid or a map item: its `icon` and `right(v)` of its view `v` at the right; a
+# missing item (or one that cannot be read) is dim and italic and says why at the right.
+function item_row(it::ItemRow, kind::Symbol, icon::String, v, right::Function)::TreeRow
+    broken = !it.missing && (v === nothing || !isempty(v.error))
+    text = it.missing ? MISSING_TEXT : broken ? BROKEN_TEXT : right(v)
+    return TreeRow(it.id, 1, kind, it.name; right = text, icon = it.missing ? "missing" : icon,
+        dim = it.missing || broken, italic = it.missing || broken)
 end
 
 function add_database_rows!(rows::Vector{TreeRow}, snap::Snapshot, it::ItemRow,
@@ -248,7 +269,7 @@ end
     tree_empty_text(filter, rows) -> Union{Nothing,String}
 
 What the tree says when it has no rows: `"No matches"` while a filter is typed, else
-`nothing` (an empty project still shows its Databases and Grids folders).
+`nothing` (an empty project still shows its Databases, Grids and Maps folders).
 """
 tree_empty_text(filter::AbstractString, rows::AbstractVector{TreeRow}) =
     isempty(rows) && !isempty(strip(filter)) ? "No matches" : nothing
@@ -335,14 +356,15 @@ end
 crs_short(snap::Snapshot, code::AbstractString) = isempty(code) ? "no system" :
     (info = get(snap.crs, code, nothing); info === nothing || isempty(info.name) ? String(code) : info.name)
 
-crs_unit(snap::Snapshot, code::AbstractString) =
-    (info = get(snap.crs, code, nothing); info === nothing ? "" : info.unit)
+# The unit of a coordinate system, or `""`. No `Union` result, so the map's overlays can ask
+# for it each frame without an allocation.
+crs_unit(snap::Snapshot, code::AbstractString)::String = haskey(snap.crs, code) ? snap.crs[code].unit : ""
 
 """
     properties(snap, selected) -> Union{Nothing,PropsView}
 
 The Properties of the selected tree row (`app.ui.selected`): the fields of a database,
-grid, line, channel or position pair, from the snapshot only. `nothing` for a folder, for
+grid, map, line, channel or position pair, from the snapshot only. `nothing` for a folder, for
 no selection, and for an item that is no longer there.
 """
 function properties(snap::Snapshot, sel)::Union{Nothing,PropsView}
@@ -352,12 +374,17 @@ function properties(snap::Snapshot, sel)::Union{Nothing,PropsView}
     k === nothing && return nothing
     it = snap.items[k]
     problem = item_problem(snap, it)
-    if kind in (:database, :grid) && problem !== nothing
-        noun = kind === :database ? "Database" : "Grid"
+    if kind in (:database, :grid, :map) && problem !== nothing
+        noun = kind === :database ? "Database" : kind === :grid ? "Grid" : "Map"
         return PropsView(it.name, ["Type" => noun * (it.missing ? " (missing)" : ""),
             "Was at" => it.path, "Status" => problem])
     end
     kind === :grid && return grid_properties(snap, it, snap.grids[id])
+    if kind === :map
+        v = snap.maps[id]
+        return PropsView(it.name, ["Type" => "Map", "Layers" => string(length(v.layers)),
+            "System" => crs_text(snap, v.crs)])
+    end
     kind in DATABASE_KINDS || return nothing
     v = get(snap.databases, id, nothing)
     (v === nothing || !isempty(v.error)) && return nothing
@@ -394,7 +421,7 @@ end
 function item_problem(snap::Snapshot, it::ItemRow)::Union{Nothing,String}
     it.missing && return "Folder not found"
     v = it.kind == Core.ITEM_DATABASE ? get(snap.databases, it.id, nothing) :
-        it.kind == Core.ITEM_GRID ? get(snap.grids, it.id, nothing) : nothing
+        it.kind == Core.ITEM_GRID ? get(snap.grids, it.id, nothing) : get(snap.maps, it.id, nothing)
     v === nothing && return "Not read yet"
     return isempty(v.error) ? nothing : v.error
 end
@@ -476,7 +503,7 @@ end
     default_action!(app, row)
 
 What Enter and a double click do: open or close a folder or database, tick or untick a
-line, open the Channel Properties of a channel, make a position pair current.
+line, open the Channel Properties of a channel, make a position pair current, show a map.
 """
 function default_action!(app, row::TreeRow)
     if has_children(row)
@@ -489,6 +516,8 @@ function default_action!(app, row::TreeRow)
     elseif row.kind === :pair
         _, id, _ = row_target(row)
         run_tool_on!(app, "coordinates.set_current", id)
+    elseif row.kind === :map && !row.dim
+        open_map!(app, row.key)
     end
     return nothing
 end
@@ -524,22 +553,37 @@ item_name(snap, id) = (k = findfirst(it -> it.id == id, snap.items); k === nothi
 
 function remove_item_item(app, kind::Symbol, id::AbstractString)
     name = item_name(app.snap, id)
+    remove = a -> submit!(a, "Remove $name", s -> Core.remove_item!(s, id))
+    # A map holds no data of its own: it goes at once, and Ctrl+Z brings it back.
+    kind === :map && return MenuItem("Remove from Project"; icon = "trash", danger = true, action = remove)
     noun = kind === :database ? "database" : "grid"
     return MenuItem("Remove from Project"; icon = "trash", danger = true,
         action = a -> confirm!(a, "Remove $name?", "The $noun leaves the project. It can be undone.";
             action = "Remove", danger = true,
-            on_yes = b -> submit!(b, "Remove $name", s -> Core.remove_item!(s, id))))
+            on_yes = remove))
 end
 
 rename_item_item(kind::Symbol, id::AbstractString, sub::AbstractString, name::AbstractString) =
     MenuItem("Rename..."; icon = "rename", action = a -> open_rename!(a, (kind, String(id), String(sub)), name))
+
+# The map rows at the top of the menu of a database or grid: Show on Map, and Add to Current
+# Map while a map is shown (it always adds a layer), then a separator.
+function map_items(app, id::AbstractString)::Vector{MenuItem}
+    items = [MenuItem("Show on Map"; icon = "map", help = "Show it on the map, or on a new map.",
+        action = a -> show_on_map!(a, id))]
+    shown_map(app) === nothing || push!(items, MenuItem("Add to Current Map"; icon = "addItem",
+        help = "Add it to the map as a new layer.", action = a -> add_to_map!(a, id)))
+    push!(items, menu_separator())
+    return items
+end
 
 """
     tree_menu(app, row) -> Vector{MenuItem}
 
 The context menu of a tree row, as the prototype's menus for each kind of row (section 4.1).
 Tool rows ask for the tool's dialog with the row's item; edits go through the worker;
-removals and deletes ask first. Empty for rows without a menu (lines).
+removals and deletes ask first; a map goes at once, as Ctrl+Z brings it back. Empty for rows
+without a menu (lines).
 """
 function tree_menu(app, row::TreeRow)::Vector{MenuItem}
     snap = app.snap
@@ -553,14 +597,23 @@ function tree_menu(app, row::TreeRow)::Vector{MenuItem}
         append!(items, split_items(app, "import.database", open_import))
     elseif kind === :grids
         append!(items, split_items(app, "import.grid", open_import))
-    elseif kind in (:database, :grid) && row.dim
+    elseif kind === :maps
+        cmd = find_command(app, "map.new")
+        cmd === nothing || push!(items, MenuItem(cmd.name; icon = cmd.icon, help = cmd.help, id = cmd.id,
+            reason = cmd.enabled(app), action = cmd.run))
+    elseif kind in (:database, :grid, :map) && row.dim
         push!(items, rename_item_item(kind, id, "", row.label), remove_item_item(app, kind, id))
+    elseif kind === :map
+        push!(items, MenuItem("Open"; icon = "map", action = a -> open_map!(a, id)),
+            rename_item_item(kind, id, "", row.label), remove_item_item(app, kind, id))
     elseif kind === :database
+        append!(items, map_items(app, id))
         foreach(x -> x === nothing || push!(items, x),
             (tool_item(app, "database.statistics", id), tool_item(app, "database.channel_math", id)))
         append!(items, split_items(app, "export.database", export_on))
         push!(items, sep, rename_item_item(kind, id, "", row.label), remove_item_item(app, kind, id))
     elseif kind === :grid
+        append!(items, map_items(app, id))
         foreach(x -> x === nothing || push!(items, x),
             (tool_item(app, "grid.statistics", id; label = "Grid Statistics..."),
              tool_item(app, "grid.set_crs", id; label = "Set Coordinate System...")))
@@ -767,7 +820,7 @@ function draw_tree_row(app, dl, row::TreeRow, b::Box, selected::Bool)
     f(v) = fpx(s, v)
     hl = hairline(s)
     mid = centre_y(b)
-    folder = row.kind in (:databases, :grids, :lines, :channels)
+    folder = row.kind in FOLDER_KINDS
 
     # Where the parts go: chevron, checkbox, icon, name; from the right the count text
     # (8 px before it) and the tag (6 px before it). The name ends where they start.

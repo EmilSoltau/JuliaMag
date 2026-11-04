@@ -514,7 +514,7 @@ toast_texts(app) = [t.text for t in app.toasts]
             @test first(all_items).head && first(all_items).label == "Tabs"
             items = filter(it -> !it.head, all_items)
             labels = [it.label for it in items]
-            @test labels == ["Database", "Database Tools", "Coordinates", "Grid and Image",
+            @test labels == ["Database", "Database Tools", "Coordinates", "Grid and Image", "Map",
                 "Settings", "Help"]
             @test all(it -> it.checked === true && it.stay, items)
             @test items[end].reason !== nothing && items[end-1].reason !== nothing
@@ -541,9 +541,12 @@ toast_texts(app) = [t.text for t in app.toasts]
             @test groups[2].items == [Custom(:defaults), SmallColumn(["settings.temp_folder"])]
             @test groups[3].items == [SmallColumn(["settings.open_last"])]
             @test byid["settings.open_last"].label == "Open Last Project"
-            @test groups[4].items == [BigButton("settings.software")]
+            @test groups[4].items == [BigButton("settings.software"),
+                SmallColumn(["settings.map_auto", "settings.map_gpu", "settings.map_cpu"])]
+            @test [byid[id].label for id in groups[4].items[2].cmd_ids] ==
+                  ["Map: Auto", "Map: Graphics Card", "Map: CPU"]
             @test byid["settings.software"].label == "Software\nRendering"
-            @test groups[5].items == [Custom(:tabs_menu)]
+            @test groups[5].items == [UI.MenuButton("settings.tabs")]
             help = ribbon_layout(cmds, "Help")
             @test [g.name for g in help] == ["Help", "About"]
             @test [byid[b.cmd_id].label for b in help[1].items] ==
@@ -583,9 +586,9 @@ toast_texts(app) = [t.text for t in app.toasts]
             @test c.open_last && c.software_rendering
             @test c.distance_units == "km" && c.grid_colours == "viridis"
             @test "viridis" in first.(Core.colour_tables())
-            # Nothing draws grids yet: the toast does not claim an effect (final review M1).
+            # The maps use it for grids with the stock colour table (Task 16).
             @test any(t -> t.text == "Saved: Viridis for grids." &&
-                           t.sub == "Grid views use it once JuliaMag has them.", app.toasts)
+                           t.sub == "Maps show grids that use the default colours with it.", app.toasts)
         end
     end
 

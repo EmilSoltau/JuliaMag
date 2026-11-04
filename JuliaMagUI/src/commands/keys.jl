@@ -64,19 +64,22 @@ end
 const TEXT_UNDO_KEYS = (:Z, :Y)
 
 """
-    shortcut_command(cmds, chord, modal_open, text_active) -> Union{Nothing,Command}
+    shortcut_command(cmds, chord, modal_open, text_active; menu_open = false) -> Union{Nothing,Command}
 
 The command that `chord` runs, or `nothing`.
 While a modal dialog or the command search is open only `Ctrl+K` and `Esc` pass.
 While a text field is active only chords with `Ctrl` pass, and never `Ctrl+Z` or `Ctrl+Y`
 (the text field undoes its own text).
+While a drop-down menu is open only chords with `Ctrl` or `Alt` pass: the menu takes the
+plain keys (the arrows, Page Up and Down, Home, End, Enter and Esc).
 """
 function shortcut_command(cmds, chord::Chord, modal_open::Bool, text_active::Bool;
-        table = chord_table(cmds))::Union{Nothing,Command}
+        menu_open::Bool = false, table = chord_table(cmds))::Union{Nothing,Command}
     if modal_open
         search = chord.ctrl && !chord.shift && !chord.alt && chord.key === :K
         search || chord.key === :Escape || return nothing
     end
+    menu_open && !chord.ctrl && !chord.alt && return nothing
     if text_active
         chord.ctrl || return nothing
         chord.key in TEXT_UNDO_KEYS && return nothing
@@ -100,11 +103,12 @@ function handle_shortcuts!(app)
     cmds = commands(app)
     table = command_chords(app)   # parsed once per command list, not per frame
     modal = blocks_shortcuts(app)   # a dialog or the command search is open
+    menu_open = app.ui.menu !== nothing
     text = unsafe_load(Ptr{lib.ImGuiIO}(ig.GetIO()).WantTextInput)
     held = held_modifiers()
     for (chord, id) in table
         chord_pressed(chord, held) || continue
-        cmd = shortcut_command(cmds, chord, modal, text; table)
+        cmd = shortcut_command(cmds, chord, modal, text; menu_open, table)
         cmd === nothing && continue
         cmd.enabled(app) === nothing && guarded(app, cmd.run)
         return nothing
@@ -125,10 +129,11 @@ struct ShortcutRow
     text::String
 end
 
-# What the shortcuts of the shell do, in the prototype's words and order (section 9).
+# What the shortcuts of the shell and the map do, in the prototype's words and order (section 9).
 const SHORTCUT_TEXTS = ["ui.command_search" => "Command search", "session.undo" => "Undo",
     "session.redo" => "Redo", "project.new" => "New project", "project.open" => "Open project",
-    "ui.ribbon" => "Collapse or expand the ribbon", "ui.theme.toggle" => "Switch light and dark"]
+    "ui.ribbon" => "Collapse or expand the ribbon", "ui.theme.toggle" => "Switch light and dark",
+    "map.full_extent" => "Map: full extent"]
 
 const ESC_ROW = ShortcutRow(["Esc"], "Close a dialog, menu or the command search")
 

@@ -6,35 +6,42 @@ const QAT = ("project.new" => "new", "project.open" => "open", "session.undo" =>
 
 const PILL_WIDTH = 248
 const PILL_MIN_WIDTH = 150
+const DOC_TITLE_SIZE = 12   # the shown document's part of the title
+const DOC_TITLE_SEP = " - "
 
 """
     HeaderLayout
 
 Where the header parts go, in device pixels. `title` is `nothing` when the title does
-not fit between the toolbar and the pill. `pill_round` means the pill shrank to a round
-search button.
+not fit between the toolbar and the pill; `doc` is the box of the shown document's part of
+the title, `nothing` when there is none or it does not fit. `pill_round` means the pill
+shrank to a round search button.
 """
 struct HeaderLayout
     logo::Box
     name_x::Float32
     qat::Vector{Box}
     title::Union{Nothing,Box}
+    doc::Union{Nothing,Box}
     pill::Box
     pill_round::Bool
 end
 
 """
-    header_layout(b, scale, measure, title, n_qat) -> HeaderLayout
+    header_layout(b, scale, measure, title, n_qat; doc = "") -> HeaderLayout
 
 Lay out the header in box `b` as the prototype's `#header`: padding 10, a 24 px logo,
 8 px, the app name (13 semibold), 12 px, `n_qat` toolbar buttons of 26 by 22 with 2 px
 between, the title centred in the window, and the search pill (248 by 24) at the right.
+The title is the project name (12.5 semibold), then `" - "` and `doc`, the shown document's
+name such as `"Map 1"` (12 regular), as the prototype's `renderTitle`.
 The pill shrinks to 150 px, then to a 26 px round button, rather than touch the toolbar.
-The title is dropped when it would come within 12 px of the toolbar or the pill.
+The title is dropped when it would come within 12 px of the toolbar or the pill: first its
+document part, then all of it.
 `measure(role, size, text)` is the text width in device pixels.
 """
 function header_layout(b::Box, scale::Real, measure, title::AbstractString,
-        n_qat::Integer)::HeaderLayout
+        n_qat::Integer; doc::AbstractString = "")::HeaderLayout
     p(v) = px(scale, v)
     mid = centre_y(b)
     logo = Box(b.x0 + p(10), round(mid - p(12)), b.x0 + p(34), round(mid - p(12)) + p(24))
@@ -51,19 +58,30 @@ function header_layout(b::Box, scale::Real, measure, title::AbstractString,
     pw = room >= p(PILL_WIDTH) ? p(PILL_WIDTH) : room >= p(PILL_MIN_WIDTH) ? round(room) : p(26)
     pill = Box(right - pw, round(mid - p(12)), right, round(mid - p(12)) + p(24))
     pill_round = pw < p(PILL_MIN_WIDTH)
-    tbox = nothing
+    tbox = dbox = nothing
     if !isempty(title)
         tw = measure(FONT_SEMIBOLD, BODY_FONT_SIZE, title)
-        tx = round((b.x0 + b.x1 - tw) / 2)
-        if tx >= qat_end + p(12) && tx + tw <= pill.x0 - p(12)
+        dw = isempty(doc) ? 0f0 :
+            measure(FONT_REGULAR, DOC_TITLE_SIZE, DOC_TITLE_SEP) + measure(FONT_REGULAR, DOC_TITLE_SIZE, doc)
+        fits(w) = (x = round((b.x0 + b.x1 - w) / 2); x >= qat_end + p(12) && x + w <= pill.x0 - p(12))
+        dw > 0 && !fits(tw + dw) && (dw = 0f0)
+        if fits(tw + dw)
+            tx = round((b.x0 + b.x1 - tw - dw) / 2)
             tbox = Box(tx, b.y0, tx + tw, b.y1)
+            dw > 0 && (dbox = Box(tx + tw, b.y0, tx + tw + dw, b.y1))
         end
     end
-    return HeaderLayout(logo, name_x, qat, tbox, pill, pill_round)
+    return HeaderLayout(logo, name_x, qat, tbox, dbox, pill, pill_round)
 end
 
 "The project title of the header: the project name, or `\"\"` without a project."
 header_title(app) = app.snap === nothing ? "" : app.snap.project_name
+
+"The shown document of the header title: the shown map's name, or `\"\"`."
+function header_doc(app)::String
+    mv = shown_map(app)
+    return mv === nothing ? "" : mv.name
+end
 
 """
     draw_header(app, dl, b)
@@ -77,12 +95,19 @@ function draw_header(app, dl, b::Box)
     p(v) = px(s, v)
     ig.AddRectFilled(dl, (b.x0, b.y0), (b.x1, b.y1), u32(t.header))
     title = header_title(app)
-    l = header_layout(b, s, text_width, title, length(QAT))
+    doc = header_doc(app)
+    l = header_layout(b, s, text_width, title, length(QAT); doc)
     mid = centre_y(b)
     draw_icon(dl, "logo", (l.logo.x0, l.logo.y0), 24)
     draw_text_mid(dl, FONT_SEMIBOLD, 13, l.name_x, mid, u32(t.text), APP_NAME)
     l.title === nothing ||
         draw_text_mid(dl, FONT_SEMIBOLD, BODY_FONT_SIZE, l.title.x0, mid, u32(t.text), title)
+    if l.doc !== nothing
+        col = u32(t.text_dim)
+        draw_text_mid(dl, FONT_REGULAR, DOC_TITLE_SIZE, l.doc.x0, mid, col, DOC_TITLE_SEP)
+        draw_text_mid(dl, FONT_REGULAR, DOC_TITLE_SIZE, l.doc.x0 + text_width(FONT_REGULAR, DOC_TITLE_SIZE, DOC_TITLE_SEP),
+            mid, col, doc)
+    end
 
     ig.PushID("header")
     dark = t === DARK

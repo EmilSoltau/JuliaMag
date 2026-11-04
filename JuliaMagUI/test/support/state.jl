@@ -8,6 +8,9 @@ import JuliaMagUI as UI
 # `fresh_session`, `make_test_database!`, `add_test_database!`, `testdata`, `write_synthetic_xyz`.
 include(joinpath(@__DIR__, "..", "..", "..", "JuliaMagCore", "test", "support", "synthetic.jl"))
 
+# `survey_database!`, `add_test_grid!`.
+include(joinpath(@__DIR__, "..", "..", "..", "JuliaMagCore", "test", "support", "maps.jl"))
+
 """
     test_app_state(s) -> AppState
 
@@ -90,6 +93,33 @@ function refresh_now!(app::UI.AppState; timeout::Real = 10)
         left > 0 || error("refresh_now!: no snapshot of revision $(Core.revision(s)) after $timeout s")
         timedwait(() -> isready(app.queue.results), left; pollint = 0.002)
     end
+end
+
+"""
+    wait_layers(app; timeout = 20)
+
+Drain worker results and run `update_layers!` until no map layer load runs and every
+visible layer of the shown map (`app.ui.current_map`) has an entry. An error after `timeout` seconds.
+"""
+function wait_layers(app::UI.AppState; timeout::Real = 20)
+    deadline = time() + timeout
+    while true
+        UI.drain!(app)
+        UI.update_layers!(app)
+        !any(e -> e.loading, values(app.map.entries)) && all_layers_have_entries(app) && return nothing
+        left = deadline - time()
+        left > 0 || error("wait_layers: the map layers did not load within $timeout s")
+        timedwait(() -> isready(app.queue.results), left; pollint = 0.002)
+    end
+end
+
+# Does every visible layer of the shown map have an entry?
+function all_layers_have_entries(app::UI.AppState)::Bool
+    snap = app.snap
+    snap === nothing && return true
+    mv = get(snap.maps, app.ui.current_map, nothing)
+    mv === nothing && return true
+    return all(l -> !l.visible || haskey(app.map.entries, UI.layer_key(snap, mv, l)), mv.layers)
 end
 
 """
@@ -278,8 +308,8 @@ every_setting_tool(; id::AbstractString = "test.every_setting", mode::Symbol = :
             Core.TextSetting("note", "Note"; default = "Survey 2024", help = "Free text."),
             Core.ExprSetting("expr", "Expression"; default = "OUT = MAG * 2"),
             Core.ChoiceSetting("method", "Method", ["near", "linear"]; labels = ["Nearest", "Linear"]),
-            Core.ChoiceSetting("table", "Colour table", ["rainbow", "geosoft", "grey", "clra"];
-                labels = ["Rainbow", "Geosoft", "Grey", "Clra"]),
+            Core.ChoiceSetting("table", "Colour table", ["geosoft", "viridis", "grey", "blue-red"];
+                labels = ["Geosoft (colour.tbl)", "Viridis", "Grey", "Blue-Red"]),
             Core.BoolSetting("protect", "Protect the output"; default = true),
             Core.FileSetting("file", "File"; extensions = [".xyz"], default = "/data/survey.xyz"),
             Core.ChannelSetting("channel", "Channel"),
@@ -451,4 +481,29 @@ function drop_jobs!(s::Core.Session, ids)
     lock(() -> filter!(j -> !(j.id in ids), s.jobs), s.jobs_lock)
     Core.bump!(s)
     return nothing
+end
+
+"""
+    line_points(lines) -> Core.LinePoints
+
+A `LinePoints` from `lines`, one vector of `(x, y, value)` tuples per line. Each line is one
+part. The origin is the floor of the first point.
+"""
+function line_points(lines::AbstractVector)::Core.LinePoints
+    p = Core.LinePoints()
+    first_pt = first(first(lines))
+    ox, oy = floor(first_pt[1]), floor(first_pt[2])
+    p.origin = (ox, oy)
+    n = 0
+    for (li, pts) in enumerate(lines)
+        push!(p.part_first, Int32(n)); push!(p.part_count, Int32(length(pts)))
+        push!(p.part_line, Int32(li)); push!(p.part_row, Int32(1))
+        push!(p.lines, Core.LineId(Core.LINE, 1000 + li, 0))
+        for (x, y, v) in pts
+            push!(p.x, Float32(x - ox)); push!(p.y, Float32(y - oy)); push!(p.value, Float32(v))
+        end
+        n += length(pts)
+        push!(p.extents, (minimum(t -> t[1], pts), minimum(t -> t[2], pts), maximum(t -> t[1], pts), maximum(t -> t[2], pts)))
+    end
+    return p
 end

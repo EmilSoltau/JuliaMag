@@ -66,7 +66,8 @@ window_testset("harness") do
         end
         @test seen[] isa UI.Window
         # The app closed: its window is gone and its worker has ended.
-        @test app[] isa UI.AppState && app[].window === nothing && istaskdone(app[].queue.task)
+        @test app[] isa UI.AppState && app[].window === nothing && istaskdone(app[].queue.task) &&
+            istaskdone(app[].queue.map_task)
         @test isfile(path)
         img = PNGFiles.load(path)
         @test size(img) == (920, 1480)

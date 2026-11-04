@@ -19,24 +19,31 @@ While an undo or redo step runs, the step is held and added after it (see `Sessi
 function push_undo!(s::Session, step::UndoStep)
     lock(s.lock) do
         held = s.held_edits
+        count_changes!(s, step)
         if held !== nothing
             push!(held, step)
             bump!(s)
             return step
         end
-        push!(s.undo_stack, step)
-        for old in s.redo_stack
-            try
-                old.drop()
-            catch e
-                e isa InterruptException && rethrow()
-                session_warning!(s, "undo step \"$(old.label)\" could not free its data: $(sprint(showerror, e))")
-            end
-        end
-        empty!(s.redo_stack)
-        bump!(s)
+        add_step!(s, step)
         return step
     end
+end
+
+# Put a step on the undo stack and clear the redo stack. Call it under `s.lock`.
+function add_step!(s::Session, step::UndoStep)
+    push!(s.undo_stack, step)
+    for old in s.redo_stack
+        try
+            old.drop()
+        catch e
+            e isa InterruptException && rethrow()
+            session_warning!(s, "undo step \"$(old.label)\" could not free its data: $(sprint(showerror, e))")
+        end
+    end
+    empty!(s.redo_stack)
+    bump!(s)
+    return nothing
 end
 
 can_undo(s::Session)::Bool = lock(() -> !isempty(s.undo_stack), s.lock)
@@ -84,6 +91,7 @@ function run_step!(s::Session, undo::Bool)::Bool
         finally
             lock(s.lock) do
                 foreach(id -> delete!(s.busy, id), unique(step.items))
+                count_changes!(s, step)
                 held = something(s.held_edits)
                 s.held_edits = nothing
                 try
@@ -106,7 +114,7 @@ A history entry that cannot be written is a warning, not an error: the change
 is done. The entry of a job warns that job too, since a script will not repeat it.
 """
 function add_held!(s::Session, x::Union{UndoStep,HistoryEntry})
-    x isa UndoStep && return (push_undo!(s, x); nothing)
+    x isa UndoStep && return (add_step!(s, x); nothing)
     try
         write_history!(s, x)
     catch e

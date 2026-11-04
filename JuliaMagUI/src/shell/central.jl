@@ -1,4 +1,4 @@
-# The central area. Until views come (plan 4) it shows an empty state in the middle.
+# The central area: the shown map (map/view.jl), else an empty state in the middle.
 
 """
     CentralState
@@ -39,10 +39,12 @@ end
 """
     draw_central(app, dl, b)
 
-Draw the central area in box `b`: `canvas` fill and the empty state, centred, with
+Draw the central area in box `b`: the map view when `app.ui.current_map` names a map of the
+snapshot (`draw_map_view`); else `canvas` fill and the empty state, centred, with
 lines 1.6 times the font size apart as the prototype's `.empty`.
 """
 function draw_central(app, dl, b::Box)
+    shown_map(app) === nothing || return draw_map_view(app, dl, b)
     s = app.window.scale
     t = app.tokens
     p(v) = px(s, v)

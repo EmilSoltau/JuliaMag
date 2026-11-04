@@ -179,10 +179,10 @@ end
     with_app(test_app_state(nothing)) do app
         rows = shortcut_rows(UI.commands(app))
         @test [r.keys for r in rows] == [["Ctrl+K"], ["Ctrl+Z"], ["Ctrl+Y", "Ctrl+Shift+Z"],
-            ["Ctrl+N"], ["Ctrl+O"], ["Ctrl+F1"], ["Ctrl+Shift+L"], ["Esc"]]
+            ["Ctrl+N"], ["Ctrl+O"], ["Ctrl+F1"], ["Ctrl+Shift+L"], ["Home"], ["Esc"]]
         @test [r.text for r in rows] == ["Command search", "Undo", "Redo", "New project",
             "Open project", "Collapse or expand the ribbon", "Switch light and dark",
-            "Close a dialog, menu or the command search"]
+            "Map: full extent", "Close a dialog, menu or the command search"]
         # A command with a shortcut of its own is listed by its name, before Esc.
         extra = [UI.commands(app); UI.Command("t.x", "Do Something...", a -> nothing; shortcut = "Ctrl+F2")]
         r = shortcut_rows(extra)

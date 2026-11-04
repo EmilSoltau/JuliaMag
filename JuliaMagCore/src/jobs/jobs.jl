@@ -339,9 +339,12 @@ database that an export reads, changed nothing. The job keeps that change: it
 gets a warning, and an undo step `"remove rows of failed <job id>"` is pushed,
 so the user can undo the change once the item is free.
 Other errors are dropped; the first error of the job counts.
+The noted items count a data change (see `data_revision`): a map may have read
+them while the job wrote.
 """
 function undo_noted!(s::Session, job::Job, ctx::JobContext)
     kept = NotedUndo[]                  # newest first
+    count_data!(s, reduce(vcat, (u.items for u in ctx.undos); init = String[]))
     for u in reverse(ctx.undos)
         try
             u.undo()

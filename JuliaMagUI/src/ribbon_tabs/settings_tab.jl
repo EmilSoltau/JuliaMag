@@ -26,11 +26,22 @@ function settings_commands()::Vector{Command}
             label = "Software\nRendering", icon = "chip",
             help = "Draw without the graphics card, for laptops with weak graphics drivers. Takes effect at the next start.",
             places = [Core.Place("Settings", "Rendering")], checked = app -> app.config.software_rendering),
+        map_drawing_command("auto", "Auto", "Draw maps with the graphics card when it can, else on the CPU."),
+        map_drawing_command("gpu", "Graphics Card",
+            "Draw maps with the graphics card. If it cannot draw them here, the CPU does."),
+        map_drawing_command("cpu", "CPU", "Draw maps on the CPU, without the graphics card."),
         Command("settings.tabs", "Show Tabs", app -> nothing;
             label = "Show\nTabs", icon = "eye", help = "Hide tabs you do not use. Settings and Help always show.",
-            places = [Core.Place("Settings", "Ribbon")], searchable = false),
+            places = [Core.Place("Settings", "Ribbon")], searchable = false, items = tabs_menu_items),
     ]
 end
+
+# A small toggle of the Rendering group for the Map Drawing setting `value`.
+map_drawing_command(value::String, label::String, help::String)::Command =
+    Command("settings.map_" * value, "Map Drawing: " * label, app -> set_map_drawing!(app, value);
+        label = "Map: " * label, icon = "map", help,
+        places = [Core.Place("Settings", "Rendering"; size = :small)],
+        checked = app -> app.config.map_drawing == value)
 
 # --- The settings ---
 
@@ -60,6 +71,20 @@ function rendering_env(c::AppConfig)::Vector{Pair{String,String}}
     return ["LIBGL_ALWAYS_SOFTWARE" => "1"]
 end
 
+"""
+    set_map_drawing!(app, value)
+
+Draw the maps as `value` says (`"auto"`, `"gpu"` or `"cpu"`, see `choose_mode`) and save the
+settings. It takes effect on the next frame (`sync_mode!`).
+"""
+function set_map_drawing!(app, value::AbstractString)
+    value in MAP_DRAWINGS ||
+        throw(ArgumentError("map drawing must be \"auto\", \"gpu\" or \"cpu\", not $(repr(value))"))
+    app.config.map_drawing = String(value)
+    save_settings!(app)
+    return nothing
+end
+
 "Use distance units `u` (`\"m\"`, `\"km\"` or `\"ft\"`) and save the settings."
 function set_distance_units!(app, u::AbstractString)
     u in DISTANCE_UNITS || throw(ArgumentError("distance units must be \"m\", \"km\" or \"ft\", not $(repr(u))"))
@@ -69,8 +94,8 @@ function set_distance_units!(app, u::AbstractString)
 end
 
 """
-Keep colour table `name` for grids and save the settings. Nothing draws grids yet (the
-grid views come in plan 4), so the toast says only that it is saved.
+Keep colour table `name` for grids and save the settings. A grid whose style still has the
+stock colour table shows in it on the maps (`Core.effective_style`), from the next frame on.
 """
 function set_grid_colours!(app, name::AbstractString)
     k = findfirst(p -> first(p) == name, Core.colour_tables())
@@ -78,7 +103,7 @@ function set_grid_colours!(app, name::AbstractString)
     app.config.grid_colours = String(name)
     save_settings!(app)
     toast!(app, :info, "Saved: $(last(Core.colour_tables()[k])) for grids.";
-        sub = "Grid views use it once JuliaMag has them.")
+        sub = "Maps show grids that use the default colours with it.")
     return nothing
 end
 
@@ -164,19 +189,6 @@ const DEFAULTS_ROW_H = 22
 defaults_width(scale::Real)::Float32 = fpx(scale, 4 + DEFAULTS_LABEL_W + 6 + DEFAULTS_COMBO_W + 4)
 
 """
-    tabs_menu_width(measure, label; scale = 1) -> Float32
-
-The width of the Show Tabs button: a big button whose last label line ends with a caret
-(4 px gap, 8 px caret).
-"""
-function tabs_menu_width(measure, label::AbstractString; scale::Real = 1)::Float32
-    lines = split(label, '\n')
-    widths = [measure(String(l), RIBBON_LABEL_SIZE) for l in lines]
-    widths[end] += fpx(scale, 4 + 8)
-    return max(maximum(widths) + fpx(scale, 14), fpx(scale, 50))
-end
-
-"""
     draw_defaults(app, dl, x, top, frame)
 
 The Defaults item: two rows 22 high, 1 px apart, each with a dim label 84 wide and a
@@ -242,44 +254,6 @@ function small_combo!(app, dl, b::Box, id::String, owner::String, value::Abstrac
     hovered && item_tip!(app, id; help)
     return nothing
 end
-
-"""
-    draw_tabs_menu(app, dl, x, top, iw, frame)
-
-The Show Tabs button: a big button (70 high, the 32 px eye, the label under it) whose
-last label line ends with a caret. A click opens the Show Tabs menu, which stays open
-while tabs are ticked on and off.
-"""
-function draw_tabs_menu(app, dl, x::Real, top::Real, iw::Real, frame)
-    s = app.window.scale
-    t = app.tokens
-    f(v) = fpx(s, v)
-    cmd = frame.model.byid[TABS_MENU_ID]
-    b = Box(Float32(x), Float32(top), Float32(x) + Float32(iw), Float32(top) + f(70))
-    sb = snap(b)
-    owner = TABS_MENU_ID
-    open = menu_open(app, owner)
-    clicked, hovered, held = hit(unique_id!(frame, button_name(cmd)), sb)
-    open && keep_menu!(app, owner, sb; items = tabs_menu_items(app))
-    draw_rb_fill(app, dl, sb; enabled = true, hovered, held, on = open)
-    draw_icon(dl, cmd.icon, (rnd(b.x0 + (width(b) - px(s, 32)) / 2), rnd(b.y0 + f(5))), 32)
-    pitch = f(13.5)
-    lines = String.(split(cmd.label, '\n'))
-    for (k, line) in enumerate(lines)
-        last_line = k == length(lines)
-        lw = text_width(FONT_REGULAR, RIBBON_LABEL_SIZE, line)
-        full = last_line ? lw + f(4 + 8) : lw
-        lx = b.x0 + (width(b) - full) / 2
-        mid = b.y0 + f(42) + (k - 1) * pitch + pitch / 2
-        draw_text_mid(dl, FONT_REGULAR, RIBBON_LABEL_SIZE, lx, mid, u32(t.text), line; line = 13.5 / 11.5)
-        last_line && draw_caret(dl, lx + lw + f(4), mid - f(5) / 2, s, u32(t.text))
-    end
-    clicked && toggle_menu!(app, owner, sb, () -> tabs_menu_items(app))
-    hovered && command_tip!(app, cmd)
-    return nothing
-end
-
-const TABS_MENU_ID = "settings.tabs"
 
 # --- Getting Started ---
 
