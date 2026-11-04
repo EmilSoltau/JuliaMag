@@ -229,6 +229,27 @@ step_excess(p, k) = abs((Int(p[k+1]) - Int(p[k])) - ((Int(p[k]) - Int(p[k-1])) +
         @test count(!=(UInt32(0xff000000)), img) == 3 && all(img[3, :] .!= UInt32(0xff000000))
     end
 
+    @testset "coordinates far past the Int range draw what is in view and throw nothing" begin
+        cam = Camera(2.0, 1.5, 1.0)
+        far = 1e30   # a dummy value left in the data, such as Geosoft's -1e32
+        d = build_line_layer!(LineLayerData(), line_points([
+            [(0.0, 1.5, 1.0), (far, 1.5, 1.0), (2far, 1.5, 1.0)],   # out of the view, then wholly far off
+            [(far, far, 1.0), (2far, 3far, 1.0)],                   # wholly far off, right and up
+            [(-far, -far, 1.0), (-2far, 0.5, 1.0)],                 # wholly far off, left
+            [(2.5, -far, 1.0), (2.5, far, 1.0)]]))                  # across the view, top to bottom
+        render_cpu!(img, Scene(cam, 4, 3, black, [line_draw(d)], 0))
+        lit = sort([(x, y) for y in 1:3, x in 1:4 if img[x, y] != UInt32(0xff000000)])
+        @test lit == sort(union([(x, 2) for x in 1:4], [(3, y) for y in 1:3]))
+        # The segment code alone, with both ends far outside the Int64 range.
+        l = line_draw(d)
+        for (ax, ay, bx, by) in ((1e20, 1.0, 2e20, 1.0), (-1e300, 1.0, -1e299, 2.0), (1.0, 1e19, 2.0, 1e30),
+                                 (1.0, -1e30, 2.0, -1e25))
+            fill!(img, UInt32(0xff000000))
+            UI.draw_segment!(img, 4, 3, l, ax, ay, bx, by, 1f0, 1f0, true)
+            @test all(==(UInt32(0xff000000)), img)
+        end
+    end
+
     @testset "a value interpolates along a segment" begin
         d = build_line_layer!(LineLayerData(), line_points([[(0.0, 0.0, 0.0), (255.0, 0.0, 1.0)]]))
         cam = Camera(128.0, 0.0, 1.0)

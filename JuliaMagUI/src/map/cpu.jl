@@ -214,6 +214,8 @@ end
 # One segment in screen coordinates (pixel `p` covers `p - 1` to `p`, its centre is `p - 0.5`).
 # The pixels whose centres lie on the segment along the longer axis; the value is interpolated.
 # The end is left to the next segment, unless this one `closes` its part, so a joint draws once.
+# The pixel range is clamped to the view in Float64 first, so an end far past the Int range
+# (a far zoom, a dummy value in the data) draws what is in view and throws nothing.
 function draw_segment!(img::Matrix{UInt32}, w::Int, h::Int, l::LineDraw, ax::Float64, ay::Float64,
                        bx::Float64, by::Float64, va::Float32, vb::Float32, closes::Bool)
     dx, dy = bx - ax, by - ay
@@ -222,6 +224,7 @@ function draw_segment!(img::Matrix{UInt32}, w::Int, h::Int, l::LineDraw, ax::Flo
         lo, hi = minmax(ax, bx)
         p1 = max(ceil(lo + 0.5), 1.0)
         p2 = min(floor(hi + 0.5), Float64(w))
+        p1 <= p2 || return nothing
         for pm in Int(p1):Int(p2)
             t = (pm - 0.5 - ax) / dx
             (t >= 1 && !closes) && continue
@@ -233,6 +236,7 @@ function draw_segment!(img::Matrix{UInt32}, w::Int, h::Int, l::LineDraw, ax::Flo
         lo, hi = minmax(ay, by)
         p1 = max(ceil(lo + 0.5), 1.0)
         p2 = min(floor(hi + 0.5), Float64(h))
+        p1 <= p2 || return nothing
         for pm in Int(p1):Int(p2)
             t = (pm - 0.5 - ay) / dy
             (t >= 1 && !closes) && continue
