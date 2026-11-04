@@ -104,6 +104,8 @@ ImGui was given. Only the render thread uses it.
 
 - `pending`: the uploads still to do, in order; `uploaded_last_frame`: bytes of the last `upload_step!`.
 - `last_gpu_s`: the GPU time of a draw, from a `GL_TIME_ELAPSED` query read two draws later.
+- `error_changes`: counts the changes of the layers' errors (one failed, or one with an
+  error went), so what shows them can be kept until it changes (the Layers tab).
 - `throw_in_draw`, `fail_upload`: test hooks. The first makes the next `gl_draw!` throw; the
   second (a GL error code) is reported by the next upload as if GL had given it.
 """
@@ -128,6 +130,7 @@ mutable struct GlMap
     pending::Vector{Upload}
     uploaded_last_frame::Int
     last_gpu_s::Float64
+    error_changes::Int
     firsts::Vector{Int32}     # draw list of a line level
     counts::Vector{Int32}
     batch_firsts::Vector{Int32}   # the same, split by batch
@@ -139,7 +142,7 @@ mutable struct GlMap
 end
 
 GlMap() = GlMap(false, "", 0, 0, MapUniforms(), MapUniforms(), 0, 0, 0, 0, 0, UInt32[0, 0], [false, false], 1,
-                GL.GLint[0], GL.GLuint64[0], GlLayer[], Upload[], 0, 0.0, Int32[], Int32[], Int32[], Int32[],
+                GL.GLint[0], GL.GLuint64[0], GlLayer[], Upload[], 0, 0.0, 0, Int32[], Int32[], Int32[], Int32[],
                 zeros(Float32, 8), Float32[], false, 0)
 
 # --- GL helpers ---
@@ -393,6 +396,7 @@ function take_drawn!(r::GlMap, key)::Union{Nothing,GlLayer}
     old = gl_layer(r, key)
     old === nothing && return nothing
     filter!(x -> x !== old, r.layers)
+    isempty(old.error) || (r.error_changes += 1)
     if isempty(old.error) && old.remaining == 0
         free_previous!(r, old)
         return old
@@ -525,6 +529,7 @@ function fail_layer!(r::GlMap, g::GlLayer)
     free_previous!(r, g)
     free_layer_objects!(r, g)
     g.error = GL_ROOM_TEXT
+    r.error_changes += 1
     return nothing
 end
 
@@ -539,6 +544,7 @@ function free_layer!(r::GlMap, key)
     free_previous!(r, g)
     free_layer_objects!(r, g)
     filter!(x -> x !== g, r.layers)
+    isempty(g.error) || (r.error_changes += 1)
     return nothing
 end
 
@@ -552,6 +558,7 @@ function free_all!(r::GlMap)
     for g in r.layers
         free_previous!(r, g)
         free_layer_objects!(r, g)
+        isempty(g.error) || (r.error_changes += 1)
     end
     empty!(r.layers)
     empty!(r.pending)

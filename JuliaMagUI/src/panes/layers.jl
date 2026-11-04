@@ -42,7 +42,8 @@ One row of the Layers tab: a layer of the shown map, as the tab draws it.
 - `opacity_text`: such as "50 %" while the opacity is below 100 %, else `""`.
 - `visible`; `missing`: the item is not in the project, or its folder is gone.
 - `error`: why the layer cannot draw, or a note on data that draws (such as a grid drawn
-  without reprojection); `""` for none. For a missing item, why it is missing.
+  without reprojection); `""` for none. For a missing item, why it is missing; for data the
+  graphics card could not take, its upload error.
 - `loading`: a visible layer whose data is not in yet.
 """
 struct LayerRow
@@ -66,15 +67,17 @@ const STRETCH_TEXT = Dict(:histeq => "hist. eq.", :linear => "linear", :clip => 
 opacity_text(o::Real)::String = o < 1 ? string(clamp(round(Int, 100 * o), 0, 99), " %") : ""
 
 """
-    layer_status(snap, mv, layer, entries; index = nothing) -> NamedTuple
+    layer_status(snap, mv, layer, entries; index = nothing, gl = nothing) -> NamedTuple
 
 What the Layers tab shows of a layer's data: its `name`, whether its item is `missing`, its
 `error` (see `LayerRow`), whether it is `loading`, and whether it `failed`: the item is
-missing, or its last load gave an error and no data. Reads the snapshot and the loader's
-entries only. `index` maps item ids to their place in `snap.items`, to find many layers' items
-without a search each (see `item_index`).
+missing, its last load gave an error and no data, or the GL map `gl` could not upload it
+(`layer_error`). Reads the snapshot, the loader's entries and the GL layers only. `index` maps
+item ids to their place in `snap.items`, to find many layers' items without a search each
+(see `item_index`).
 """
-function layer_status(snap, mv, l::Core.MapLayer, entries; index::Union{Nothing,Dict{String,Int}} = nothing)
+function layer_status(snap, mv, l::Core.MapLayer, entries; index::Union{Nothing,Dict{String,Int}} = nothing,
+                      gl::Union{Nothing,GlMap} = nothing)
     k = index === nothing ? findfirst(it -> it.id == l.item, snap.items) : get(index, l.item, nothing)
     k === nothing && return (; name = LAYER_GONE_NAME, missing = true, error = LAYER_ITEM_GONE, loading = false, failed = true)
     it = snap.items[k]
@@ -82,26 +85,33 @@ function layer_status(snap, mv, l::Core.MapLayer, entries; index::Union{Nothing,
     e = get(entries, layer_key(snap, mv, l), nothing)
     loading = l.visible && (e === nothing || e.loading || (e.data === nothing && isempty(e.error)))
     failed = e !== nothing && !e.loading && e.data === nothing && !isempty(e.error)
-    return (; name = it.name, missing = false, error = e === nothing ? "" : e.error, loading, failed)
+    error = e === nothing ? "" : e.error
+    if e !== nothing && isempty(error) && gl !== nothing
+        error = layer_error(gl, e.key)
+        failed |= !isempty(error)
+    end
+    return (; name = it.name, missing = false, error, loading, failed)
 end
 
 "The place of each item of the snapshot in `snap.items`, by id."
 item_index(snap)::Dict{String,Int} = Dict{String,Int}(it.id => k for (k, it) in enumerate(snap.items))
 
 """
-    layer_rows(snap, map_id, entries, app_colours) -> Vector{LayerRow}
+    layer_rows(snap, map_id, entries, app_colours; gl = nothing) -> Vector{LayerRow}
 
 The rows of map `map_id`, top layer first; none for a map the snapshot does not have.
 A grid layer without its own style shows its grid's colours, with `app_colours` (the app's
 "Grid colours" setting) for a grid that keeps the stock table (`Core.effective_style`).
+An upload error of the GL map `gl` is the row's error (`layer_status`).
 """
-function layer_rows(snap, map_id::AbstractString, entries, app_colours::AbstractString)::Vector{LayerRow}
+function layer_rows(snap, map_id::AbstractString, entries, app_colours::AbstractString;
+                    gl::Union{Nothing,GlMap} = nothing)::Vector{LayerRow}
     mv = get(snap.maps, map_id, nothing)
     mv === nothing && return LayerRow[]
     index = item_index(snap)
     rows = LayerRow[]
     for l in Iterators.reverse(mv.layers)
-        st = layer_status(snap, mv, l, entries; index)
+        st = layer_status(snap, mv, l, entries; index, gl)
         if l.kind == :lines
             plain = isempty(l.channel)
             sub = plain ? "One colour" : l.channel
@@ -121,7 +131,8 @@ end
 
 """
 The Layers tab's rows of one map and what is built with them, kept while its key holds: the
-snapshot, the map, the app's grid colours and the loader's `version`.
+snapshot, the map, the app's grid colours, the loader's `version`, and the GL map with its
+`error_changes`.
 
 - `rows`: `layer_rows`, top first; `failed` and `extent`: for each row, whether its layer
   failed (`layer_status`) and whether its data has an extent. The map commands read them.
@@ -133,6 +144,8 @@ mutable struct LayersCache
     map::String
     colours::String
     version::Int
+    gl::Union{Nothing,GlMap}
+    gl_errors::Int
     rows::Vector{LayerRow}
     failed::Vector{Bool}
     extent::Vector{Bool}
@@ -146,26 +159,30 @@ end
     layers_cache(app, mv) -> LayersCache
 
 The rows of map view `mv` (`layer_rows`) and their states, built again only when the
-snapshot, the map, the app's grid colours or a layer load changed (`MapState.version`).
+snapshot, the map, the app's grid colours, a layer load (`MapState.version`) or a GL upload
+error (`GlMap.error_changes`) changed.
 """
 function layers_cache(app, mv)::LayersCache
     ms = app.map
     snap = app.snap
     colours = app.config.grid_colours
+    gl = ms.renderer.gl
+    gl_errors = gl === nothing ? 0 : gl.error_changes
     c = app.ui.layers_cache
     if c isa LayersCache
-        c.snap === snap && c.map == mv.id && c.version == ms.version && c.colours == colours && return c
+        (c.snap === snap && c.map == mv.id && c.version == ms.version && c.colours == colours &&
+         c.gl === gl && c.gl_errors == gl_errors) && return c
     else
-        c = LayersCache(nothing, "", "", -1, LayerRow[], Bool[], Bool[], Float32[], Float32[], -1f0, String[])
+        c = LayersCache(nothing, "", "", -1, nothing, 0, LayerRow[], Bool[], Bool[], Float32[], Float32[], -1f0, String[])
         app.ui.layers_cache = c
     end
-    c.snap, c.map, c.colours, c.version = snap, mv.id, colours, ms.version
-    c.rows = layer_rows(snap, mv.id, ms.entries, colours)
+    c.snap, c.map, c.colours, c.version, c.gl, c.gl_errors = snap, mv.id, colours, ms.version, gl, gl_errors
+    c.rows = layer_rows(snap, mv.id, ms.entries, colours; gl)
     index = item_index(snap)
     empty!(c.failed)
     empty!(c.extent)
     for l in Iterators.reverse(mv.layers)
-        push!(c.failed, layer_status(snap, mv, l, ms.entries; index).failed)
+        push!(c.failed, layer_status(snap, mv, l, ms.entries; index, gl).failed)
         push!(c.extent, layer_extent(get(ms.entries, layer_key(snap, mv, l), nothing)) !== nothing)
     end
     return c

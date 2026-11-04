@@ -278,6 +278,38 @@ window_testset("layers tab") do
             ctx.key("Escape")
             @test isempty(app.draw_errors)
         end
+
+        @testset "a layer the graphics card has no room for shows the error in its row" begin
+            ctx.on_render(w -> (UI.open_map!(app, ids.m); app.ui.layer_selected = ids.lg))
+            ctx.wait_until(() -> !isempty(app.map.plan) && all(p -> p.entry !== nothing && p.entry.data !== nothing, app.map.plan))
+            gl = app.map.renderer.gl
+            e = only(p.entry for p in app.map.plan if p.layer.id == ids.lg)
+            ctx.wait_until(() -> isempty(gl.pending))
+            @test UI.zoom_layer_reason(app) === nothing
+            # The grid goes up again, and its first upload meets GL_OUT_OF_MEMORY.
+            ctx.on_render(w -> (gl.fail_upload = UI.GL.GL_OUT_OF_MEMORY; UI.queue_uploads!(gl, e.key, e.data)))
+            ctx.wait_until(() -> UI.layer_error(gl, e.key) == UI.GL_ROOM_TEXT)
+            ctx.frames(2)
+            @test e.error == ""   # the data is fine; the GPU is not
+            row = only(r for r in UI.layers_cache(app, app.snap.maps[ids.m]).rows if r.id == ids.lg)
+            @test row.error == UI.GL_ROOM_TEXT
+            te.MouseMove(layers_ref(ids.lg, "warning"))
+            ctx.wait_until(() -> app.ui.tip isa UI.Tip; timeout = 3)
+            @test app.ui.tip.title == UI.GL_ROOM_TEXT
+            ctx.frames(2)
+            ctx.shot(joinpath(LAYERS_SHOTS, "layers-gpu-error-light.png"))
+            te.MouseMoveToPos((700f0, 600f0))
+            # Zoom to Layer says why, as for a layer whose load failed.
+            @test UI.zoom_layer_reason(app) == UI.GL_ROOM_TEXT
+            # Up again with room: the row's warning goes.
+            ctx.on_render(w -> UI.queue_uploads!(gl, e.key, e.data))
+            ctx.wait_until(() -> isempty(gl.pending))
+            ctx.frames(2)
+            row = only(r for r in UI.layers_cache(app, app.snap.maps[ids.m]).rows if r.id == ids.lg)
+            @test row.error == "" && !te.ItemExists(layers_ref(ids.lg, "warning"))
+            @test UI.zoom_layer_reason(app) === nothing
+            @test isempty(app.draw_errors)
+        end
     end
 
     # The Layers tab in both themes, at scale 1 and 1.5, for the pixel review against the
