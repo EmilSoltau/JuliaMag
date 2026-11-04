@@ -315,7 +315,8 @@ The reader follows the research note, and it is tested against public files and 
 - Deleted channel slots in the file are skipped.
 - Imported channels start protected, as with every import.
 - Integer types that JuliaMag lacks are widened to the smallest JuliaMag type that holds every value.
-  When no type does, the channel becomes Float64 with a warning.
+  When no type does, the channel becomes Float64.
+  A warning names the channel when any of its values cannot be stored exactly as Float64.
 - Geosoft dummies become JuliaMag missing values.
   A real value that equals JuliaMag's missing marker gives a warning.
 
@@ -686,6 +687,10 @@ Also, following from the above:
   Plan 4b is the database view, the profile view and the statistics pane.
   Plan 4c is the CSV import wizard and the coordinate system picker.
 - The user decided JuliaMag imports Oasis `.gdb` databases, read only (2026-11-04).
+- A `.gdb` channel widened to Float64 warns only when a value is actually rounded, not for every 64-bit channel (2026-11-04).
+  The rule before said every such channel warns.
+- Import warnings about an item as a whole (file line 0) show on the job card through `job_warning!`, for every importer (2026-11-04).
+  Warnings about one row of a text file stay in the report text.
 
 ### 13.3 Claude's calls (the user handed library choices over)
 

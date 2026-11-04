@@ -94,7 +94,7 @@ The widening table of ruling 7 is in Task 5.
    The choice depends on the type, not on the data.
    ULONG becomes Float64, which is exact, so there is no warning.
    64-bit integers become Float64.
-   A warning names the channel when any of its values is above 2^53 and so lost precision.
+   A warning names the channel when any of its values cannot be stored exactly as Float64 (spec 6.3a, updated 2026-11-04).
    Geosoft dummies become JuliaMag missing values.
    A real value equal to JuliaMag's missing marker gives a warning.
 8. Coordinate system: name to EPSG lookup; unknown or custom gives an empty CRS and a warning, and the user sets it (spec 6.6).
@@ -176,6 +176,7 @@ JuliaMag/
       io/gdb_lines.jl                 # line ids, dates, channel plans, roles, position pairs
       io/gdb_sampling.jl              # main sampling of a line, resampling
       io/gdb_import.jl                # import_gdb, settings, registration
+      jobs/jobs.jl                    # import_work sends item warnings to job_warning! (Task 8a)
     test/
       support/gdb_writer.jl           # write_test_gdb, lzrw1_compress (tests and bench only)
       support/gdb_xyz.jl              # compare_gdb_xyz: a database against an Oasis XYZ export
@@ -291,7 +292,7 @@ Research sections 4, 5.1, 5.2, 5.3, 6.1.
   - `blob_offset(g, index)::Union{Nothing,Int}`: the byte offset of blob `index` (0-based), as the directory gives it:
     - slot not live: `nothing` (no data);
     - live, and the bytes at `(blob_start_page + page) * page_size` start with `cc cc 00 ff`, with the int32 at +4 equal to `pages` and the int32 at +12 equal to `index`: that offset;
-    - live but not landing on such a blob: throws `GdbError("the directory entry of blob <index> does not point at its data")`.
+    - live but not landing on such a blob, or with pages that run past the end of the file: throws `GdbError("the directory entry of blob <index> does not point at its data")`. Check the range before reading, so a bad page never gives an `EOFError`.
       The reader does not search the chain for another copy, because the last copy can be stale (research section 4, AirMag `__552`).
   - `struct GdbChannelRecord; slot::Int; name::String; type::Int; flags::Int; format::Int; width::Int; decimals::Int; arraylen::Int; end`
   - `read_gdb_channels(g)::Vector{GdbChannelRecord}`: the live records in slot order. Record offsets per research 5.1 (name at +0, 64 bytes NUL-terminated; type int16 at +76; flags int16 at +78; format int16 at +84; width int16 at +86; decimals int32 at +88; array width int16 at +110). A record is live only when the name is non-empty and every character is printable, bit 0 of the flags is clear, the type is in `0:9` or below 0, and `arraylen >= 1`.
@@ -440,7 +441,7 @@ Research section 7.
 | 9 | ULONG64 | 8 | Float64 | 2^64 - 1 | widened, lossy |
 | < 0 | string | `-code` | String | empty | |
 
-  - `mutable struct GdbValueNotes; clashes::Int; inexact::Int; cp1252::Int; end`: `clashes` counts real values equal to JuliaMag's missing marker (Int8 -128, Int16 -32768, Int32 `typemin`); they stay as stored and so read as missing. `inexact` counts 64-bit values whose absolute value is above 2^53. `cp1252` counts string values decoded with the Windows-1252 fallback.
+  - `mutable struct GdbValueNotes; clashes::Int; inexact::Int; cp1252::Int; end`: `clashes` counts real values equal to JuliaMag's missing marker (Int8 -128, Int16 -32768, Int32 `typemin`); they stay as stored and so read as missing. `inexact` counts 64-bit values that Float64 cannot store exactly: for LONG64, `Float64(v)` converted back to `Int64` is not `v`; for ULONG64 the same with `UInt64`. Compare in `Int128`, so values at the edge of the range (`2^63 - 1` rounds up to `2^63`) do not throw. `cp1252` counts string values decoded with the Windows-1252 fallback.
   - `gdb_values!(out::Vector{T}, bytes::Vector{UInt8}, t::GdbType, notes::GdbValueNotes)::Vector{T}`: decodes and maps dummies to `missing_value(T)`. Put the inner loop for numeric types in a separate function with concrete argument types (a function barrier).
   - For strings, `out::Vector{String}` and each value is `gdb_text` of its fixed-width, NUL-padded bytes; each value that used the fallback adds 1 to `notes.cp1252`.
 
@@ -455,7 +456,7 @@ n = GdbValueNotes(0, 0, 0)
 @test gdb_values!(String[], Vector{UInt8}("2007/10/04\0ab\0\0\0\0\0\0\0\0\0"), gdb_type(-11), n) == ["2007/10/04", "ab"]
 ```
 
-Also: every row of the table above, with its dummy and one real value; `ULONG 4294967294` stays exact; `LONG64 2^60 + 1` counts as inexact and `LONG64 5` does not; UBYTE 255 is missing with no clash; code 10 throws; a string with byte `0x80` reads as `€` and adds 1 to `cp1252`, and an ASCII string adds nothing.
+Also: every row of the table above, with its dummy and one real value; `ULONG 4294967294` stays exact; `LONG64 2^60 + 1` counts as inexact, while `LONG64 2^60` and `LONG64 5` do not; `LONG64 2^63 - 1` counts as inexact and does not throw; `ULONG64 2^64 - 2` counts as inexact; UBYTE 255 is missing with no clash; code 10 throws; a string with byte `0x80` reads as `€` and adds 1 to `cp1252`, and an ASCII string adds nothing.
 
 - [ ] **Step 2: Run to see it fail.**
 - [ ] **Step 3: Implement.** `bytes_of` is a test helper that `reinterpret`s to `UInt8`.
@@ -480,8 +481,8 @@ Research sections 5.3, 9 and 10.
   - `struct GdbIpj; name::String; method::Int; datum::String; units::String; end`; `gdb_ipj(bytes)::GdbIpj` reads name at +104 (64 bytes), method int32 at +168, datum at +180, units at +452.
   - `struct GdbMeta; dbreg::Dict{String,String}; channel_reg::Dict{Int,Dict{String,String}}; ipj::Vector{Tuple{String,String,GdbIpj}}; end` (channel registries by channel slot; `ipj` entries are `(x name, y name, ipj)`, in symbol order).
     An IPJ symbol is named exactly `?|IPJ_<X>:<Y>`: `?|IPJ_` is literal text, and X and Y are split at the `:`. A name with no `:` or more than one is skipped with a warning naming the symbol. afgrav has three: `?|IPJ_xTM:yTM`, `?|IPJ_lon:lat`, `?|IPJ_xlam:ylam`.
-  - `read_gdb_meta(g, symbols)::Tuple{GdbMeta,Vector{String}}`: reads `__dbreg`, `__<n>` with `chan_handle0 <= n < user_handle0` (channel slot `n - chan_handle0`), and every IPJ object. A missing or damaged admin object is a warning (`"the <name> object of the file is damaged; it was skipped"`), never a failed import: it holds metadata, not data. Line registries and other objects are not read.
-  - `gdb_crs(ipj::GdbIpj, x::String, y::String)::Tuple{String,Union{Nothing,String}}`: `("EPSG:n", nothing)` when `crs_from_name(ipj.name)` finds one; else `("", warning)`. A name starting with `*` gives `"the coordinate system <name> is a Geosoft custom system with no EPSG code. Set the coordinate system of <x>, <y> in the database."`; another unknown name gives `"JuliaMag does not know the coordinate system <name>. ..."` with the same last sentence. `x` and `y` are the JuliaMag channel names of the pair.
+  - `read_gdb_meta(g, symbols)::Tuple{GdbMeta,Vector{String}}`: reads `__dbreg`, `__<n>` with `chan_handle0 <= n < user_handle0` (channel slot `n - chan_handle0`), and every IPJ object. A missing or damaged admin object is a warning (`"the <name> object of the file is damaged; it was skipped"`), never a failed import: it holds metadata, not data. This includes a live admin directory slot that misses its blob: `read_gdb_meta` catches the `GdbError` from `blob_offset` and from the object readers, and turns it into this warning. Line registries and other objects are not read.
+  - `gdb_crs(ipj::GdbIpj, x::String, y::String)::Tuple{String,Union{Nothing,String}}`: `("EPSG:n", nothing)` when `crs_from_name(ipj.name)` finds one; else `("", warning)`. A name whose projection part starts with `*` (the whole name, or the part after `/ `, as in `WGS 84 / *tm_afghan`; `occursin(r"(^|/ )\*", name)`) gives `"the coordinate system <name> is a Geosoft custom system with no EPSG code. Set the coordinate system of <x>, <y> in the database."`; another unknown name gives `"JuliaMag does not know the coordinate system <name>. ..."` with the same last sentence. `x` and `y` are the JuliaMag channel names of the pair.
   - Text read here goes through `gdb_text`, and sets `g.cp1252` like Task 2.
 
 - [ ] **Step 1: Write the failing tests**
@@ -492,20 +493,26 @@ with_gdb(testdata("gdb/afgrav.gdb")) do g
     @test isempty(warns)
     @test meta.dbreg["DB_CHAN_X"] == "xTM" && meta.dbreg["DB_CHAN_Y"] == "yTM"
     @test Set((x, y) for (x, y, _) in meta.ipj) == Set([("xTM", "yTM"), ("lon", "lat"), ("xlam", "ylam")])
-    @test any(startswith(i[3].name, "WGS 84 / *TM") for i in meta.ipj)    # research 10: custom TM
+    @test only(i[3].name for i in meta.ipj if i[1] == "xTM") == "WGS 84 / *tm_afghan"    # custom TM
 end
 @test gdb_crs(GdbIpj("NAD27 / UTM zone 7N", 11, "NAD27", "m"), "x", "y")[1] == "EPSG:26707"
 @test gdb_crs(GdbIpj("NAD83 / UTM zone 10N", 11, "NAD83", "m"), "x", "y")[1] == "EPSG:26910"
 @test gdb_crs(GdbIpj("WGS 84", 1, "WGS 84", "dega"), "lon", "lat")[1] == "EPSG:4326"
-c, w = gdb_crs(GdbIpj("WGS 84 / *TM_afghan_adf", 11, "WGS 84", "m"), "xTM", "yTM")
+c, w = gdb_crs(GdbIpj("WGS 84 / *tm_afghan", 11, "WGS 84", "m"), "xTM", "yTM")
 @test c == "" && occursin("custom", w) && occursin("xTM, yTM", w)
+c, w = gdb_crs(GdbIpj("*local_grid", 11, "WGS 84", "m"), "x", "y")
+@test c == "" && occursin("custom", w)
+c, w = gdb_crs(GdbIpj("Made up / system", 11, "WGS 84", "m"), "x", "y")
+@test c == "" && occursin("does not know", w)
 ```
 
 The afgrav values above come from a byte scan of the file made while reviewing this plan, not from the reader under test.
 The file holds four copies of the registry; three say `xTM`, `yTM` and one older one says `lat` for Y.
 The directory decides which copy is live. If the reader returns another value, check the live copy by hand before changing the test.
-The three IPJ objects are a geographic system (`lon:lat`), a Lambert 2SP system (`xlam:ylam`) and the custom TM system (`xTM:yTM`), as research section 10 says.
-Also, on synthetic files: a registry with `LABEL` and `UNITS` for channel slot 1 reads back by slot; a registry whose frame is broken gives one warning and an empty registry; an IPJ symbol whose channels are not live is still returned here (Task 7 drops it); a registry with `n = -1` gives a warning.
+The three IPJ objects are a geographic system (`lon:lat`), a custom Lambert system (`xlam:ylam`, `WGS 84 / *lcc_afghan`) and the custom TM system (`xTM:yTM`, `WGS 84 / *tm_afghan`).
+The channels `lon`, `lat`, `xlam` and `ylam` are deleted in afgrav (slots 24 to 27, flag bit 0 set), so two of the three IPJ objects are stale; Task 7 drops them.
+Research section 10 names afgrav's custom system `*TM_afghan_adf`; the file says `*tm_afghan` (Task 11 corrects the research file).
+Also, on synthetic files: a registry with `LABEL` and `UNITS` for channel slot 1 reads back by slot; a registry whose frame is broken gives one warning and an empty registry; an IPJ symbol whose channels are not live is still returned here (Task 7 drops it); a registry with `n = -1` gives a warning; a `misdirect` slot on the `__dbreg` admin blob gives the "damaged" warning and an empty `dbreg`, not an error.
 
 - [ ] **Step 2: Run to see it fail.**
 - [ ] **Step 3: Implement.**
@@ -536,8 +543,9 @@ Research section 12, rulings 5, 6 and 8.
   - `struct GdbChannelPlan; slot::Int; name::String; label::String; units::String; gtype::GdbType; arraylen::Int; format::Symbol; width::Int; decimals::Int; role::ChannelRole; end`
   - `plan_gdb_channels(records, meta, crs::String, log)::Tuple{Vector{GdbChannelPlan},Vector{PositionPair},Int}`: the plans in slot order, the position pairs and the index of the current pair (0 when none):
     - names through `channel_name(raw, k, taken)` with `taken` starting empty, in slot order (safe and unique); `label` = registry `LABEL`, else the name in the file; `units` = registry `UNITS`, else `""`;
-    - format: 0 `:normal`, 1 `:exponential`, 2 `:time`, 3 `:date`, other `:normal`;
-    - width and decimals from the record, when JuliaMag accepts them (`width >= 1`, `decimals >= -1`, the rule of `set_channel_info!`); else JuliaMag's import defaults, width 10 and decimals -1, with no warning, because these only change how values are shown;
+    - format: 0 `:normal`, 1 `:exponential`, 2 `:time`, 3 `:date`; any other format (4 `GEOGR`, 5 `SIGDIG`, 6 `HEX`, or unknown) becomes `:normal`;
+    - width and decimals from the record, when JuliaMag accepts them (`width >= 1`, `decimals >= -1`, the rule of `set_channel_info!`); else JuliaMag's import defaults, width 10 and decimals -1;
+    - one warning per file names the channels whose display format, width or decimals changed: `"channels <c>, <d>: their Oasis display settings have no JuliaMag equal; they are shown as normal numbers"`. Spec 6.3a says every changed item gives a warning. One line per file keeps it short, since only the display changes;
     - a string channel with `arraylen > 1`: skipped, `"channel <c> is an array of text values; JuliaMag cannot store it, so it was skipped"`;
     - pairs, in this order:
       1. The current pair: `DB_CHAN_X`, `DB_CHAN_Y` of `__dbreg` when both are live channels.
@@ -571,9 +579,10 @@ Also:
 - no `__dbreg`, channels `x`, `y` (AirMag): current pair `x, y` with `""` and the "stores no coordinate system" warning; with `crs = "EPSG:32755"` the pair takes it and there is no warning;
 - a custom `*TM` IPJ on the current pair: `""` and the custom warning;
 - a string array channel is skipped with its warning;
-- a record with width 0 and decimals -5 gives width 10 and decimals -1, with no warning;
+- a record with width 0 and decimals -5 gives width 10 and decimals -1; a channel with format 4 (`GEOGR`, as MtMill's `Longitude`) gives `:normal`; both are named in the one display warning;
 - channels `Longitude`, `Latitude` with no IPJ and no `__dbreg`, next to `x`, `y`: the pairs are `x, y` (current, empty CRS) and `Longitude, Latitude` with `EPSG:4326`;
-- afgrav: the current pair is `xTM, yTM` with `""` and the custom warning; then `lon, lat` with roles LON and LAT and the CRS of its IPJ (expected `EPSG:4326`: the file's own history text names `WGS 84`; confirm on the first run); then `xlam, ylam`, with no roles, because it is the second projected pair.
+- afgrav: exactly two pairs. The current pair is `xTM, yTM`, with `""`, roles X and Y and the custom warning. The second is `longitude, latitude` from step 3, with `EPSG:4326`, roles LON and LAT and no warning. The IPJ objects for `lon:lat` and `xlam:ylam` give no pair, because those channels are deleted;
+- an IPJ pair `xlam, ylam` with live channels, next to a current projected pair: a second projected pair with no roles.
 
 - [ ] **Step 2: Run to see it fail.**
 - [ ] **Step 3: Implement.**
@@ -624,6 +633,28 @@ Also: `Int32` values `[0, 3]` from step 2 onto step 1 give `[0, 2, 3]`, and `[0,
 
 ---
 
+### Task 8a: Import warnings on the job card
+
+Approved by the project owner on 2026-11-04.
+Today no importer calls `job_warning!`: `import_work` in `jobs/jobs.jl` only prints import warnings into the report text, so the job card never shows them.
+This applies to every importer, not only `.gdb`.
+
+**Files:**
+- Modify: `JuliaMagCore/src/jobs/jobs.jl` (`import_work`), `JuliaMagCore/test/test_jobs.jl` (or the XYZ import tests), and any existing test that expects `job_warnings(job)` to be empty after an import with item warnings.
+
+**Interfaces:**
+- Consumes: `ImportResult.warnings`, `job_warning!`.
+- Produces: in `import_work`, a warning with `file_line == 0` is about the item as a whole (a coordinate system, a skipped line or channel, a resampled channel). It goes through `job_warning!`, which adds it to `job_warnings(job)` and writes one "Warning:" line to the report. It is not printed a second time.
+  A warning with `file_line > 0` is about one row of a text file. It stays in the report text only, as today, so a file with many bad rows does not flood the job card.
+
+- [ ] **Step 1: Write the failing tests.** An XYZ import whose file gives one item warning (for example a position pair with no coordinate system) and two bad rows: `job_warnings(job)` holds exactly the item warning; the report text holds it once, and holds the two row warnings with their line numbers.
+- [ ] **Step 2: Run to see it fail.**
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run to see it pass.** Run the core and UI suites. Update any test that expected no job warnings after such an import.
+- [ ] **Step 5: Commit** `git commit -m "Show item warnings of an import on its job card"`
+
+---
+
 ### Task 9: The importer
 
 Spec 6.2, 6.3a, 6.5; research section 12 (last paragraph).
@@ -644,12 +675,13 @@ Spec 6.2, 6.3a, 6.5; research section 12 (last paragraph).
   - `import_gdb(s, path; name = <file name without extension>, crs = "", mode = :new, target = "", progress = NO_PROGRESS, record = true)::ImportResult`, recorded as `"import.geosoft_gdb"` with the same arguments as `import_xyz`.
     1. `gdb_refusal(path)` first (before `check_import_args`, which wants a file): a refusal throws `GdbError` with its text.
     2. Open the file and read the header, tables and metadata before `import_lines`, so a refused file makes no temp folder.
-    3. Inside `import_lines(...) do db`, for each channel plan:
+    3. Inside `import_lines(...) do db`, first make the plans: `plan_gdb_lines` (it needs `db`, which in append mode is the target) and `plan_gdb_channels`, both writing into one `WarningLog`. Add the warnings from `read_gdb_meta` to the same log, with file line 0. That log becomes the `warnings` of the result. Then, for each channel plan:
        - note whether the channel is new (`channel_position_ci(db, name) == 0`);
        - call `import_channel!(db, name, label, T, units, role, arraylen, "Geosoft database")`. `T` is the JuliaMag type of its `GdbType`. The last argument is the source name that `import_channel!` puts in its error text. It already sets the label and units of a new channel;
        - keep the name it returns. In append mode this is the existing channel's name, which can differ in case;
        - for a new channel, set format, width and decimals from the plan. An existing channel keeps its own properties.
-       Then map the channel names of each planned pair to the returned names, add the pairs with `add_pair!`, and set `db.current_pair`, as `xyz_import.jl` does before `add_position_pairs!`.
+       Then map the channel names of each planned pair to the returned names, and add the pairs with `add_pair!` in plan order. `add_pair!` skips a pair the database already has.
+       Set `db.current_pair` only when it is 0, as `add_position_pairs!` does: to the index in `db.pairs` of the file's current pair, found by its x and y names. In append mode a target that already has a current pair keeps it.
     4. Open the appenders once. The progress total is the number of planned (line, channel) blobs with a live slot. For each planned line: read the headers of its channel blobs (`blob_offset` on `line_slot * chans_max + chan_slot`); skip the line with `"line <name> has no data; skipped"` when it has no blob; else find the main sampling and the line's rows (the most rows among channels with the main sampling); `start_line!`, then set `nrows`, `fid_start` and `fid_step`.
     5. Then for each channel, one blob at a time: check `is_cancelled` (throw `ImportCancelled`), unpack, and check the blob:
        - its type must equal the channel's, else `GdbError("blob <index> holds type <code>, but the channel has type <code>")`;
@@ -657,10 +689,10 @@ Spec 6.2, 6.3a, 6.5; research section 12 (last paragraph).
        Decode with `gdb_values!`, resample when its sampling differs, and append. Report progress after each blob.
        A channel with fewer rows than the line is padded by `end_line!`; this step only records it for the warning.
        When all lines are done, the body closes the appenders and returns `(warnings, rows, lines)`, as `import_lines` expects.
-    6. Warnings per line, each naming the line: one for the channels resampled (`"line L10: channels A, B have another fiducial start or step than the line (start s, step d); they were resampled onto it"`), one for the channels padded (`"line L10: channels C have fewer rows than the line; the rest are missing"`), one for channels with no data on the line (`"line L10: channels D have no data on this line; they are missing"`). Use "channel" instead of "channels" when only one is named. Per file: one warning when `g.cp1252` is true or any channel's `notes.cp1252` is above 0 (`"some names or text values are not valid UTF-8; they were read as Windows-1252"`). Per channel over the whole file: one warning for value clashes (`"channel <c>: <n> values equal JuliaMag's missing marker and read as missing"`), and one when `notes.inexact` is above 0 (`"channel <c>: <n> 64-bit values are above 2^53 and lost precision as Float64"`). A 64-bit channel whose values all fit gives no warning.
+    6. Warnings per line, each naming the line: one for the channels resampled (`"line L10: channels A, B have another fiducial start or step than the line (start s, step d); they were resampled onto it"`), one for the channels padded (`"line L10: channels C have fewer rows than the line; the rest are missing"`), one for channels with no data on the line (`"line L10: channels D have no data on this line; they are missing"`). Use "channel" instead of "channels" when only one is named. Per file: one warning when `g.cp1252` is true or any channel's `notes.cp1252` is above 0 (`"some names or text values are not valid UTF-8; they were read as Windows-1252"`). Per channel over the whole file: one warning for value clashes (`"channel <c>: <n> values equal JuliaMag's missing marker and read as missing"`), and one when `notes.inexact` is above 0 (`"channel <c>: <n> 64-bit values cannot be stored exactly as Float64 and were rounded"`). A 64-bit channel whose values are all exact gives no warning.
     7. Any `GdbError` from a blob is thrown again as `GdbError("line <L>, channel <c>: <message>")`, so the job fails with a message naming both.
     8. Close the file in a `finally`.
-  - `GDB_SETTINGS`: the four XYZ settings (`mode`, `name`, `target`, `crs`), with `crs` help `"Used for the current X and Y channels when the file stores no coordinate system for them, such as EPSG:7855."`.
+  - `GDB_SETTINGS`: the four XYZ settings (`mode`, `name`, `target`, `crs`), with `crs` help `"Used for the current X and Y channels when the file stores no coordinate system for them, or one JuliaMag cannot use, such as a Geosoft custom system. Example: EPSG:7855."`.
   - `run_gdb_importer(s, path, settings, progress)` and `register_importer!(ImporterSpec("import.geosoft_gdb", "Geosoft database", [".gdb"], ITEM_DATABASE, GDB_SETTINGS, run_gdb_importer))`.
 - Test support `compare_gdb_xyz(db, xyz; rename = Dict{String,String}(), skip_all_missing_rows = false)::Tuple{Int,Vector{String}}`. It returns the count of values checked and the first 20 mismatches as text.
   1. Stream the Oasis XYZ export with `eachfileline`, and take the column names with `xyz_column_names`.
@@ -694,13 +726,13 @@ Also, on synthetic files:
 - a line where channel B starts 0.5 later and channel C has step 2: the line keeps A's sampling, B and C are resampled (values checked), one warning names B and C (Review Focus 2);
 - a line where channel B has 10 fewer rows with the same sampling: padded, one warning;
 - a channel with no blob on line 2: missing there, one warning; a line with no blobs: skipped with a warning;
-- an alphanumeric line and a group line give their Task 7 warnings in the job report;
+- an alphanumeric line and a group line give their Task 7 warnings in `job_warnings(job)` (Task 8a), each once, and the report text holds each once;
 - a zlib blob with a changed byte: `JOB_FAILED`, the error names the line and channel, no `databases/.importing-*` folder (Review Focus 3);
 - a `misdirect` slot: `JOB_FAILED`, the error names the line and channel, no temp folder;
 - a channel name and a string value in Windows-1252: the import succeeds with one fallback warning for the file; an all-ASCII file gives none;
 - cancel after the first blob: `@test_throws JuliaMagCore.ImportCancelled import_gdb(s, path; progress = gdb_cancel_later())`, with `gdb_cancel_later()` built like `csv_cancel_later()` in `test_csv.jl`; then no item and no temp folder;
-- a LONG64 channel with the value 2^60 + 1 gives one inexact warning; one whose values are all small gives none;
-- append (Review Focus 5): import a synthetic file, then append the same file to it; each line now exists twice, as version 0 and version 1, with the same rows, so the database holds twice the rows; append the file once more to a database made from the XYZ export, whose `FltNo` channel is named `fltno` (lower case): the rows go into `fltno`, and the position pair names the existing channels; append to a database whose `FltNo` is Float64 when the file has Int32: `JOB_FAILED` naming `FltNo`, and `database.json` of the target is byte for byte as before;
+- a LONG64 channel with the value 2^60 + 1 gives one inexact warning; one with the values 5 and 2^60 gives none;
+- append (Review Focus 5): import a synthetic file, then append the same file to it; each line now exists twice, as version 0 and version 1, with the same rows, so the database holds twice the rows; for the name match, write a second synthetic file whose channels are all Float64 (`X`, `Y`, `Mag`), build a target database in the test with channels `x`, `y`, `mag` (lower case, Float64), and append the file to it: the rows go into `x`, `y`, `mag`, no new channel appears, and the position pair names `x`, `y`; for the type check, append a synthetic file whose `FltNo` is Int32 to a target whose `FltNo` is Float64 (the type `import_xyz` gives every channel): `JOB_FAILED` naming `FltNo`, and `database.json` of the target is byte for byte as before;
 - undo of the import job takes the item out; redo puts it back;
 - an Esri folder through `import_file`: `JOB_FAILED` with "ArcGIS file geodatabase", no item;
 - the importer is in `importers()` and `importer_for("x.GDB")` finds it.
@@ -757,7 +789,7 @@ These files have plain blobs, so this checks risk 1: the plain-blob fiducial off
 - Modify: `JuliaMagUI/test/runtests.jl` (include it after `window/test_map_end_to_end.jl`), `README.md`, `JuliaMagUI/README.md`, `docs/superpowers/plans/2026-10-28-plan-1-followups.md`, `docs/research/geosoft-gdb-format.md` (line 5)
 
 **Interfaces:**
-- Consumes: Task 9; the helpers of `test/window/test_map_end_to_end.jl` (`map_e2e_import`, `map_e2e_show`, `map_e2e_wait`), which live in the same test module.
+- Consumes: Tasks 8a and 9; the helpers of `test/window/test_map_end_to_end.jl` (`map_e2e_import`, `map_e2e_show`, `map_e2e_wait`), which live in the same test module.
 
 - [ ] **Step 1: Write the window test**
 
@@ -774,7 +806,10 @@ In one window session, at scale 1, light theme, at the window size the map end-t
 - [ ] **Step 4: Update the docs.**
   - `README.md`: under the import text, say that `import_file` reads Geosoft databases (`.gdb`), read only, with an example line `job = wait_job(import_file(s, "survey.gdb"))`.
   - `JuliaMagUI/README.md`: add `test/window/test_gdb_end_to_end.jl` to the list of window tests.
-  - `docs/research/geosoft-gdb-format.md` line 5: replace "The spec still lists `.gdb` as a non-goal (section 11); that will change in a later edit." with "Spec section 6.3a now describes the `.gdb` import; section 11 lists only writing `.gdb` as a non-goal."
+  - `docs/research/geosoft-gdb-format.md`:
+    - line 5: replace "The spec still lists `.gdb` as a non-goal (section 11); that will change in a later edit." with "Spec section 6.3a now describes the `.gdb` import; section 11 lists only writing `.gdb` as a non-goal."
+    - section 4, "Reader rule": keep "use the directory", and replace the fallback sentence with "JuliaMag does not fall back to a chain copy: a live entry that misses its blob fails the import (data) or gives a warning (admin), because the last copy can be stale. S1 falls back."
+    - section 10: the example says `WGS 84 / *TM_afghan_adf` is "in afgrav and GDR_clmag". GDR_clmag has that name; afgrav has `WGS 84 / *tm_afghan` and `WGS 84 / *lcc_afghan` (byte scan, 2026-11-04). Say so, and add that the `*` of a custom name comes after the `/ ` of the datum part.
   - Follow-ups file: a new section "Left for later from the gdb import", one plain line each:
     - Group lines and group classes (now skipped with a warning).
     - The line selection byte (every imported line starts selected).
@@ -797,21 +832,21 @@ In one window session, at scale 1, light theme, at the window size the map end-t
 These are the plan author's calls; each says what it costs if wrong.
 
 - **The spec subsection is numbered 6.3a.** Code comments and earlier plans cite spec 6.4 to 6.7 by number, so renumbering would break them. Cost: an unusual section number.
-- **Display order is slot order.** Ruling 4 breaks a sampling tie by display order, and research section 16 puts the display list under "can wait". Slot order is the order the channels were made, and the order the XYZ exports list them. Cost if wrong: a different main sampling on a line where exactly half the channels differ, which no known file has.
+- **Display order is slot order.** Ruling 4 breaks a sampling tie by display order, and research section 16 puts the display list under "can wait". Slot order is the order the channels were made. It is not always the XYZ export order: afgrav's slots start `xTM yTM longitude latitude`, and its export starts `longitude latitude xTM yTM`. Cost if wrong: a different main sampling on a line where exactly half the channels differ, which no known file has.
 - **USHORT, ULONG and 64-bit integers are read now.** Research 16 lists them under "can wait", but ruling 7 decides how to widen them, and the cost is a few table rows with synthetic tests. Cost: no real file tests them.
 - **Resampling of integer and text channels.** Integers interpolate and round to the nearest value; text takes the nearer row. Linear interpolation has no meaning for text, and an integer channel must stay an integer. Ties round away from zero, so a value halfway between two integers does not depend on whether the lower one is even. Cost if wrong: one rule changes.
 - **A damaged data blob fails the whole import.** It names the line and channel. A partial database with silent holes would be worse, and the user can repair the file in Oasis. A damaged admin object (labels, units, coordinate system) is only a warning, since the data is still right. Cost if wrong: a user with one bad blob must repair the file in Oasis before importing.
-- **A directory slot that is not live means "no data".** A live slot that misses its blob fails the import.
+- **A directory slot that is not live means "no data".** A live data slot that misses its blob fails the import. A live admin slot that misses its blob only gives a warning (Task 6), like any damaged admin object.
   The chain is not searched for another copy, because the last copy can be stale (AirMag `__552`; long_valley has 624 stale blobs).
   Cost if wrong: a file with one wrong directory entry is refused, where a reader that guessed might have read it.
 - **The version words at bytes 8 and 12 are checked.** Ruling 2 says refuse what is not known. All 8 test files (the 7 public files and AirMag) and the research agree on them.
   The pygdb corpus agrees: 49 of 49 files from 1991 to 2024.
   Cost if wrong: a valid file is refused with a clear message, and the check is one line to relax.
-- **The importer has a `crs` setting**, used only for the current pair when the file stores no coordinate system for it. This is how the user sets it at import (spec 6.6), as for XYZ. A coordinate system stored in the file always wins. Cost if wrong: none for data; the user can change the system later (spec 6.6).
+- **The importer has a `crs` setting**, used only for the current pair when the file stores no coordinate system for it, or one JuliaMag cannot use (a custom or unknown name). This is how the user sets it at import (spec 6.6), as for XYZ. A coordinate system from the file that JuliaMag can use always wins. Cost if wrong: none for data; the user can change the system later (spec 6.6).
 - **Only `afgrav` goes into the repo.** It is U.S. public domain and 631 KB with its XYZ. `long_valley_ed` (7.3 MB) is too large. The Geoscience BC files have no licence statement that allows sharing, so they are optional only. Cost: the full real-file checks run only on machines that have the files.
 - **The app needs one table entry**, `"import.geosoft_gdb" => "import"` in `CORE_ICONS`, because `test_icons.jl` checks that every importer has an icon. The menus, command search, dialog and Jobs tab come from the registry with no other app code. Four UI tests list the importers exactly, so they gain the new entry (Task 9). Cost if wrong: a missed test list fails the Task 9 gate, which shows it at once.
-- **The inexact warning fires only when precision is lost.** A 64-bit channel whose values all fit in Float64 gives no warning, so users are not warned about a loss that did not happen. Cost: a channel that could hold large values but does not is not flagged.
-- **Width and decimals that JuliaMag does not accept fall back to its defaults, with no warning.** They only change how values are shown. Cost if wrong: a display setting from Oasis is lost without a note.
-- **When the file names no current pair, the first pair found becomes current.** This matches `add_position_pairs!`, which makes the first pair current. Cost if wrong: the user picks another current pair in the database.
+- **The inexact warning fires only when a value was rounded.** A 64-bit channel whose values Float64 stores exactly gives no warning, so users are not warned about a loss that did not happen. The owner approved this rule, and spec 6.3a was updated to match on 2026-11-04. Cost: a channel that could hold large values but does not is not flagged.
+- **Display settings that JuliaMag does not accept fall back to its defaults, with one warning per file.** Formats `GEOGR`, `SIGDIG` and `HEX`, and bad width or decimals, only change how values are shown, so one line that names the channels is enough. Spec 6.3a asks for a warning for every changed item. Cost: one more warning line on files that use these formats.
+- **When the file names no current pair, the first pair found becomes current.** This matches `add_position_pairs!`, which makes the first pair current. In append mode the target's current pair is kept. Cost if wrong: the user picks another current pair in the database.
 - **`compare_gdb_xyz` keeps its own XYZ parsing.** `import_xyz` cannot read time and date text, and it drops the printed digit count that the tolerances need. Cost: a second, small parser in test code only.
 - **The test-only LZRW1 compressor stays.** Its random round trips test the decoder's copy items on many patterns, beyond the hand-made streams and the two real files. Cost: about 60 lines of test code.
