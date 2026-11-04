@@ -151,6 +151,11 @@ These were out of scope for the map view (plan 4a).
 - `cursor_why` runs each frame while Go To Cursor is disabled; it is not pinned at 0 bytes.
 - In a borderline fit, the status bar separators can push the pointer text about 1 px past its box.
 - The Aqua precompile step stalled twice in full UI runs; most likely contention on a shared depot during a concurrent precompile.
+- After a failed GPU upload, the map picture keeps showing that layer until the next pan or zoom.
+- A load error that names an item keeps the old name after a rename, until the next data change.
+- A grid row with a "drawn without reprojection" note hides a GPU upload error for that grid (the row and the map hint show the note only).
+- Undoing a job whose undo is refused as busy still steps the data revision of its items, so they reload once for nothing.
+- Tests: the end-to-end map shots depend on toast timing, and a toast can cover the legend; dismiss toasts before each shot.
 
 ## Checks on real systems
 
