@@ -92,6 +92,55 @@ function test_gdb_garbage(n::Int, seed::Int)::Vector{UInt8}
     return out
 end
 
+"""
+    lzrw1_compress(data)
+
+An LZRW1 stream (no 4-byte flag prefix) for `data`, the inverse of
+`lzrw1_decode!`. Greedy, as in Ross Williams' algorithm: a 4096-entry hash
+table of 3-byte prefixes, copy lengths 3 to 16, offsets 1 to 4095.
+Items come in groups of 16 behind a 16-bit little-endian control word, read
+least significant bit first; a set bit is a copy item. Tests only.
+"""
+function lzrw1_compress(data::AbstractVector{UInt8})::Vector{UInt8}
+    n = length(data)
+    table = zeros(Int, 4096)
+    z = UInt8[]
+    p = 1
+    while p <= n
+        ctrl_at = length(z) + 1
+        append!(z, (0x00, 0x00))
+        ctrl = 0x0000
+        item = 0
+        while item < 16 && p <= n
+            len, off = 0, 0
+            if p + 2 <= n
+                key = (UInt32(data[p]) << 8) ⊻ (UInt32(data[p + 1]) << 4) ⊻ UInt32(data[p + 2])
+                h = ((40543 * key) >> 4) & 0x0fff
+                cand = table[h + 1]
+                table[h + 1] = p
+                off = p - cand
+                if cand > 0 && off <= 4095
+                    while len < 16 && p + len <= n && data[cand + len] == data[p + len]
+                        len += 1
+                    end
+                end
+            end
+            if len >= 3
+                push!(z, UInt8(((off >> 4) & 0xf0) | (len - 1)), UInt8(off & 0xff))
+                ctrl |= 0x0001 << item
+                p += len
+            else
+                push!(z, data[p])
+                p += 1
+            end
+            item += 1
+        end
+        z[ctrl_at] = UInt8(ctrl & 0xff)
+        z[ctrl_at + 1] = UInt8(ctrl >> 8)
+    end
+    return z
+end
+
 "The chunk magic that starts the payload part of a packed blob header."
 const TEST_GDB_CHUNK_MAGIC = UInt8[0x0f, 0x0e, 0xff, 0xfe, 0x12, 0x34, 0x56, 0x78]
 

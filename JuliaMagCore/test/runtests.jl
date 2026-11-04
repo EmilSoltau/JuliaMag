@@ -19,6 +19,7 @@ using Test
     include("test_grid_export.jl")
     include("test_csv.jl")
     include("test_gdb_format.jl")
+    include("test_lzrw1.jl")
     include("test_jobs.jl")
     include("test_tools.jl")
     include("test_followups.jl")
