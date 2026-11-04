@@ -37,6 +37,7 @@ include("io/grd_files.jl")
 include("io/csv_fields.jl")
 include("io/csv_import.jl")
 include("io/csv_templates.jl")
+include("io/gdb_format.jl")
 include("io/parquet_export.jl")
 include("jobs/jobs.jl")
 include("tools/registry.jl")
@@ -61,7 +62,7 @@ export ItemKind, ITEM_DATABASE, ITEM_GRID, ITEM_MAP, ProjectItem, Project, Proje
 export create_project, open_project, save_project, add_item!, remove_item!, item, item_missing
 export new_item_id, database, grid
 export read_channel, write_value!, write_channel!
-export GridError, GridStyle, colour_tables, colour_table, GridSource, Grid, GRID_BLOCK_BYTES, create_grid, open_grid, save_grid_meta
+export GridError, GdbError, GridStyle, colour_tables, colour_table, GridSource, Grid, GRID_BLOCK_BYTES, create_grid, open_grid, save_grid_meta
 export values_path, block_rows, read_rows, write_rows!, with_grid_values, cell_centre, grid_corners
 export UndoStep, HistoryEntry, Cursor, Session, ProtectedError, ItemBusyError
 export LOCK_FILE, ProjectLockedError
