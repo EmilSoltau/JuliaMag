@@ -368,3 +368,61 @@ function xyz_column_names(path::AbstractString)::Vector{String}
     end
     error("$path has no data rows")
 end
+
+"""
+    test_gdb_object(class, code, body)
+
+The bytes of a framed admin object (research section 9) for the `admin` option
+of `write_test_gdb`: the payload length at +24, the object frame at +28, the
+class name at +44, the member frame at +60, the member tag and the 4-character
+`code` at +92, then `body` from +124. The writer fills in the first 24 bytes.
+"""
+function test_gdb_object(class::String, code::String, body::Vector{UInt8})::Vector{UInt8}
+    b = zeros(UInt8, 124 + length(body))
+    put_i32!(b, 24, length(b) - 28)
+    put_bytes!(b, 28, UInt8[0xff, 0x00, 0xf0, 0x0f])
+    put_i32!(b, 32, length(b) - 60)
+    put_i32!(b, 40, 1)
+    put_name!(b, 44, class)
+    put_bytes!(b, 60, UInt8[0xff, 0x00, 0xe1, 0x1e])
+    put_i32!(b, 64, length(b) - 92)
+    put_bytes!(b, 92, UInt8[0x00, 0x1a, 0xcc, 0xff])
+    put_name!(b, 96, code)
+    put_bytes!(b, 124, body)
+    return b
+end
+
+"""
+    test_registry(pairs)
+
+A `REG` object with one 256-byte slot `KEY\\0value\\0` per pair, in order, then a
+count of 0 nested objects (research section 9.1). A value may be raw bytes, so
+a test can store text that is not UTF-8.
+"""
+function test_registry(pairs)::Vector{UInt8}
+    pairs = collect(pairs)
+    body = zeros(UInt8, 4 + 256 * length(pairs) + 4)
+    put_i32!(body, 0, length(pairs))
+    for (k, (key, value)) in enumerate(pairs)
+        v = value isa AbstractVector{UInt8} ? value : Vector{UInt8}(codeunits(value))
+        slot = vcat(Vector{UInt8}(codeunits(key)), 0x00, v)
+        length(slot) < 256 || error("the registry entry $key does not fit in its 256-byte slot")
+        put_bytes!(body, 4 + 256 * (k - 1), slot)
+    end
+    return test_gdb_object("REG", "REG ", body)
+end
+
+"""
+    test_ipj(; name, method, datum, units)
+
+An `IPJ` object of 776 bytes, as in afgrav, with the name at +104, the method
+at +168, the datum at +180 and the units at +452 (research section 10).
+"""
+function test_ipj(; name::String, method::Int = 11, datum::String = "WGS 84", units::String = "m")::Vector{UInt8}
+    b = test_gdb_object("IPJ", " JPI", zeros(UInt8, 776 - 124))
+    put_name!(b, 104, name)
+    put_i32!(b, 168, method)
+    put_name!(b, 180, datum)
+    put_name!(b, 452, units)
+    return b
+end
