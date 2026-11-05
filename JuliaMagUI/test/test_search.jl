@@ -202,7 +202,7 @@ end
         @test sort(ids(groups)) == sort(everything)
         # The prototype's grouping: a tab's imports, then its exports, then its tools.
         db = last(groups[1])
-        @test [e.cmd.id for e in db] == ["import.geosoft_xyz", "import.csv", "export.geosoft_xyz", "export.csv", "export.parquet"]
+        @test [e.cmd.id for e in db] == ["import.geosoft_xyz", "import.csv", "import.geosoft_gdb", "export.geosoft_xyz", "export.csv", "export.parquet"]
         @test UI.plain_name(first(db).cmd) == "Import Geosoft XYZ"
         grid = [e.cmd.id for e in last(groups[4])]
         @test findfirst(==("import.geotiff"), grid) < findfirst(==("export.geotiff"), grid) <

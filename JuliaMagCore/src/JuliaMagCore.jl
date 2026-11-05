@@ -44,6 +44,7 @@ include("io/gdb_values.jl")
 include("io/gdb_admin.jl")
 include("io/gdb_lines.jl")
 include("io/gdb_sampling.jl")
+include("io/gdb_import.jl")
 include("io/parquet_export.jl")
 include("jobs/jobs.jl")
 include("tools/registry.jl")
@@ -83,7 +84,7 @@ export GridHeader, GridSink, put_rows!, put_columns!, import_grid
 export georef_from_affine, affine_from_grid, read_gdal_grid
 export GrdHeader, read_grd_header, grd_eltype, grd_dummy, read_geosoft_grd
 export grd_kind, crs_from_grd_xml, crs_from_grd_gi
-export ImporterSpec, register_importer!, importers, importer_for, import_xyz
+export ImporterSpec, register_importer!, importers, importer_for, import_xyz, import_gdb
 export CsvColumn, CsvLayout, sniff_csv, preview_rows, import_csv
 export save_template, load_template, list_templates, layout_json
 export JobStatus, JOB_RUNNING, JOB_DONE, JOB_FAILED, JOB_CANCELLED, JOB_UNDONE, Job
