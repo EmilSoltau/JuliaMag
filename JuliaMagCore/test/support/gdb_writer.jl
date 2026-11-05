@@ -176,7 +176,32 @@ function test_gdb_blob_bytes(b::TestBlob, code::Int, index::Int)::Vector{UInt8}
     return vcat(h, stream)
 end
 
-test_gdb_lzrw1_chunks(raw, pack) = error("LZRW1 packing is added with the LZRW1 compressor")
+"The most bytes one LZRW1 chunk unpacks to (research section 6.3)."
+const TEST_GDB_LZRW1_CHUNK = 16_368
+
+"""
+    test_gdb_lzrw1_chunks(raw, pack)
+
+The LZRW1 chunks for `raw`, back to back, each of at most 16,368 raw bytes.
+Each chunk has a 12-byte header: int32 raw length, int32 chunk length (with
+the header) and a uint32 marker. `:lzrw1` packs each chunk with
+`lzrw1_compress` (marker `0xF4E5D6C7`); `:lzrw1_stored` stores the bytes as
+they are (marker `0xF0E1D2C3`).
+"""
+function test_gdb_lzrw1_chunks(raw::Vector{UInt8}, pack::Symbol)::Vector{UInt8}
+    pack in (:lzrw1, :lzrw1_stored) || error("unknown packing $pack")
+    out = UInt8[]
+    for a in 1:TEST_GDB_LZRW1_CHUNK:length(raw)
+        part = raw[a:min(a + TEST_GDB_LZRW1_CHUNK - 1, length(raw))]
+        body, marker = pack == :lzrw1 ? (lzrw1_compress(part), 0xF4E5D6C7) : (part, 0xF0E1D2C3)
+        h = zeros(UInt8, 12)
+        put_i32!(h, 0, length(part))
+        put_i32!(h, 4, 12 + length(body))
+        put_u32!(h, 8, marker)
+        append!(out, h, body)
+    end
+    return out
+end
 
 "Fill in the common blob header (magic, pages twice, index, unset time) and pad `body` to whole pages."
 function test_gdb_page_blob(body::Vector{UInt8}, index::Int, page_size::Int)::Vector{UInt8}
