@@ -577,6 +577,15 @@ function import_file(s::Session, path::AbstractString; kwargs...)::Job
     return start_job!(s, spec.id, args, import_work(s, spec, String(path), settings))
 end
 
+"""
+    import_work(s, spec, path, settings)
+
+The work of an import job: run the importer and write its result to the report.
+A warning about the item as a whole (`file_line == 0`, such as a coordinate
+system or a skipped line) goes on the job card through `job_warning!`, which
+also writes its one report line. A warning about one row of a text file stays
+in the report only, so a file with many bad rows does not flood the job card.
+"""
 function import_work(s::Session, spec::ImporterSpec, path::String, settings::Dict{String,Any})
     return (progress::Progress, io::IO) -> begin
         r = spec.run(s, path, settings, progress)::ImportResult
@@ -586,7 +595,7 @@ function import_work(s::Session, spec::ImporterSpec, path::String, settings::Dic
             println(io, spec.name, " import of ", path, ": ", r.summary)
         end
         for w in r.warnings
-            println(io, w.file_line > 0 ? "line $(w.file_line): " : "", w.message)
+            w.file_line > 0 ? println(io, "line ", w.file_line, ": ", w.message) : job_warning!(w.message)
         end
         return r.item === nothing ? ProjectItem[] : ProjectItem[r.item]
     end
