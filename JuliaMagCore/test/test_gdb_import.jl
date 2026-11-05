@@ -43,6 +43,34 @@ job_db(s, j) = database(s.project, only(j.outputs))
         write(xyz, "/ AA B C D\nLine 1001\n1.25 12:30:00.0 2024/03/01 1.5e+03\n")
         n, bad = compare_gdb_xyz(db, xyz; rename = Dict("AA" => "A"))
         @test n == 4 && only(bad) == "line L1001: the database has 1 more rows than the XYZ block"
+        # Oasis keyword lines (`//flight=`, `//date=`) do not name columns, as in 7042_106_wform.xyz;
+        # a `//` line with names does, as in fortymile.
+        write(xyz, "/Volt\n//date=October 25, 2007\n//flight=106\nLine 106\n 3.9\n")
+        @test xyz_column_names(xyz) == ["Volt"]
+        write(xyz, "/ Flight: 12\n// Date 2007/10/25\n/ A\nLine 106\n 3.9\n")
+        @test xyz_column_names(xyz) == ["A"]
+        write(xyz, "//   A   B   C   D\n LINE 1001\n1.25 12:30:00.0 2024/03/01 1.5e+03\n* 00:00:01.5 2024/12/31 2.0E-2\n")
+        @test xyz_column_names(xyz) == ["A", "B", "C", "D"]
+        @test compare_gdb_xyz(db, xyz) == (8, String[])
+        # An export with no names line needs the names from a reference, as long_valley_ed.XYZ does.
+        write(xyz, "Line 1001\n1.25 12:30:00.0 2024/03/01 1.5e+03\n* 00:00:01.5 2024/12/31 2.0E-2\n")
+        @test_throws ErrorException compare_gdb_xyz(db, xyz)
+        @test compare_gdb_xyz(db, xyz; names = ["A", "BB", "C", "D"], rename = Dict("BB" => "B")) == (8, String[])
+        @test_throws ErrorException compare_gdb_xyz(db, xyz; names = ["A", "B", "C"])
+        close_session!(s)
+
+        # Blocks match lines by their header, not by their order (long_valley_ed lists its lines
+        # in another order than its slots). A header that is not a line name needs `lines`.
+        s = fresh_session()
+        dir = mktempdir()
+        db = database_of(s, import_gdb(s, survey_gdb(joinpath(dir, "s.gdb"); rows = 2); crs = "EPSG:32755"))
+        write(xyz, "/ X Y\nLine 20\n1001 2001\n1002 2002\nLine 10\n1 2001\n2 2002\n")
+        @test compare_gdb_xyz(db, xyz) == (8, String[])
+        write(xyz, "/ X Y\nLine 20\n1001 2001\n1002 2002\nLine 10_a\n1 2001\n2 2002\n")
+        @test compare_gdb_xyz(db, xyz; lines = Dict("Line 10_a" => "L10")) == (8, String[])
+        n, bad = compare_gdb_xyz(db, xyz)
+        @test n == 4 && bad == ["XYZ block \"Line 10_a\" names no line of the database",
+                                "line L10 has no block in the XYZ"]
         close_session!(s)
     end
 

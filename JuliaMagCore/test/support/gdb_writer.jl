@@ -347,6 +347,17 @@ end
 
 The channel names of an Oasis XYZ export: the names on the last `/` comment line
 before the first data row that has as many names as that row has columns.
+
+These comment lines do not name columns:
+- rule lines such as `/=== ===`, which have one token per column too;
+- Oasis keyword lines `//flight=106` and `//date=...`: two or more slashes and
+  the first word `flight` or `date`, as JuliaMag's XYZ reader reads them
+  (`comment_line!`). A `//` line with other words names the columns, as in the
+  fortymile export.
+
+A line header is a line that starts with a letter and has at most two words,
+such as `Line 10`, `LINE  10010` or `T 5`. Throws when no comment line names the
+columns; the caller then gives the names from a reference (see `compare_gdb_xyz`).
 """
 function xyz_column_names(path::AbstractString)::Vector{String}
     candidates = Vector{String}[]
@@ -354,17 +365,21 @@ function xyz_column_names(path::AbstractString)::Vector{String}
         s = strip(line)
         isempty(s) && continue
         if startswith(s, "/")
+            slashes = length(s) - length(lstrip(s, '/'))
             names = split(lstrip(s, '/'))
-            # Skip rule lines such as `/=== ===`, which have one token per column too.
-            all(t -> all(in(('=', '-')), t), names) || push!(candidates, names)
+            isempty(names) && continue
+            all(t -> all(in(('=', '-')), t), names) && continue
+            key = lowercase(first(split(names[1], ('=', ':'))))
+            slashes >= 2 && key in ("flight", "date") && continue
+            push!(candidates, names)
             continue
         end
-        first(split(s)) in ("Line", "Tie", "Base", "Test", "Trend", "Random", "L", "T", "B", "S", "R", "P", "D") &&
-            length(split(s)) <= 2 && continue
-        n = length(split(s))
+        words = split(s)
+        isletter(first(s)) && length(words) <= 2 && continue
+        n = length(words)
         k = findlast(c -> length(c) == n, candidates)
         k === nothing && error("no comment line in $path names the $n columns of its first data row")
-        return candidates[k]
+        return String.(candidates[k])
     end
     error("$path has no data rows")
 end

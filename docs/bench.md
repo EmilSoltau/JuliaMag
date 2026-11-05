@@ -172,6 +172,65 @@ JULIA_NUM_THREADS=4 julia --project=JuliaMagCore bench/import_grid.jl 20000
   The steps are `import-grd`, `import-zlib`, `import-tif`, `export-grd`, `export-ers` and `export-tif`.
   The export steps need the project that `import-grd` made in `DIR`.
 
+## Geosoft databases
+
+`bench/import_gdb.jl` measures the import of Geosoft databases (`.gdb`).
+It writes a synthetic zlib `.gdb` with the test writer: lines of 30,000 rows and 10 `Float64` channels, 2.4 MB of values per line.
+The values are random walks, so zlib keeps most of the size: 400 lines are 960 MB of values in a 753 MB file.
+It imports the file with `import_file`, timed up to the end of `wait_job`.
+With `JULIAMAG_GDB_SAMPLES` set, it also imports `fortymile_linedata.gdb` (Alaska DGGS GPR 2015-4, LZRW1, 173 MB, 288 lines, 2.1 million rows, 28 channels).
+The machine and threads are the same as above.
+
+### What is measured
+
+- Each import runs in a new Julia process, after it imports a small file of 2 lines, so compile time is not in the numbers.
+  `Sys.maxrss()` is a peak for the whole process, so the writer's memory would hide the import's in the same process.
+- Speed is the bytes of values in the new database divided by the time.
+- Each memory column is the peak during the import, sampled every 50 ms, minus the value just before it, as for grids: RSS, Julia heap (`Base.gc_live_bytes()`) and maxrss (the growth of `Sys.maxrss()`).
+- The resident memory before an import is about 1 GB.
+
+### Results
+
+Run of 2026-11-05 (`JULIA_NUM_THREADS=4 julia --project=JuliaMagCore bench/import_gdb.jl N`, with `JULIAMAG_GDB_SAMPLES` set for the 400-line run).
+Memory in MiB.
+
+| Input | File | Values | Time | Speed | RSS | Julia heap | maxrss |
+|---|---|---|---|---|---|---|---|
+| Synthetic, 100 lines | 188 MB | 240 MB | 1.02 s | 235 MB/s | 73 | 87 | 0 |
+| Synthetic, 200 lines | 376 MB | 480 MB | 2.09 s | 230 MB/s | 128 | 136 | 18 |
+| Synthetic, 400 lines | 753 MB | 960 MB | 4.34 s | 221 MB/s | 134 | 155 | 24 |
+| Synthetic, 800 lines | 1506 MB | 1920 MB | 9.25 s | 208 MB/s | 82 | 146 | 72 |
+| fortymile (LZRW1) | 173 MB | 473 MB | 0.80 s | 589 MB/s | 18 | 54 | 0 |
+
+Writing the 400-line input took 38 s.
+
+### Findings
+
+- Memory growth is under 300 MB at every size.
+  The plan's check: the maxrss growth at 400 lines (24 MiB) is at most 50 MB above the growth at 100 lines (0 MiB).
+- The RSS and heap growth rise from 100 to 200 lines and then stay flat, from 130 to 155 MiB of heap up to 800 lines.
+  This is garbage that the collector has not taken yet, not memory the import keeps.
+  An import allocates about 99 KiB per blob, less than half of the 234 KiB of values in a blob, mostly for the zlib stream of each blob.
+  The collector runs when the heap reaches its next threshold, so the 100-line run stops before it gets there.
+  This is the same as the zlib grid import above, and it was left as it is.
+- Time grows in line with the file: about 220 MB/s of values for zlib, about 590 MB/s for LZRW1 (fortymile).
+
+### How to re-run
+
+From the repo root:
+
+```
+JULIA_NUM_THREADS=4 julia --project=JuliaMagCore bench/import_gdb.jl 100
+JULIAMAG_GDB_SAMPLES=/home/ems/data/juliamag-samples/gdb JULIA_NUM_THREADS=4 julia --project=JuliaMagCore bench/import_gdb.jl 400
+```
+
+- The first argument is the number of lines (default 400).
+- `--dir DIR` says where to put the temporary files; the default is the system temp folder.
+  The run needs about 2 MB of free disk per line.
+- `--keep` keeps the files.
+- One import can be run alone on a file made with `--keep`:
+  `julia --project=JuliaMagCore bench/import_gdb.jl --step LABEL PATH DIR`.
+
 ## Limits
 
 - The benchmark runs on Linux only.
