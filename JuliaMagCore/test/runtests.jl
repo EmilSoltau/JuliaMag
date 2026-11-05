@@ -23,6 +23,7 @@ using Test
     include("test_gdb_blobs.jl")
     include("test_gdb_values.jl")
     include("test_gdb_admin.jl")
+    include("test_gdb_lines.jl")
     include("test_jobs.jl")
     include("test_tools.jl")
     include("test_followups.jl")
