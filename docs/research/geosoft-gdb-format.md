@@ -2,7 +2,7 @@
 
 Goal: a read-only `.gdb` importer for JuliaMag.
 Spec: `docs/superpowers/specs/2026-10-28-juliamag-foundation-design.md` section 5.3 (line database) and section 6 (import).
-The spec still lists `.gdb` as a non-goal (section 11); that will change in a later edit.
+Spec section 6.3a now describes the `.gdb` import; section 11 lists only writing `.gdb` as a non-goal.
 
 Date: 2026-11-04.
 Tags: **[SPEC]** = read in Geosoft's own text: the GX API docstrings in gxpy, or the Oasis montaj 2025.2.1 help installed on the user's machine.
@@ -137,7 +137,8 @@ Values in the last column are AirMag's **[BYTES: AirMag]**.
   It is not always the last one: in AirMag the `__552` registry has two copies, and the directory picks the **earlier** one; the later copy is on the free list **[BYTES: AirMag]**.
   long_valley_ed has 1,226 blobs in its chain but only 602 live directory entries **[BYTES]**.
 - Reader rule: use the directory.
-  Fall back to the last copy in chain order only when the directory entry is missing or does not land on a blob (S1 does the same) **[CODE S1]**.
+  JuliaMag does not fall back to a chain copy: a live entry that misses its blob fails the import (data) or gives a warning (admin), because the last copy can be stale.
+  S1 falls back **[CODE S1]**.
 
 ## 5. Symbol tables
 
@@ -434,7 +435,9 @@ Keys seen **[BYTES]**:
 - The names are EPSG names.
   Oasis's own `csv/ipj_pcs.csv` maps `NAD27 / UTM zone 7N` to 26707 and `NAD83 / UTM zone 10N` to 26910; `csv/datum.csv` maps `WGS 84` to 4326 **[BYTES: S4]**.
   JuliaMag should look the name up in the EPSG database (PROJ), not ship Seequent's tables.
-  Names starting with `*` are Geosoft custom systems with no EPSG code (`WGS 84 / *TM_afghan_adf` in afgrav and GDR_clmag) **[BYTES]**.
+  Names starting with `*` are Geosoft custom systems with no EPSG code **[BYTES]**.
+  GDR_clmag has `WGS 84 / *TM_afghan_adf`; afgrav has `WGS 84 / *tm_afghan` and `WGS 84 / *lcc_afghan` (byte scan, 2026-11-04).
+  The `*` of a custom name comes after the `/ ` of the datum part.
   For those, build a PROJ string from the method and parameters, or report "custom" and let the user pick.
 - **Stale IPJ blobs exist**: MtMill has `IPJ_GPSLon1:GPSLat1`, `IPJ___X:__Y` and `IPJ_Long:Lat` for channels that no longer exist **[BYTES]**.
   Only attach an IPJ whose two channel names are both live channels.

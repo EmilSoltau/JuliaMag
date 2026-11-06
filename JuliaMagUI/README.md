@@ -170,6 +170,7 @@ julia -t auto,1 --project=JuliaMagUI -e 'using Pkg; Pkg.test()'
   Without one, they are skipped and the reason is printed once.
 - `test/window/test_end_to_end.jl` is a user's first day in one window, at scale 1 and 1.5: a new project, an import, Statistics, Channel Math with undo and redo, a grid and its coordinate system, line selection, the dark theme, an export from the command search, closing and opening the project again, and closing the window.
 - `test/window/test_map_end_to_end.jl` is a user's first map in one window, at scale 1 and 1.5, light then dark: a new project, a line import and a grid import, Show on Map for both, wheel zoom, a drag, Home and Previous Extent, a Layer Style for each layer with undo and redo, a click that moves the cursor, Map Drawing CPU and Auto, and closing and opening the project again.
+- `test/window/test_gdb_end_to_end.jl` imports a Geosoft database in one window, at scale 1: a new project, the import from the Database tab, Show on Map in light and dark, and the job card with its warning.
 - The map logic (camera, line levels, grid tiles, the CPU renderer, the loader, the scene, the commands and the readout) is tested without a window, in `test/test_map_*.jl`.
 - The map window tests (`test/window/test_map_*.jl`) check the GL pass against the CPU renderer pixel by pixel, the move to the CPU, the view and its gestures, the commands, the cursor, the Layers tab and the Layer Style pane.
   The GL parity test also checks that bilinear hillshade has no seams at tile edges, at every grid level.

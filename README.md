@@ -67,6 +67,24 @@ ER Mapper has names for fewer coordinate systems than GeoTIFF.
 When it has no name for the grid's one, the `.ers` file has none, and the export report says so.
 The tests check the readers on public sample files in `JuliaMagCore/test/data/grids`, listed with their licences in `LICENSE.md` there.
 
+## Geosoft databases
+
+`import_file` also reads Geosoft databases (`.gdb`) into a line database.
+It reads them only: JuliaMag does not write `.gdb` files.
+It keeps the lines, channels, labels, units, display settings and position pairs.
+It keeps a coordinate system when PROJ knows its name.
+Anything it cannot keep, such as a Geosoft custom coordinate system, is a warning on the job.
+
+```julia
+job = wait_job(import_file(s, "survey.gdb"))
+job_warnings(job)
+```
+
+The import reads one line at a time.
+A database with 960 MB of values imports in about 4 seconds, and its peak memory grows by about 25 MB (see `docs/bench.md`).
+The tests check it on `afgrav.gdb` in `JuliaMagCore/test/data/gdb`, listed with its licence in `LICENSE.md` there.
+With `JULIAMAG_GDB_SAMPLES` set to a folder of public sample files, they check five more files, four of them value by value against their Oasis XYZ exports.
+
 ## Saved scripts
 
 `script_text(s)` turns the history of a session into a Julia script.
