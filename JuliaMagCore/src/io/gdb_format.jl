@@ -299,9 +299,10 @@ end
     read_gdb_channels(g)
 
 The live channel records in slot order. A record is live when bit 0 of its
-flags is clear, its type is in `0:9` or below 0, its array width is at least 1,
-and its name is non-empty and printable. Unused slots can hold garbage, so the
-name of a record that fails the other rules is not read.
+flags is clear, its array width is at least 1, and its name is non-empty and
+printable. Unused slots can hold garbage, so the name of a record that fails
+the other rules is not read. A live record may have a type code JuliaMag does
+not know (10 or more); `plan_gdb_channels` skips it with a warning.
 """
 function read_gdb_channels(g::GdbFile)::Vector{GdbChannelRecord}
     h = g.header
@@ -311,7 +312,7 @@ function read_gdb_channels(g::GdbFile)::Vector{GdbChannelRecord}
         r = gdb_record(b, k)
         type, flags = Int(gdb_num(Int16, r, 76)), Int(gdb_num(Int16, r, 78))
         arraylen = Int(gdb_num(Int16, r, 110))
-        flags & 1 == 0 && (type in 0:9 || type < 0) && arraylen >= 1 || continue
+        flags & 1 == 0 && arraylen >= 1 || continue
         name, fallback = gdb_text(view(r, 1:64))
         !isempty(name) && all(isprint, name) || continue
         g.cp1252 |= fallback

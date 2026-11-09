@@ -207,12 +207,15 @@ end
         write_test_gdb(path; channels, lines = [TestLine(name = "L1", number = 1)], garbage_channels = 5)
         with_gdb(path) do g
             ch = read_gdb_channels(g)
-            @test [c.name for c in ch] == ["X", "Count", "Spec", "Tag"]
-            @test [c.slot for c in ch] == [0, 2, 5, 6]
+            # "Bad" has a type code JuliaMag does not know; it is kept here, so the
+            # channel plan can skip it with a warning (spec 6.3a).
+            @test [c.name for c in ch] == ["X", "Count", "Bad", "Spec", "Tag"]
+            @test [c.slot for c in ch] == [0, 2, 3, 5, 6]
             @test ch[1] == GdbChannelRecord(0, "X", 6, 2, 4, 12, 6, 1)
             @test ch[2] == GdbChannelRecord(2, "Count", 3, 0, 0, 8, 0, 1)
-            @test ch[3].arraylen == 40 && ch[3].type == 4
-            @test ch[4].type == -12
+            @test ch[3].type == 12
+            @test ch[4].arraylen == 40 && ch[4].type == 4
+            @test ch[5].type == -12
             @test g.header.chans_max >= 12               # the 5 garbage slots were written
             @test !g.cp1252
         end

@@ -129,6 +129,10 @@ pt(pairs) = [(p.x, p.y, p.crs) for p in pairs]
         @test plan_named(r.plans, "Sf").arraylen == 40
         @test plan_named(r.plans, "note").gtype.T === String && plan_named(r.plans, "note").arraylen == 1
         @test "channel notes is an array of text values; JuliaMag cannot store it, so it was skipped" in r.warns
+        # A value type JuliaMag does not know: skipped with a warning, not an error.
+        u = channel_plans([chan_rec(0, "mag"), chan_rec(1, "Vec"; type = 12)], meta_with())
+        @test [p.name for p in u.plans] == ["mag"]
+        @test u.warns == ["channel Vec has the value type 12, which JuliaMag cannot read; it was skipped"]
         @test "channels bad, Longitude, sig, hex, odd: their Oasis display settings have no JuliaMag equal; " *
               "they are shown as normal numbers" in r.warns
         @test count(w -> occursin("display settings", w), r.warns) == 1

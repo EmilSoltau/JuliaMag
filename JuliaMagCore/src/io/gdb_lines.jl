@@ -131,7 +131,8 @@ position pairs and the index of the current pair (0 when there is none).
 Names go through `channel_name`. The label is the registry `LABEL` when it holds
 text, else the name in the file; it is never read as a unit. Display settings
 JuliaMag does not accept become its defaults, with one warning for the file. A
-text array channel is skipped with a warning.
+text array channel, and a channel of a value type JuliaMag does not know, is
+skipped with a warning.
 
 The pairs, in order: the current pair (`DB_CHAN_X`, `DB_CHAN_Y` of the database
 registry, else the X and Y channels by name); each IPJ pair of live channels
@@ -153,6 +154,10 @@ function plan_gdb_channels(records::Vector{GdbChannelRecord}, meta::GdbMeta, crs
     taken = Set{String}()
     changed = String[]
     for r in records
+        if r.type >= 10
+            warn!(log, 0, "channel $(r.name) has the value type $(r.type), which JuliaMag cannot read; it was skipped")
+            continue
+        end
         t = gdb_type(r.type)
         if t.T === String && r.arraylen > 1
             warn!(log, 0, "channel $(r.name) is an array of text values; JuliaMag cannot store it, so it was skipped")

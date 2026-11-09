@@ -163,6 +163,12 @@ function read_gdb_into!(db::LineDatabase, g::GdbFile, contents::GdbContents, crs
                 off = blob_offset(g, index(lp, cp))
                 off === nothing ? nothing : gdb_channel_blob(g, off, cp)
             end
+            # A blob with no values is no data: it must not vote for the line's sampling.
+            if heads[k] !== nothing && heads[k].count == 0
+                heads[k] = nothing
+                done += 1
+                report(progress, done / total)
+            end
         end
         if all(isnothing, heads)
             warn!(log, 0, "line $(lp.name) has no data; skipped")

@@ -181,6 +181,45 @@ job_db(s, j) = database(s.project, only(j.outputs))
         end
     end
 
+    @testset "empty blobs count as no data" begin
+        mktempdir() do dir
+            # On L10, A and B have blobs with no values at the default sampling, and C has
+            # 10 values from fiducial 0.5. The empty blobs must not set the line's sampling.
+            # On L20 every blob is empty, so the line has no data.
+            chans = [TestChannel(name = n) for n in ("A", "B", "C")]
+            lines = [TestLine(name = "L10", number = 10), TestLine(name = "L20", number = 20)]
+            blob(l, c) = l == 0 && c == 2 ? TestBlob(values = collect(1.0:10.0), fid_start = 0.5) :
+                                            TestBlob(values = Float64[])
+            path = write_test_gdb(joinpath(dir, "empty.gdb"); channels = chans, lines = lines, blob = blob)
+            s = new_session(joinpath(dir, "p"), "p")
+            j = gdb_job(s, path)
+            @test status(j) == JOB_DONE
+            db = job_db(s, j)
+            l = only(db.lines)
+            @test line_name(l.id) == "L10" && l.nrows == 10 && l.fid_start == 0.5 && l.fid_step == 1.0
+            @test collect(read_channel(db, l.id, "C")) == collect(1.0:10.0)
+            @test all(isnan, read_channel(db, l.id, "A"))
+            @test job_warnings(j) == ["line L10: channels A, B have no data on this line; they are missing",
+                                      "line L20 has no data; skipped"]
+            close_session!(s)
+        end
+    end
+
+    @testset "a channel of an unknown value type is skipped with a warning" begin
+        mktempdir() do dir
+            chans = [TestChannel(name = "Mag"), TestChannel(name = "Vec", type = 12)]
+            path = write_test_gdb(joinpath(dir, "t12.gdb"); channels = chans,
+                                  lines = [TestLine(name = "L10", number = 10)],
+                                  blob = (l, c) -> c == 0 ? TestBlob(values = [1.0, 2.0]) : nothing)
+            s = new_session(joinpath(dir, "p"), "p")
+            j = gdb_job(s, path)
+            @test status(j) == JOB_DONE
+            @test [c.name for c in job_db(s, j).channels] == ["Mag"]
+            @test "channel Vec has the value type 12, which JuliaMag cannot read; it was skipped" in job_warnings(j)
+            close_session!(s)
+        end
+    end
+
     @testset "line warnings go on the job card once" begin
         mktempdir() do dir
             lines = [TestLine(name = "L10", number = 10), TestLine(name = "L28_29", number = -2147483647),
