@@ -163,6 +163,30 @@ end
     end
 end
 
+@testset "item warnings of an import go on the job card, row warnings stay in the report" begin
+    mktempdir() do dir
+        s = new_session(joinpath(dir, "p"), "p")
+        f = joinpath(dir, "w.xyz")
+        # The fiducials fall, which gives one warning about line L10 (file line 0).
+        # File lines 6 and 7 have the wrong number of values.
+        write(f, "/ FIDUCIAL X Y MAG\nLine 10\n5 1 2 3\n4 4 5 6\n3 7 8 9\n1 2\n1 2 3 4 5\n")
+        j = wait_job(import_file(s, f))
+        @test status(j) == JOB_DONE
+        item = "line L10: the fiducial step is -1.0, not above 0; step set to 1"
+        @test job_warnings(j) == [item]
+        text = report_text(j)
+        @test count(item, text) == 1
+        @test occursin("Warning: $item", text)
+        @test occursin("line 6: expected 4 values, found 2; row skipped", text)
+        @test occursin("line 7: expected 4 values, found 5; row skipped", text)
+        @test !any(w -> occursin("row skipped", w), job_warnings(j))
+        # The saved job record keeps the item warning too.
+        rec = JSON3.read(read(joinpath(s.project.folder, "jobs", "$(j.id).json"), String))
+        @test rec["warnings"] == [item]
+        close_session!(s)
+    end
+end
+
 @testset "import_xyz records when called directly" begin
     s = fresh_session()
     f = joinpath(s.project.folder, "a.xyz"); write_synthetic_xyz(f; lines = 1, ties = 0, rows_per_line = 10)

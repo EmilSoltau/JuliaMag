@@ -36,7 +36,7 @@ fake_command(id, places; label = id, menu = String[]) =
             # The split menu shows the format names.
             byid = Dict(c.id => c for c in cmds)
             @test [byid[id].menu_label for id in byid["import.database"].menu] ==
-                  ["Geosoft XYZ...", "CSV and text..."]
+                  ["Geosoft XYZ...", "CSV and text...", "Geosoft database..."]
             @test byid["export.database"].menu_label == "Export"
 
             gi = ribbon_layout(cmds, "Grid and Image")

@@ -37,6 +37,14 @@ include("io/grd_files.jl")
 include("io/csv_fields.jl")
 include("io/csv_import.jl")
 include("io/csv_templates.jl")
+include("io/gdb_format.jl")
+include("io/lzrw1.jl")
+include("io/gdb_blobs.jl")
+include("io/gdb_values.jl")
+include("io/gdb_admin.jl")
+include("io/gdb_lines.jl")
+include("io/gdb_sampling.jl")
+include("io/gdb_import.jl")
 include("io/parquet_export.jl")
 include("jobs/jobs.jl")
 include("tools/registry.jl")
@@ -61,7 +69,7 @@ export ItemKind, ITEM_DATABASE, ITEM_GRID, ITEM_MAP, ProjectItem, Project, Proje
 export create_project, open_project, save_project, add_item!, remove_item!, item, item_missing
 export new_item_id, database, grid
 export read_channel, write_value!, write_channel!
-export GridError, GridStyle, colour_tables, colour_table, GridSource, Grid, GRID_BLOCK_BYTES, create_grid, open_grid, save_grid_meta
+export GridError, GdbError, GridStyle, colour_tables, colour_table, GridSource, Grid, GRID_BLOCK_BYTES, create_grid, open_grid, save_grid_meta
 export values_path, block_rows, read_rows, write_rows!, with_grid_values, cell_centre, grid_corners
 export UndoStep, HistoryEntry, Cursor, Session, ProtectedError, ItemBusyError
 export LOCK_FILE, ProjectLockedError
@@ -76,7 +84,7 @@ export GridHeader, GridSink, put_rows!, put_columns!, import_grid
 export georef_from_affine, affine_from_grid, read_gdal_grid
 export GrdHeader, read_grd_header, grd_eltype, grd_dummy, read_geosoft_grd
 export grd_kind, crs_from_grd_xml, crs_from_grd_gi
-export ImporterSpec, register_importer!, importers, importer_for, import_xyz
+export ImporterSpec, register_importer!, importers, importer_for, import_xyz, import_gdb
 export CsvColumn, CsvLayout, sniff_csv, preview_rows, import_csv
 export save_template, load_template, list_templates, layout_json
 export JobStatus, JOB_RUNNING, JOB_DONE, JOB_FAILED, JOB_CANCELLED, JOB_UNDONE, Job

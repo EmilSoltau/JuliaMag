@@ -84,7 +84,7 @@ window_testset("ribbon") do
             ctx.frames(1)
             m = app.ui.menu
             @test m isa UI.OpenMenu && m.owner == "import.database"
-            @test [it.label for it in m.items] == ["Geosoft XYZ...", "CSV and text..."]
+            @test [it.label for it in m.items] == ["Geosoft XYZ...", "CSV and text...", "Geosoft database..."]
             @test exists("//###menu/Geosoft XYZ...") && exists("//###menu/CSV and text...")
             # A row runs its importer command and closes the menu.
             ctx.click("//###menu/CSV and text...")

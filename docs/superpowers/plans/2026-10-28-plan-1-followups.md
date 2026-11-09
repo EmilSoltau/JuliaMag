@@ -157,6 +157,22 @@ These were out of scope for the map view (plan 4a).
 - Undoing a job whose undo is refused as busy still steps the data revision of its items, so they reload once for nothing.
 - Tests: the end-to-end map shots depend on toast timing, and a toast can cover the legend; dismiss toasts before each shot.
 
+## Left for later from the gdb import
+
+These were out of scope for the read-only `.gdb` importer.
+
+- Group lines and group classes (now skipped with a warning).
+- The line selection byte (every imported line starts selected).
+- The display-list channel order (channels come in slot order).
+- `MAKER` history, `FORMULA` and the activity log, as JuliaMag history.
+- Custom (`*`) coordinate systems built from the IPJ parameters.
+- Projection methods other than geographic, Transverse Mercator, Lambert 2SP and polar stereographic.
+- Datum transform parameters, for a datum with no EPSG code.
+- String array channels (now skipped with a warning).
+- Geosoft grids with LZRW1 blocks: the grid reader refuses them today (`geosoft_grd.jl`), and it can reuse `io/lzrw1.jl`.
+- One Geosoft text helper: `grd_text` falls back to Latin-1, and `gdb_text` to Windows-1252.
+  Use `gdb_text`'s rule for both.
+
 ## Checks on real systems
 
 - Plan 3: on Windows, check the job start and end times in the Jobs tab and the job records (T12-P3).
@@ -187,6 +203,13 @@ These were out of scope for the map view (plan 4a).
 - Plan 5: `thrown_by_juliamag` (`app/worker.jl`) compares the first frame's file with `SOURCE_DIR` and `pathof(JuliaMagCore)`.
   In a packaged or relocated build the debug paths can differ.
   Then every JuliaMag `ArgumentError` would count as a bug.
+- The gdb import: the Oasis checks of research section 17 (`docs/research/geosoft-gdb-format.md`).
+  An XYZ export of AirMag.gdb, to compare every value.
+  Change Channel Fid on a copy, saved compressed and uncompressed, for the fiducial offsets.
+  The protect flag, with one channel unprotected.
+  Deselected lines, for the line selection byte.
+  A coordinate system set on AirMag's `x`, `y`.
+  Database Properties, to compare the compression, current pair and coordinate system with the import.
 
 ## Can wait
 

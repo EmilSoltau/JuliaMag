@@ -293,7 +293,7 @@ row(rows, key) = rows[findfirst(r -> r.key == key, rows)]
             refresh_now!(app)
             rows = tree_rows(app.snap, Set(["databases", db, "$db/lines", "$db/channels", "grids"]), "")
             menu(key) = [it.separator ? "-" : it.label for it in tree_menu(app, row(rows, key))]
-            @test menu("databases") == ["Import Geosoft XYZ...", "Import CSV and Text..."]
+            @test menu("databases") == ["Import Geosoft XYZ...", "Import CSV and Text...", "Import Geosoft Database..."]
             @test menu(db) == ["Show on Map", "-", "Statistics...", "Channel Math...", "Export Geosoft XYZ...",
                 "Export CSV...", "Export Parquet...", "-", "Rename...", "Remove from Project"]
             @test menu("$db/lines") == ["Select All Lines", "Select No Lines"]

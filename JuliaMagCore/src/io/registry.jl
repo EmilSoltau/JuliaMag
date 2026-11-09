@@ -3,11 +3,20 @@
 # It registers itself here, so new formats are added without touching the core
 # (spec 7, 8.4).
 
-"A problem in the input that did not stop the import. `file_line` counts from 1."
+"""
+A problem in the input that did not stop the import. `file_line` is the line
+of a text file it is about, counting from 1, and such a warning goes in the job
+report only. It is 0 for a warning about the item as a whole, which also goes
+on the job card. It is `REPORT_ONLY` for detail that goes in the report only,
+such as the list of lines a job card warning counts.
+"""
 struct ImportWarning
     file_line::Int
     message::String
 end
+
+"The `file_line` of an `ImportWarning` that is detail for the job report only."
+const REPORT_ONLY = -1
 
 """
 What an import made. `item` is the new or appended database item,

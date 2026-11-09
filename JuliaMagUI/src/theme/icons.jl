@@ -68,6 +68,7 @@ const CORE_ICONS = Dict(
     "channel" => "channel",
     "import.geosoft_xyz" => "import",
     "import.csv" => "fileCsv",
+    "import.geosoft_gdb" => "import",
     "import.geotiff" => "import",
     "import.ers" => "import",
     "import.grd" => "import",
