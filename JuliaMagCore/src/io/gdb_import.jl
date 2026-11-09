@@ -43,6 +43,48 @@ gdb_channels_text(names::Vector{String}) =
     length(names) == 1 ? "channel $(only(names))" : "channels $(join(names, ", "))"
 
 """
+    gdb_sampling_warnings!(log, names, on, nlines, kind)
+
+The warnings for the channels that were resampled (`kind = :resampled`), padded
+(`:padded`) or had no data (`:absent`) on some lines. `on[k]` lists the lines
+of channel `names[k]`. Channels with the same lines share one warning. It names
+the line when there is one, else it counts the lines of the `nlines` imported,
+and a `REPORT_ONLY` entry lists them. So a processed database gives a few
+warnings on the job card, not one per line (spec 6.3a).
+"""
+function gdb_sampling_warnings!(log::WarningLog, names::Vector{String}, on::Vector{Vector{String}},
+                                nlines::Int, kind::Symbol)
+    groups = Pair{Vector{String},Vector{String}}[]           # lines => channels
+    for (k, ls) in enumerate(on)
+        isempty(ls) && continue
+        g = findfirst(p -> p.first == ls, groups)
+        g === nothing ? push!(groups, ls => [names[k]]) : push!(groups[g].second, names[k])
+    end
+    for (ls, chans) in groups
+        one = length(chans) == 1
+        what, has = gdb_channels_text(chans), one ? "has" : "have"
+        single = length(ls) == 1
+        count = "$(length(ls)) of $nlines lines"
+        list = "lines $(join(ls, ", "))"
+        if kind == :resampled
+            warn!(log, 0, "$what $has another fiducial start or step than " *
+                          (single ? "line $(only(ls))" : "the line on $count") *
+                          "; $(one ? "it was" : "they were") resampled onto the line's")
+            single || warn!(log, REPORT_ONLY, "$what $(one ? "was" : "were") resampled on $list")
+        elseif kind == :padded
+            warn!(log, 0, "$what $has fewer rows than " * (single ? "line $(only(ls))" : "the line on $count") *
+                          "; the rest are missing")
+            single || warn!(log, REPORT_ONLY, "$what $has fewer rows than the line on $list")
+        else
+            warn!(log, 0, "$what $has no data on " * (single ? "line $(only(ls))" : count) *
+                          "; $(one ? "it is" : "they are") missing there")
+            single || warn!(log, REPORT_ONLY, "$what $has no data on $list")
+        end
+    end
+    return nothing
+end
+
+"""
 The header of the data blob of channel `p` at byte `offset`, checked against
 the channel: the same value type, and whole rows of its array width.
 """
@@ -157,6 +199,7 @@ function read_gdb_into!(db::LineDatabase, g::GdbFile, contents::GdbContents, crs
     rows_total, lines_total = 0, 0
     apps = open_appenders(db, names)
     heads = Vector{Union{Nothing,GdbBlobHeader}}(undef, length(cplans))
+    resampled, padded, absent = ([String[] for _ in cplans] for _ in 1:3)
     for lp in lplans
         for (k, cp) in enumerate(cplans)
             heads[k] = gdb_at(lp.name, names[k]) do
@@ -182,11 +225,11 @@ function read_gdb_into!(db::LineDatabase, g::GdbFile, contents::GdbContents, crs
         end
         l = start_line!(db, lp.id, lp.flight, lp.date)
         l.nrows, l.fid_start, l.fid_step = rows, main.start, main.step
-        resampled, padded, absent = String[], String[], String[]
+        lname = line_name(l.id)
         for (k, cp) in enumerate(cplans)
             b = heads[k]
             if b === nothing
-                push!(absent, names[k])
+                push!(absent[k], lname)
                 continue
             end
             is_cancelled(progress) && throw(ImportCancelled())
@@ -196,28 +239,21 @@ function read_gdb_into!(db::LineDatabase, g::GdbFile, contents::GdbContents, crs
                 gdb_append_blob!(apps[names[k]], bufs, cp.gtype, notes[k], from, main, rows, cp.arraylen)
             end
             if !same_sampling(from, main)
-                push!(resampled, names[k])
+                push!(resampled[k], lname)
             elseif b.count ÷ cp.arraylen < rows
-                push!(padded, names[k])
+                push!(padded[k], lname)
             end
             done += 1
             report(progress, done / total)
         end
-        lname = line_name(l.id)
-        isempty(resampled) || warn!(log, 0, "line $lname: $(gdb_channels_text(resampled)) " *
-            (length(resampled) == 1 ? "has" : "have") * " another fiducial start or step than the line " *
-            "(start $(main.start), step $(main.step)); " *
-            (length(resampled) == 1 ? "it was" : "they were") * " resampled onto it")
-        isempty(padded) || warn!(log, 0, "line $lname: $(gdb_channels_text(padded)) " *
-            (length(padded) == 1 ? "has" : "have") * " fewer rows than the line; the rest are missing")
-        isempty(absent) || warn!(log, 0, "line $lname: $(gdb_channels_text(absent)) " *
-            (length(absent) == 1 ? "has no data on this line; it is missing" :
-                                   "have no data on this line; they are missing"))
         rows_total += rows
         lines_total += 1
     end
     close_appenders!(apps)
     lines_total == 0 && throw(GdbError("$(basename(g.path)) has no line with data to import"))
+    for (on, kind) in ((resampled, :resampled), (padded, :padded), (absent, :absent))
+        gdb_sampling_warnings!(log, names, on, lines_total, kind)
+    end
 
     (g.cp1252 || any(n -> n.cp1252 > 0, notes)) &&
         warn!(log, 0, "some names or text values are not valid UTF-8; they were read as Windows-1252")
@@ -254,7 +290,9 @@ it to the database item `target` (`mode = :append`).
 - `progress` gets the fraction of blobs read and is checked for cancel once
   per blob. A cancelled import throws `ImportCancelled`.
 
-Changed and skipped items become warnings in the result. A file that is not a
+Changed and skipped items become warnings in the result. A resampled, short or
+absent channel gives one warning for all the lines it happens on, with a
+`REPORT_ONLY` entry that lists the lines (`gdb_sampling_warnings!`). A file that is not a
 Geosoft database, fails a layout check or holds a damaged data blob throws
 `GdbError`, and the import leaves no new item and no changed database behind.
 The import is recorded in the history as `"import.geosoft_gdb"`, unless

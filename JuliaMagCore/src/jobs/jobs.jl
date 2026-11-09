@@ -585,6 +585,7 @@ A warning about the item as a whole (`file_line == 0`, such as a coordinate
 system or a skipped line) goes on the job card through `job_warning!`, which
 also writes its one report line. A warning about one row of a text file stays
 in the report only, so a file with many bad rows does not flood the job card.
+So does detail marked `REPORT_ONLY`.
 """
 function import_work(s::Session, spec::ImporterSpec, path::String, settings::Dict{String,Any})
     return (progress::Progress, io::IO) -> begin
@@ -595,7 +596,13 @@ function import_work(s::Session, spec::ImporterSpec, path::String, settings::Dic
             println(io, spec.name, " import of ", path, ": ", r.summary)
         end
         for w in r.warnings
-            w.file_line > 0 ? println(io, "line ", w.file_line, ": ", w.message) : job_warning!(w.message)
+            if w.file_line > 0
+                println(io, "line ", w.file_line, ": ", w.message)
+            elseif w.file_line == REPORT_ONLY
+                println(io, w.message)
+            else
+                job_warning!(w.message)
+            end
         end
         return r.item === nothing ? ProjectItem[] : ProjectItem[r.item]
     end

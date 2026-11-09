@@ -327,9 +327,10 @@ The reader follows the research note, and it is tested against public files and 
 - The line's main sampling is the one most of its channels share.
   On a tie, it is the sampling of the first channel in display order.
 - A channel with another fiducial start or step is resampled onto the main sampling by linear interpolation, as Oasis does on XYZ export.
-  A warning names the line and the channels.
+  A warning names the channel.
 - Missing values are not interpolated across.
 - Channels with the same sampling but fewer rows are padded with missing values, with a warning.
+- A channel with no data on a line is missing there, with a warning.
 
 **Coordinate system.**
 
@@ -341,7 +342,11 @@ The reader follows the research note, and it is tested against public files and 
 
 **Warnings.**
 
-Every skipped or changed item gives a warning that names the line and the channel.
+Every skipped or changed item gives a warning that names the line or the channel it is about.
+A channel that is resampled, padded or missing on several lines gives one warning, not one per line.
+It counts the lines, such as "channel B has no data on 120 of 288 lines", and the job report lists them.
+Channels with the same lines share one warning.
+This keeps the job card short for a processed database, where a channel is often shifted or missing on many lines.
 
 ### 6.4 CSV and other text
 

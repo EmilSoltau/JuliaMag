@@ -172,11 +172,42 @@ job_db(s, j) = database(s.project, only(j.outputs))
             @test isequal(rd(l20, "C"), [collect(1.0:10.0); fill(NaN, 10)])
             @test db.rows_written == 30
             w = job_warnings(j)
-            @test w == ["line L10: channels B, C have another fiducial start or step than the line " *
-                        "(start 0.0, step 1.0); they were resampled onto it",
-                        "line L20: channel C has fewer rows than the line; the rest are missing",
-                        "line L20: channel B has no data on this line; it is missing",
-                        "line L30 has no data; skipped"]
+            @test w == ["line L30 has no data; skipped",
+                        "channels B, C have another fiducial start or step than line L10; " *
+                        "they were resampled onto the line's",
+                        "channel C has fewer rows than line L20; the rest are missing",
+                        "channel B has no data on line L20; it is missing there"]
+            close_session!(s)
+        end
+    end
+
+    @testset "sampling warnings: one per channel, the lines in the report" begin
+        mktempdir() do dir
+            # Four lines. S is shifted on every line; D and E have no data on L10 to L30;
+            # P is short on L20 and L40.
+            chans = [TestChannel(name = n) for n in ("A", "S", "D", "E", "P")]
+            lines = [TestLine(name = "L$(10k)", number = 10k) for k in 1:4]
+            function blob(l, c)
+                c == 1 && return TestBlob(values = collect(0.0:9.0), fid_start = 0.5)
+                c in (2, 3) && l < 3 && return nothing
+                c == 4 && l in (1, 3) && return TestBlob(values = collect(0.0:4.0))
+                return TestBlob(values = collect(0.0:9.0))
+            end
+            path = write_test_gdb(joinpath(dir, "many.gdb"); channels = chans, lines = lines, blob = blob)
+            s = new_session(joinpath(dir, "p"), "p")
+            j = gdb_job(s, path)
+            @test status(j) == JOB_DONE
+            @test job_warnings(j) == [
+                "channel S has another fiducial start or step than the line on 4 of 4 lines; " *
+                "it was resampled onto the line's",
+                "channel P has fewer rows than the line on 2 of 4 lines; the rest are missing",
+                "channels D, E have no data on 3 of 4 lines; they are missing there"]
+            # The lines are listed in the report only.
+            rep = report_text(j)
+            @test occursin("channel S was resampled on lines L10, L20, L30, L40", rep)
+            @test occursin("channel P has fewer rows than the line on lines L20, L40", rep)
+            @test occursin("channels D, E have no data on lines L10, L20, L30", rep)
+            @test !any(w -> occursin("on lines", w), job_warnings(j))
             close_session!(s)
         end
     end
@@ -199,8 +230,8 @@ job_db(s, j) = database(s.project, only(j.outputs))
             @test line_name(l.id) == "L10" && l.nrows == 10 && l.fid_start == 0.5 && l.fid_step == 1.0
             @test collect(read_channel(db, l.id, "C")) == collect(1.0:10.0)
             @test all(isnan, read_channel(db, l.id, "A"))
-            @test job_warnings(j) == ["line L10: channels A, B have no data on this line; they are missing",
-                                      "line L20 has no data; skipped"]
+            @test job_warnings(j) == ["line L20 has no data; skipped",
+                                      "channels A, B have no data on line L10; they are missing there"]
             close_session!(s)
         end
     end
